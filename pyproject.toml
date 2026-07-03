@@ -1,0 +1,24 @@
+[project]
+name = "Strategy_Auto_Trader"
+version = "0.1.0"
+description = "Automated trading system with Markov regime detection and optional HMM layer"
+requires-python = "==3.12.*"
+dependencies = [
+    "yfinance>=0.2",
+    "numpy>=1.26",
+    "pandas>=2.0",
+    "scikit-learn>=1.4",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+hmm = ["hmmlearn>=0.3"]
+ibkr = ["ib_insync>=0.9"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["Strategy_Auto_Trader*"]
