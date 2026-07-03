@@ -268,7 +268,7 @@ def _build_exit_indicators_section_html(exit_ind: dict | None) -> str:
 
     return f"""
   <!-- exit indicators -->
-  {_section("Exit indicators <small style='color:#888;font-weight:normal'>(advisory only — not used in buy/sell)</small>",
+  {_section("Exit indicators",
   f'''<div style="display:flex;gap:16px;flex-wrap:wrap">
     <div style="flex:1;min-width:280px">
       <table style="width:100%;border-collapse:collapse;background:#1e2130;border-radius:8px;overflow:hidden">

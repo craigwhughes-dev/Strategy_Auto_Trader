@@ -34,6 +34,7 @@ todo.md
 
 # Local config / editor files
 .env
+.env.local
 .claude/
 .vscode/
 .idea/

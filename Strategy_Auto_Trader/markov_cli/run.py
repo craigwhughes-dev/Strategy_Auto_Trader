@@ -19,7 +19,9 @@ import pandas as pd
 from ..quant_hmm.quant_engine import fetch_hourly
 from ..quant_hmm.consolidated_engine import consolidated_backtest
 from ..core.quality_gate import _apply_quality_gate  # noqa: F401 — available for custom gate logic
+from ..core.momentum import composite_signal, exit_indicators, momentum_signals
 from ..output.charting import plot_backtest
+from ..output.report import write_daily_summary
 from ..plugins.kelly_sizer import FixedSizer, KellySizer
 from ..plugins.quality_gate import NullQualityGate, QualityGatePlugin
 from ..plugins.context_adjuster import NullAdjuster, SentimentAdjuster
@@ -296,6 +298,118 @@ def main(argv: list[str] | None = None) -> int:
                       out_path=run_dir / "backtest_chart.png")
     except Exception as exc:
         print(f"  Chart skipped: {exc}")
+
+    # Generate detailed HTML daily summary report
+    try:
+        from datetime import date
+        detail = bt.get("detail", pd.DataFrame()).copy()
+
+        # Rename/add missing columns expected by report.py
+        if "signal_score" in detail.columns and "score" not in detail.columns:
+            detail["score"] = detail["signal_score"]
+        if "effective_stop" not in detail.columns:
+            detail["effective_stop"] = detail.get("stop_level", pd.NA)
+
+        # Extract HMM info if available
+        hmm_info = bt.get("hmm", None)
+
+        # Get signal and momentum data from last bar
+        if not detail.empty:
+            last_row = detail.iloc[-1]
+
+            # Extract values safely
+            close_val = float(last_row.get("close", 0)) if "close" in last_row.index else 0.0
+            regime_signal_val = float(last_row.get("regime_signal", 0)) if "regime_signal" in last_row.index else 0.0
+            p_bull = float(last_row.get("p_bull_smooth", 0.5)) if "p_bull_smooth" in last_row.index else 0.5
+
+            # Derive regime from p_bull_smooth
+            if p_bull > 0.6:
+                regime_val = "Bull"
+                hmm_state = 2
+            elif p_bull < 0.4:
+                regime_val = "Bear"
+                hmm_state = 0
+            else:
+                regime_val = "Sideways"
+                hmm_state = 1
+
+            # Compute momentum signals (RSI, SMAs, volume)
+            mom = momentum_signals(close_series)
+
+            # Compute ALL signal votes using the composite_signal function
+            sig_result = composite_signal(
+                markov_signal=regime_signal_val,
+                mom=mom,
+                sell_threshold=args.sell_threshold,
+                hmm_state=hmm_state,
+                buy_threshold=args.buy_threshold,
+            )
+
+            sig = {
+                "flag": cur_flag,
+                "score": sig_result["score"],
+                "max_score": sig_result["max_score"],
+                "votes": sig_result["votes"],  # All votes: markov, rsi, trend, sma200, volume, hmm
+            }
+
+            # Compute exit indicators (MACD, RSI reversals, Bollinger, ATR, consolidation)
+            exit_ind = exit_indicators(close_series, rsi=None)
+
+            # Stationary distribution and transition matrix from HMM
+            if hmm_info:
+                stationary = hmm_info.get("stationary_distribution", {})
+                transition_matrix = hmm_info.get("transition_matrix", None)
+                state_names = hmm_info.get("regime_names", ["Bear", "Sideways", "Bull"])
+            else:
+                # Fallback if HMM info is missing
+                stationary = {"Bear": 0.2, "Sideways": 0.3, "Bull": 0.5}
+                transition_matrix = np.array([[0.8, 0.15, 0.05], [0.1, 0.8, 0.1], [0.05, 0.15, 0.8]])
+                state_names = ["Bear", "Sideways", "Bull"]
+
+            # Update bt with detail that has the expected columns
+            bt_for_report = dict(bt)
+            bt_for_report["detail"] = detail
+
+            write_daily_summary(
+                ticker=args.ticker,
+                company_name=company_name,
+                company_sector=company_sector,
+                run_date=date.today(),
+                close=close_series,
+                current_state_name=regime_val,
+                markov_sig=regime_signal_val,
+                sig=sig,
+                mom=mom,
+                bt=bt_for_report,
+                stationary=stationary,
+                transition_matrix=transition_matrix,
+                state_names=state_names,
+                eff_stop_today=args.vol_stop_mult * 0.05,
+                vol_stop_mult=args.vol_stop_mult,
+                vol_stop_window=args.vol_stop_window,
+                trailing_stop=args.trailing_stop,
+                hmm=hmm_info,
+                exit_ind=exit_ind,
+                out_path=run_dir / "daily_summary.html",
+            )
+    except Exception as exc:
+        print(f"  Daily summary report skipped: {exc}")
+
+    # Send email if BUY or SELL signal
+    try:
+        if cur_flag in ("BUY", "SELL"):
+            import os
+            if os.environ.get("SMTP_PASSWORD"):
+                from ..output.emailer import send_trade_alert
+                send_trade_alert({
+                    "ticker": args.ticker,
+                    "current_signal": cur_flag,
+                    "close": float(last_row.get("close", 0) or 0) if not detail.empty else 0,
+                    "score": float(last_row.get("signal_score", 0) or 0) if not detail.empty else 0,
+                    "run_dir": str(run_dir),
+                })
+    except Exception as exc:
+        print(f"  Email alert skipped: {exc}")
 
     elapsed = time.time() - t0
     print(f"\nIntermediate data written to: {run_dir}  ({elapsed:.0f}s)")
