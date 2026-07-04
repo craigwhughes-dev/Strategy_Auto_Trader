@@ -35,12 +35,12 @@ def _watchlist_sample(n: int = 5) -> list[str]:
 
 
 def _fetch_hourly(ticker: str, period: str = "730d") -> pd.DataFrame | None:
-    from markov_hedge_fund_method.quant_hmm.quant_engine import fetch_hourly
+    from Strategy_Auto_Trader.quant_hmm.quant_engine import fetch_hourly
     return fetch_hourly(ticker, period=period)
 
 
 def _run_consolidated_engine(df: pd.DataFrame) -> dict:
-    from markov_hedge_fund_method.quant_hmm.consolidated_engine import consolidated_backtest
+    from Strategy_Auto_Trader.quant_hmm.consolidated_engine import consolidated_backtest
     result = consolidated_backtest(
         df,
         entry_prob=0.65, exit_prob=0.40,

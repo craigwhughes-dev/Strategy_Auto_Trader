@@ -1,4 +1,4 @@
-# Markov Hedge Fund Method — User Guide
+# Strategy Auto-Trader — User Guide
 
 ## What It Does
 
@@ -27,37 +27,37 @@ Weighted score ≥ buy_threshold → BUY. ≤ sell_threshold → SELL. Otherwise
 ### Single ticker
 
 ```
-cd ~/.claude/skills/markov-hedge-fund-method
-uv run python -m markov_hedge_fund_method.markov_cli.run --ticker <SYMBOL> [options]
+cd ~/.claude/skills/Strategy_Auto_Trader
+uv run python -m Strategy_Auto_Trader.markov_cli.run --ticker <SYMBOL> [options]
 ```
 
 **Quick examples:**
 ```bash
 # ASTS, default settings (hourly data, 730-day lookback)
-uv run python -m markov_hedge_fund_method.markov_cli.run --ticker ASTS
+uv run python -m Strategy_Auto_Trader.markov_cli.run --ticker ASTS
 
 # TSLA, tighter stops, no Kelly (fixed 10% allocation)
-uv run python -m markov_hedge_fund_method.markov_cli.run --ticker TSLA --stop-loss-pct 0.03 --take-profit-pct 0.09 --no-kelly
+uv run python -m Strategy_Auto_Trader.markov_cli.run --ticker TSLA --stop-loss-pct 0.03 --take-profit-pct 0.09 --no-kelly
 
 # SPY, RSI reversal exits enabled, longer min-hold
-uv run python -m markov_hedge_fund_method.markov_cli.run --ticker SPY --exit-rsi-reversal --min-hold-bars 72
+uv run python -m Strategy_Auto_Trader.markov_cli.run --ticker SPY --exit-rsi-reversal --min-hold-bars 72
 ```
 
 ### Batch (multiple tickers from watchlist)
 
 ```bash
 # Run all tickers in the watchlist (with email alerts if SMTP_PASSWORD is set)
-uv run python -m markov_hedge_fund_method.markov_cli.batch
+uv run python -m Strategy_Auto_Trader.markov_cli.batch
 
 # FTSE only / S&P only
-uv run python -m markov_hedge_fund_method.markov_cli.batch --watchlist config/watchlist_ftse.json
-uv run python -m markov_hedge_fund_method.markov_cli.batch --watchlist config/watchlist_sp500.json
+uv run python -m Strategy_Auto_Trader.markov_cli.batch --watchlist config/watchlist_ftse.json
+uv run python -m Strategy_Auto_Trader.markov_cli.batch --watchlist config/watchlist_sp500.json
 
 # Send daily roundup and portfolio status emails explicitly
-uv run python -m markov_hedge_fund_method.markov_cli.batch --roundup --portfolio-status
+uv run python -m Strategy_Auto_Trader.markov_cli.batch --roundup --portfolio-status
 
 # Skip emails completely
-uv run python -m markov_hedge_fund_method.markov_cli.batch --no-email
+uv run python -m Strategy_Auto_Trader.markov_cli.batch --no-email
 
 > Note: trade alert emails are still only sent for `BUY` and `SELL` events. `HOLD` signals do not generate direct alerts, and SELL alerts are only sent when a prior BUY has been recorded for that ticker since the reference date.
 ```
@@ -66,7 +66,7 @@ uv run python -m markov_hedge_fund_method.markov_cli.batch --no-email
 
 ```bash
 # Screen all S&P 500 + FTSE 100 tickers (no HMM, ~3 minutes)
-uv run python -m markov_hedge_fund_method.markov_cli.screen
+uv run python -m Strategy_Auto_Trader.markov_cli.screen
 ```
 
 Outputs `screen_winners.json` with tickers where the strategy is profitable or outperforms buy-and-hold.
@@ -76,7 +76,7 @@ Outputs `screen_winners.json` with tickers where the strategy is profitable or o
 ```bash
 # Stage 1: lightweight backtest on every ticker (no HMM, no chart).
 # Stage 2: full engine (HMM, chart, email) only for tickers that passed Stage 1.
-uv run python -m markov_hedge_fund_method.markov_cli.batch --fast-screen
+uv run python -m Strategy_Auto_Trader.markov_cli.batch --fast-screen
 ```
 
 Without `--fast-screen` the batch runs the full engine on every ticker.
@@ -90,7 +90,7 @@ is profitable or beats buy-and-hold, cutting wasted runtime on weak candidates.
 `compare_exits.py` is a fixed-console tool for comparing alternate exit rules across a small test universe.
 
 ```bash
-uv run python -m markov_hedge_fund_method.markov_cli.compare_exits
+uv run python -m Strategy_Auto_Trader.markov_cli.compare_exits
 ```
 
 What it does:
@@ -108,7 +108,7 @@ Note: there are no CLI arguments for `compare_exits.py` today; change the strate
 `trade_report.py` generates an Excel trade report from a watchlist JSON and is useful for end-of-run analysis without email alerting.
 
 ```bash
-uv run python -m markov_hedge_fund_method.markov_cli.trade_report
+uv run python -m Strategy_Auto_Trader.markov_cli.trade_report
 ```
 
 Key options:
@@ -357,12 +357,12 @@ Two Windows Task Scheduler tasks run the batch automatically:
 
 | Task | Runs at (UK) | Watchlist | Why this time |
 |------|-------------|-----------|---------------|
-| `MarkovHedgeFund-FTSE` | 5:00 PM | `config/watchlist_ftse.json` | After LSE close (4:30 PM) |
-| `MarkovHedgeFund-SP500` | 9:30 PM | `config/watchlist_sp500.json` | After NYSE close (9:00 PM UK) |
+| `StrategyAutoTrader-FTSE` | 5:00 PM | `config/watchlist_ftse.json` | After LSE close (4:30 PM) |
+| `StrategyAutoTrader-SP500` | 9:30 PM | `config/watchlist_sp500.json` | After NYSE close (9:00 PM UK) |
 
 Logs are written to `logs/ftse_YYYYMMDD.log` and `logs/sp500_YYYYMMDD.log`.
 
-Manage via Task Scheduler (`taskschd.msc`) — look for `MarkovHedgeFund-FTSE` and `MarkovHedgeFund-SP500`.
+Manage via Task Scheduler (`taskschd.msc`) — look for `StrategyAutoTrader-FTSE` and `StrategyAutoTrader-SP500`.
 
 ---
 
@@ -422,13 +422,13 @@ The execution engine (`markov_cli/execute.py`) reads the latest signal for each 
 
 ```bash
 # Safe dry run — NullBroker, no real orders, no state changes
-uv run python -m markov_hedge_fund_method.markov_cli.execute --dry-run
+uv run python -m Strategy_Auto_Trader.markov_cli.execute --dry-run
 
 # Paper account — TWS must be open on localhost:7497
-uv run python -m markov_hedge_fund_method.markov_cli.execute
+uv run python -m Strategy_Auto_Trader.markov_cli.execute
 
 # Custom watchlist or data directory
-uv run python -m markov_hedge_fund_method.markov_cli.execute --watchlist config/watchlist_sp500.json
+uv run python -m Strategy_Auto_Trader.markov_cli.execute --watchlist config/watchlist_sp500.json
 ```
 
 Always run `--dry-run` first to confirm signals look right before submitting real (paper) orders.
@@ -561,29 +561,29 @@ The HMM is fit on hourly log returns (3-state Gaussian, expanding window, refit 
 ### Single ticker
 
 ```bash
-uv run python -m markov_hedge_fund_method.quant_hmm.quant_run --ticker <SYMBOL> [options]
+uv run python -m Strategy_Auto_Trader.quant_hmm.quant_run --ticker <SYMBOL> [options]
 ```
 
 ```bash
 # HSBA.L with default settings
-uv run python -m markov_hedge_fund_method.quant_hmm.quant_run --ticker HSBA.L
+uv run python -m Strategy_Auto_Trader.quant_hmm.quant_run --ticker HSBA.L
 
 # Tighter entry, no Kelly sizing, no sentiment
-uv run python -m markov_hedge_fund_method.quant_hmm.quant_run --ticker CSCO --entry-prob 0.70 --no-kelly --no-sentiment
+uv run python -m Strategy_Auto_Trader.quant_hmm.quant_run --ticker CSCO --entry-prob 0.70 --no-kelly --no-sentiment
 ```
 
 ### Trade report (multiple tickers from watchlist, Excel output)
 
 ```bash
-uv run python -m markov_hedge_fund_method.quant_hmm.quant_trade_report [options]
+uv run python -m Strategy_Auto_Trader.quant_hmm.quant_trade_report [options]
 ```
 
 ```bash
 # FTSE watchlist (default), trades from 2026-01-12 onward
-uv run python -m markov_hedge_fund_method.quant_hmm.quant_trade_report
+uv run python -m Strategy_Auto_Trader.quant_hmm.quant_trade_report
 
 # S&P watchlist, skip the volatility pre-screen
-uv run python -m markov_hedge_fund_method.quant_hmm.quant_trade_report --watchlist config/watchlist_sp500.json --no-vol-screen
+uv run python -m Strategy_Auto_Trader.quant_hmm.quant_trade_report --watchlist config/watchlist_sp500.json --no-vol-screen
 ```
 
 ### CLI Options
@@ -648,8 +648,8 @@ Tests cover: exits module (_effective_stop_for_bar, _check_exit_conditions with 
 ## Project Structure
 
 ```
-markov-hedge-fund-method/
-  markov_hedge_fund_method/
+Strategy_Auto_Trader/
+  Strategy_Auto_Trader/
     core/                    # Shared signal/exit logic
       momentum.py                 # RSI, SMA, composite signal, Parabolic SAR
       quality_gate.py             # Veto layer (weak-buy veto, adverse-exit)

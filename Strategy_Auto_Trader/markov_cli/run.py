@@ -50,7 +50,7 @@ def _fetch_company_info(ticker: str) -> tuple[str, str]:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="markov-hedge-fund-method")
+    parser = argparse.ArgumentParser(prog="strategy-auto-trader")
     parser.add_argument("--ticker", default="SPY")
 
     # HMM + composite-signal thresholds
@@ -196,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
 
-    print(f"\nmarkov-hedge-fund-method (consolidated engine) — ticker={args.ticker}")
+    print(f"\nstrategy-auto-trader (consolidated engine) — ticker={args.ticker}")
 
     run_dir = _make_run_dir(args.ticker)
     print(f"  run output directory: {run_dir}")

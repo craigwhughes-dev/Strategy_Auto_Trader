@@ -16,8 +16,8 @@ sys.path.insert(0, str(ROOT))
 
 import pandas as pd
 
-from markov_hedge_fund_method.quant_hmm.quant_engine import fetch_hourly
-from markov_hedge_fund_method.quant_hmm.consolidated_engine import consolidated_backtest
+from Strategy_Auto_Trader.quant_hmm.quant_engine import fetch_hourly
+from Strategy_Auto_Trader.quant_hmm.consolidated_engine import consolidated_backtest
 
 # ---------------------------------------------------------------------------
 # Configuration
