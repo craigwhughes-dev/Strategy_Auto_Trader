@@ -47,6 +47,22 @@ def exec_state():
     }
 
 
+def test_load_watchlist_root_relative_path():
+    """Config watchlist paths like "config/watchlist_ftse.json" resolve from repo root, not config/config/."""
+    wl = overnight_scope.load_watchlist("config/watchlist_ftse.json")
+    assert wl.get("tickers"), "expected tickers in config/watchlist_ftse.json"
+
+
+def test_load_watchlist_bare_filename_falls_back_to_config_dir():
+    wl = overnight_scope.load_watchlist("watchlist_ftse.json")
+    assert wl.get("tickers")
+
+
+def test_load_watchlist_missing_file_raises():
+    with pytest.raises(FileNotFoundError):
+        overnight_scope.load_watchlist("config/does_not_exist.json")
+
+
 def test_screen_market_vol_screen_excluded():
     """Ticker fails vol screen and has no open position — excluded."""
     market_cfg = {

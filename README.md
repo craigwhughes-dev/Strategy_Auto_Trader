@@ -78,6 +78,9 @@ This repo doubles as a Claude Code skill: open it in Claude Code and drive the w
 - *"Do a dry-run of the execution engine and tell me what orders it would place and why."*
 - *"Check the daemon log and execution state — did it trade today, and are the open positions consistent with the signals?"*
 
+**Auto trading daemon**
+- *"start the daemon for ftse100. use the optimised strategy. unlimited buy and sell. 10k original stake. record all results in a clean journal. use ibkr for paper trades"*
+
 ## Testing
 
 ```bash

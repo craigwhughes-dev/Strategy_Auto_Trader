@@ -29,8 +29,10 @@ def load_config() -> dict:
 
 
 def load_watchlist(watchlist_path: str) -> dict:
-    """Load a watchlist JSON file."""
-    path = CONFIG_DIR / watchlist_path
+    """Load a watchlist JSON file (path relative to repo root, e.g. "config/watchlist_ftse.json")."""
+    path = ROOT / watchlist_path
+    if not path.exists():
+        path = CONFIG_DIR / watchlist_path
     with open(path, encoding="utf-8") as f:
         return json.load(f)
 
