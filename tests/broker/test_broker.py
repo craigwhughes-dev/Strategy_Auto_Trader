@@ -27,6 +27,14 @@ class TestBroker:
         assert fill.quantity == 10
         assert fill.action == "BUY"
 
+    def test_null_broker_set_prices_updates_fills(self):
+        from Strategy_Auto_Trader.broker.null_adapter import NullBroker
+        from Strategy_Auto_Trader.broker.types import OrderRequest
+        broker = NullBroker(prices={})
+        broker.set_prices({"AAPL": 210.5})
+        fill = broker.place_order(OrderRequest("AAPL", "BUY", 3))
+        assert fill.fill_price == pytest.approx(210.5)
+
     def test_null_broker_tracks_positions(self):
         from Strategy_Auto_Trader.broker.null_adapter import NullBroker
         from Strategy_Auto_Trader.broker.types import OrderRequest
@@ -132,6 +140,26 @@ class TestBroker:
         old_time = time.time() - 48 * 3600
         os.utime(run_dir, (old_time, old_time))
         assert read_latest_signal("AAPL", tmp_path) is None
+
+    # -- IBKRAdapter ------------------------------------------------------------
+
+    def test_ibkr_adapter_connect_passes_timeout(self):
+        pytest.importorskip("ib_insync")
+        from unittest.mock import patch, MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        adapter = IBKRAdapter(port=4002, client_id=7, connect_timeout=12.0)
+        with patch("ib_insync.IB") as MockIB:
+            adapter.connect()
+        MockIB.return_value.connect.assert_called_once_with(
+            "127.0.0.1", 4002, clientId=7, timeout=12.0)
+
+    def test_ibkr_adapter_managed_accounts(self):
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+        adapter._ib.managedAccounts.return_value = ("DU123456",)
+        assert adapter.managed_accounts() == ["DU123456"]
 
     # -- execute.py integration -----------------------------------------------
 
@@ -278,6 +306,7 @@ class TestBroker:
         }), encoding="utf-8")
         with patch("Strategy_Auto_Trader.broker.ibkr_adapter.IBKRAdapter") as MockAdapter:
             mock_broker = MagicMock()
+            mock_broker.managed_accounts.return_value = ["DU123456"]
             MockAdapter.return_value = mock_broker
             from Strategy_Auto_Trader.broker.types import FillResult
             def fill_side_effect(req):
@@ -334,6 +363,7 @@ class TestBroker:
         }), encoding="utf-8")
         with patch("Strategy_Auto_Trader.broker.ibkr_adapter.IBKRAdapter") as MockAdapter:
             mock_broker = MagicMock()
+            mock_broker.managed_accounts.return_value = ["DU123456"]
             MockAdapter.return_value = mock_broker
             from Strategy_Auto_Trader.broker.types import FillResult
             def fill_side_effect(req):
@@ -348,6 +378,39 @@ class TestBroker:
             state = json.loads(state_file.read_text())
             sells = [t for t in state["trade_log"] if t["action"] == "SELL"]
             assert len(sells) == 5
+
+    def test_execute_main_refuses_real_run_when_self_check_fails(self, tmp_path):
+        from unittest.mock import patch
+        from Strategy_Auto_Trader.core.self_check import SelfCheckError
+        from Strategy_Auto_Trader.markov_cli.execute import main
+        wl = tmp_path / "watchlist.json"
+        self._make_watchlist(wl, ["AAPL"])
+        with patch("Strategy_Auto_Trader.core.self_check.run_startup_checks",
+                   side_effect=SelfCheckError("ib_insync broken")):
+            rc = main([
+                "--data-dir", str(tmp_path),
+                "--watchlist", str(wl),
+                "--state-dir", str(tmp_path),
+            ])
+        assert rc == 1
+        assert not (tmp_path / "execution_state.json").exists()
+
+    def test_execute_main_dry_run_skips_broker_self_check(self, tmp_path):
+        from unittest.mock import patch
+        from Strategy_Auto_Trader.markov_cli.execute import main
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        wl = tmp_path / "watchlist.json"
+        self._make_watchlist(wl, [])
+        with patch("Strategy_Auto_Trader.core.self_check.run_startup_checks",
+                   side_effect=AssertionError("must not run in dry-run")):
+            rc = main([
+                "--dry-run",
+                "--data-dir", str(data_dir),
+                "--watchlist", str(wl),
+                "--state-dir", str(tmp_path),
+            ])
+        assert rc == 0
 
     # -- BVA: PortfolioManager.compute_quantity() -----
 

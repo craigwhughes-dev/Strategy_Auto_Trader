@@ -10,8 +10,12 @@ Core principles:
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
+
+_log = logging.getLogger(__name__)
 
 
 def fetch_hourly(ticker: str, period: str = "730d") -> pd.DataFrame | None:
@@ -35,11 +39,19 @@ def fit_hmm_expanding(
     n_seeds: int = 5,
     n_iter: int = 100,
 ) -> tuple | None:
-    """Fit a Gaussian HMM and return (model, state_order)."""
+    """Fit a Gaussian HMM and return (model, state_order).
+
+    Returns None only for data-level failure (no seed converged). An
+    unusable hmmlearn is an environment fault and raises immediately —
+    a broken install must never degrade into "no HMM signal" silently.
+    """
     try:
         from hmmlearn import hmm
-    except ImportError:
-        return None
+    except ImportError as exc:
+        raise RuntimeError(
+            "hmmlearn is missing or broken — HMM regime fits cannot run "
+            f"({exc}). Reinstall with: uv sync --extra hmm"
+        ) from exc
 
     X = returns.reshape(-1, 1)
     best_model = None
@@ -60,6 +72,8 @@ def fit_hmm_expanding(
             best_model = model
 
     if best_model is None:
+        _log.warning("HMM fit failed for all %d seeds (%d bars)",
+                     n_seeds, len(returns))
         return None
 
     means = np.array([best_model.means_[k][0] for k in range(n_components)])

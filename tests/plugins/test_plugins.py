@@ -35,6 +35,44 @@ class TestPlugins:
                         peak_price_since_entry=110.0, days_in_trade=5)
         assert er.exit_hit is True
 
+    # -- HMMRegimeModel.refit failure visibility -------------------------------
+
+    def test_refit_failure_warns_and_keeps_previous_model(self, caplog):
+        import logging
+        from unittest import mock
+        from Strategy_Auto_Trader.plugins import hmm_regime
+        from Strategy_Auto_Trader.plugins.hmm_regime import HMMRegimeModel
+
+        m = HMMRegimeModel()
+        sentinel_model, sentinel_order = object(), np.array([0, 1, 2])
+        m._model, m._order = sentinel_model, sentinel_order
+
+        with mock.patch.object(hmm_regime, "fit_hmm_expanding",
+                               return_value=None), \
+             caplog.at_level(logging.WARNING,
+                             logger="Strategy_Auto_Trader.plugins.hmm_regime"):
+            m.refit(np.zeros(100))
+
+        assert m._model is sentinel_model
+        assert any("keeping previous model" in r.message
+                   for r in caplog.records)
+
+    def test_refit_failure_warns_when_never_fitted(self, caplog):
+        import logging
+        from unittest import mock
+        from Strategy_Auto_Trader.plugins import hmm_regime
+        from Strategy_Auto_Trader.plugins.hmm_regime import HMMRegimeModel
+
+        m = HMMRegimeModel()
+        with mock.patch.object(hmm_regime, "fit_hmm_expanding",
+                               return_value=None), \
+             caplog.at_level(logging.WARNING,
+                             logger="Strategy_Auto_Trader.plugins.hmm_regime"):
+            m.refit(np.zeros(100))
+
+        assert m._model is None
+        assert any("remains unfitted" in r.message for r in caplog.records)
+
     # -- Protocol conformance -------------------------------------------------
 
     def test_hmm_regime_satisfies_protocol(self):

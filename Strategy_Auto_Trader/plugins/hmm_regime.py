@@ -13,7 +13,11 @@ without holding this state itself.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
+
+_log = logging.getLogger(__name__)
 
 from ..quant_hmm.quant_engine import (
     _forward_step_incremental,
@@ -64,6 +68,13 @@ class HMMRegimeModel:
         if result is not None:
             self._model, self._order = result
             self._log_alpha = None   # must reset cache after any refit
+        elif self._model is not None:
+            _log.warning("HMM refit produced no model (%d bars); "
+                         "keeping previous model", len(returns))
+        else:
+            _log.warning("HMM refit produced no model (%d bars); "
+                         "model remains unfitted — bars will yield no "
+                         "regime signal until a fit succeeds", len(returns))
 
     def step(self, returns: np.ndarray, t: int) -> RegimeState | None:
         """Advance the forward filter by one bar.  Returns None if the

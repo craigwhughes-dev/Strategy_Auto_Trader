@@ -275,6 +275,141 @@ class TestConsolidatedEngine:
         if len(sells) > 0:
             assert any("trailing_stop" in str(r) for r in sells["sell_reason"].values)
 
+    # -- skip_unused_indicators -------------------------------------------
+
+    def test_precompute_rsi_disabled_series_none(self):
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import _precompute_hourly_vote_series
+        close = pd.Series(np.linspace(100, 120, 300))
+        pre = _precompute_hourly_vote_series(close, None, rsi_enabled=False)
+        assert pre["rsi_full"] is None
+        assert pre["rsi_x_above_50"] is None
+        assert pre["rsi_x_below_40"] is None
+
+    def test_precompute_rsi_disabled_exit_indicators_still_computed(self):
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import _precompute_hourly_vote_series
+        close = pd.Series(np.linspace(100, 120, 300))
+        pre = _precompute_hourly_vote_series(
+            close, None, rsi_enabled=False, exit_on_rsi_reversal=True,
+        )
+        assert pre["rsi_full"] is None
+        assert pre["rsi_ob_exit"] is not None
+        assert pre["rsi_mom_loss"] is not None
+
+    def test_build_mom_snap_omits_rsi_keys_when_disabled(self):
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import (
+            _precompute_hourly_vote_series, _build_mom_snap,
+        )
+        close = pd.Series(np.linspace(100, 120, 300))
+        pre = _precompute_hourly_vote_series(close, None, rsi_enabled=False)
+        snap = _build_mom_snap(250, float(close.iloc[250]), pre)
+        assert "cur_rsi" not in snap
+        assert "recent_cross_above_50" not in snap
+        assert "recent_cross_below_40" not in snap
+        assert "above_sma20" in snap and "above_sma50" in snap
+
+    @staticmethod
+    def _spy_regime_model():
+        from Strategy_Auto_Trader.plugins.types import RegimeState
+
+        class SpyRegimeModel:
+            def __init__(self):
+                self.refit_calls = 0
+                self.step_calls = 0
+
+            def needs_refit(self, t):
+                return self.refit_calls == 0
+
+            def refit(self, returns):
+                self.refit_calls += 1
+
+            def step(self, returns, t):
+                self.step_calls += 1
+                return RegimeState(p_bull=0.8, p_bear=0.1, p_bull_smooth=0.8,
+                                   regime_signal=0.7, hmm_vote=2)
+
+            def reset(self):
+                pass
+
+        return SpyRegimeModel()
+
+    def test_consolidated_hmm_weight_zero_skips_regime_model(self):
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import consolidated_backtest
+        spy = self._spy_regime_model()
+        df = _hourly_df(np.linspace(100, 130, 200))
+        result = consolidated_backtest(
+            df, regime_model=spy, weights={"hmm": 0.0},
+            min_train_bars=50, hmm_refit_bars=50, regime_smooth=1,
+        )
+        assert spy.step_calls == 0
+        assert spy.refit_calls == 0
+        assert result["n_bars"] > 0
+        assert result["detail"]["regime_signal"].isna().all()
+        assert result["detail"]["hmm_vote"].isna().all()
+
+    def test_consolidated_hmm_weight_zero_opt_out_still_runs_model(self):
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import consolidated_backtest
+        spy = self._spy_regime_model()
+        df = _hourly_df(np.linspace(100, 130, 200))
+        consolidated_backtest(
+            df, regime_model=spy, weights={"hmm": 0.0},
+            skip_unused_indicators=False,
+            min_train_bars=50, hmm_refit_bars=50, regime_smooth=1,
+        )
+        assert spy.step_calls == 150
+        assert spy.refit_calls >= 1
+
+    def test_consolidated_nonzero_hmm_weight_runs_model(self):
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import consolidated_backtest
+        spy = self._spy_regime_model()
+        df = _hourly_df(np.linspace(100, 130, 200))
+        consolidated_backtest(
+            df, regime_model=spy,
+            min_train_bars=50, hmm_refit_bars=50, regime_smooth=1,
+        )
+        assert spy.step_calls == 150
+
+    def test_consolidated_entry_strategy_weights_drive_skip(self):
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import consolidated_backtest
+        from Strategy_Auto_Trader.strategy.default import DefaultEntry, DefaultExit
+        spy = self._spy_regime_model()
+        df = _hourly_df(np.linspace(100, 130, 200))
+        entry = DefaultEntry(weights={"hmm": 0.0})
+        result = consolidated_backtest(
+            df, regime_model=spy, entry_strategy=entry, exit_strategy=DefaultExit(),
+            min_train_bars=50, hmm_refit_bars=50, regime_smooth=1,
+        )
+        assert spy.step_calls == 0
+        assert result["n_bars"] > 0
+
+    def test_consolidated_vol_filter_veto_skips_regime_model(self):
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import consolidated_backtest
+        from Strategy_Auto_Trader.strategy.default import DefaultEntry, DefaultExit
+        spy = self._spy_regime_model()
+        df = _hourly_df(np.linspace(100, 130, 200))
+        result = consolidated_backtest(
+            df, regime_model=spy,
+            entry_strategy=DefaultEntry(vol_filter_ok=False), exit_strategy=DefaultExit(),
+            min_train_bars=50, hmm_refit_bars=50, regime_smooth=1,
+        )
+        # Vetoed strategy returns permanent HOLD without reading the regime,
+        # so the HMM must be skipped for the whole run.
+        assert spy.step_calls == 0
+        assert spy.refit_calls == 0
+        assert result["n_buys"] == 0
+
+    def test_consolidated_rsi_weight_zero_runs_without_rsi(self):
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import consolidated_backtest
+        spy = self._spy_regime_model()
+        df = _hourly_df(np.linspace(100, 130, 200))
+        result = consolidated_backtest(
+            df, regime_model=spy, weights={"rsi": 0.0},
+            min_train_bars=50, hmm_refit_bars=50, regime_smooth=1,
+        )
+        assert result["n_bars"] > 0
+        assert result["detail"]["rsi"].isna().all()
+        # HMM still active — its weight is non-zero
+        assert spy.step_calls == 150
+
     def test_consolidated_real_hmm_end_to_end(self):
         pytest.importorskip("hmmlearn")
         from Strategy_Auto_Trader.quant_hmm.consolidated_engine import consolidated_backtest

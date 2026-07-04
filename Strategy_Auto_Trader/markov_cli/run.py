@@ -107,6 +107,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-hold-days", type=int, default=0,
                         help="Force exit after N bars. 0=off")
 
+    # Indicator computation
+    parser.add_argument("--no-skip-unused-indicators", dest="skip_unused_indicators",
+                        action="store_false", default=True,
+                        help="Compute all indicators even when the strategy weights them "
+                             "at zero (useful when developing a new strategy)")
+    parser.add_argument("--no-hmm-cache", dest="hmm_cache", action="store_false", default=True,
+                        help="Recompute the HMM from scratch instead of continuing from the "
+                             "persisted per-ticker filter state in state/hmm_cache/")
+
+    # Output
+    parser.add_argument("--signal-reports-only", action="store_true", default=False,
+                        help="Only render the chart, HTML daily summary and company lookup "
+                             "when the current signal is BUY or SELL (used by the live "
+                             "daemon to keep hourly cycles fast)")
+
     # Strategy selection (entry + exit as a named pair; supersedes --plugin-gate)
     parser.add_argument("--strategy", default="default",
                         choices=sorted(STRATEGY_REGISTRY),
@@ -198,10 +213,6 @@ def main(argv: list[str] | None = None) -> int:
         df.columns = df.columns.get_level_values(0)
     print(f"  fetched {len(df)} hourly bars | {df.index.min()} -> {df.index.max()}")
 
-    company_name, company_sector = _fetch_company_info(args.ticker)
-    if company_name != args.ticker:
-        print(f"  {company_name}  [{company_sector}]" if company_sector else f"  {company_name}")
-
     df.to_csv(run_dir / "inputData.csv")
 
     _ADJ_MAP = {"sentiment": SentimentAdjuster, "none": NullAdjuster}
@@ -220,9 +231,23 @@ def main(argv: list[str] | None = None) -> int:
         quality_gate = _GATE_MAP[args.plugin_gate]()
         entry_s = exit_s = None   # fall through to plugin-level resolution in the engine
 
+    regime_model = None
+    if args.hmm_cache:
+        from ..plugins.persistent_hmm import PersistentHMMRegimeModel
+        safe_ticker = args.ticker.replace("/", "-").replace("\\", "-")
+        regime_model = PersistentHMMRegimeModel(
+            DATA_DIR.parent / "state" / "hmm_cache" / f"{safe_ticker}.pkl",
+            dates=df.index,
+            closes=df["Close"].values,
+            regime_smooth=args.regime_smooth,
+            bull_edge=args.entry_prob,
+            bear_edge=args.exit_prob,
+        )
+
     print(f"\nRunning consolidated walk-forward backtest...")
     bt = consolidated_backtest(
         df,
+        regime_model=regime_model,
         entry_prob=args.entry_prob,
         exit_prob=args.exit_prob,
         stop_loss_pct=args.stop_loss_pct,
@@ -253,7 +278,13 @@ def main(argv: list[str] | None = None) -> int:
         context_adjuster=context_adjuster,
         entry_strategy=entry_s,
         exit_strategy=exit_s,
+        skip_unused_indicators=args.skip_unused_indicators,
     )
+
+    if regime_model is not None:
+        regime_model.save()
+        print(f"  HMM: {regime_model.cache_hits} bars from cache, "
+              f"{regime_model.computed_steps} computed")
 
     if bt["n_bars"] == 0:
         print("  Insufficient data for consolidated backtest (need >= min_train_bars bars).")
@@ -270,7 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     last_event  = str(last_row.get("trade_event", ""))
     last_pos    = float(last_row.get("position", 0.0))
     last_p_bull = float(last_row.get("p_bull_smooth", 0.5))
-    last_regime = float(last_row.get("regime_signal", 0.0))
+    last_regime = float(last_row.get("regime_signal", 0.0) or 0.0)
 
     if last_event == "BUY":
         cur_flag = "BUY"
@@ -291,13 +322,21 @@ def main(argv: list[str] | None = None) -> int:
     if last_event:
         print(f"  last bar: {last_event}  reason={last_row.get('sell_reason','')}")
 
+    # Chart + HTML report are for humans; on daemon cycles they are only
+    # rendered when there is a signal event worth reviewing.
+    make_reports = not args.signal_reports_only or cur_flag in ("BUY", "SELL")
+    close_series = pd.Series(df["Close"].values, index=df.index, name="Close")
+
+    if not make_reports:
+        print("  Chart/report skipped (no signal event)")
+
     # Chart (close series from hourly df, uses quant_engine detail format)
-    try:
-        close_series = pd.Series(df["Close"].values, index=df.index, name="Close")
-        plot_backtest(close_series, bt, ticker=args.ticker,
-                      out_path=run_dir / "backtest_chart.png")
-    except Exception as exc:
-        print(f"  Chart skipped: {exc}")
+    if make_reports:
+        try:
+            plot_backtest(close_series, bt, ticker=args.ticker,
+                          out_path=run_dir / "backtest_chart.png")
+        except Exception as exc:
+            print(f"  Chart skipped: {exc}")
 
     # Generate detailed HTML daily summary report
     try:
@@ -314,12 +353,16 @@ def main(argv: list[str] | None = None) -> int:
         hmm_info = bt.get("hmm", None)
 
         # Get signal and momentum data from last bar
-        if not detail.empty:
+        if make_reports and not detail.empty:
+            company_name, company_sector = _fetch_company_info(args.ticker)
+            if company_name != args.ticker:
+                print(f"  {company_name}  [{company_sector}]" if company_sector else f"  {company_name}")
+
             last_row = detail.iloc[-1]
 
             # Extract values safely
             close_val = float(last_row.get("close", 0)) if "close" in last_row.index else 0.0
-            regime_signal_val = float(last_row.get("regime_signal", 0)) if "regime_signal" in last_row.index else 0.0
+            regime_signal_val = float(last_row.get("regime_signal", 0) or 0) if "regime_signal" in last_row.index else 0.0
             p_bull = float(last_row.get("p_bull_smooth", 0.5)) if "p_bull_smooth" in last_row.index else 0.5
 
             # Derive regime from p_bull_smooth

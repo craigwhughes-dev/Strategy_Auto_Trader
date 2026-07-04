@@ -102,7 +102,7 @@ class OptimisedEntry(DefaultEntry):
                 flag="HOLD", raw_flag=decision.raw_flag, score=decision.score,
                 reason=f"optimised veto: RSI > {_RSI_OVERBOUGHT:.0f} (overbought entries lose)",
             )
-        if regime.regime_signal <= _MIN_REGIME_SIGNAL:
+        if regime.regime_signal is not None and regime.regime_signal <= _MIN_REGIME_SIGNAL:
             return EntryDecision(
                 flag="HOLD", raw_flag=decision.raw_flag, score=decision.score,
                 reason="optimised veto: regime_signal <= 0 (no bull-regime confirmation)",

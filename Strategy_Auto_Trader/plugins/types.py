@@ -11,8 +11,8 @@ class RegimeState:
     p_bull: float
     p_bear: float
     p_bull_smooth: float
-    regime_signal: float    # p_bull_smooth - p_bear
-    hmm_vote: int           # 0=Bear, 1=Sideways, 2=Bull
+    regime_signal: float | None    # p_bull_smooth - p_bear; None when HMM is disabled
+    hmm_vote: int | None           # 0=Bear, 1=Sideways, 2=Bull; None when HMM is disabled
 
 
 @dataclass

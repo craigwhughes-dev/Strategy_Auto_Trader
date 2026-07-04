@@ -1,0 +1,413 @@
+"""Live daemon — persistent automated paper trading process.
+
+Runs continuously, screening tickers overnight, then cycling through in-scope
+tickers during trading hours. Prioritizes open positions (checked every hour),
+round-robins through the rest, respecting a per-cycle time budget to avoid
+overloading the system.
+
+Usage:
+    uv run python -m Strategy_Auto_Trader.markov_cli.live_daemon
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+ROOT = Path(__file__).resolve().parent.parent.parent
+CONFIG_DIR = ROOT / "config"
+STATE_DIR = ROOT / "state"
+DATA_DIR = ROOT / "data"
+LOGS_DIR = ROOT / "logs"
+
+
+def setup_logging() -> logging.Logger:
+    """Set up rotating daily log."""
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    today = datetime.now().date().isoformat()
+    log_path = LOGS_DIR / f"daemon_{today}.log"
+
+    logger = logging.getLogger("live_daemon")
+    logger.setLevel(logging.DEBUG)
+
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+    logger.addHandler(handler)
+
+    console = logging.StreamHandler()
+    console.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+    logger.addHandler(console)
+
+    return logger
+
+
+def load_config() -> dict:
+    """Load overnight_strategy.json."""
+    config_path = CONFIG_DIR / "overnight_strategy.json"
+    with open(config_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_daemon_state() -> dict:
+    """Load daemon_state.json, or return empty dict if not yet created."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    state_path = STATE_DIR / "daemon_state.json"
+    if state_path.exists():
+        try:
+            with open(state_path, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {
+        "last_overnight_date": None,
+        "cursors": {},
+    }
+
+
+def save_daemon_state(state: dict) -> None:
+    """Save daemon_state.json."""
+    state_path = STATE_DIR / "daemon_state.json"
+    with open(state_path, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+
+def is_trading_hours(market_cfg: dict, logger: logging.Logger) -> bool:
+    """Check if market is currently in trading hours."""
+    tz = ZoneInfo(market_cfg["timezone"])
+    now = datetime.now(tz)
+
+    weekday = now.weekday()
+    if weekday >= 5:
+        logger.debug(f"  Market {market_cfg['timezone']}: weekend, skipping")
+        return False
+
+    start_str = market_cfg["trading_start"]
+    end_str = market_cfg["trading_end"]
+    start_time = datetime.strptime(start_str, "%H:%M").time()
+    end_time = datetime.strptime(end_str, "%H:%M").time()
+
+    is_open = start_time <= now.time() <= end_time
+    if not is_open:
+        logger.debug(f"  Market {market_cfg['timezone']}: outside hours "
+                     f"({start_str}-{end_str}), skipping")
+    return is_open
+
+
+def load_in_scope_tickers(market_name: str, logger: logging.Logger) -> list[str]:
+    """Load in_scope_<market>.json."""
+    scope_path = STATE_DIR / f"in_scope_{market_name}.json"
+    if not scope_path.exists():
+        logger.warning(f"  No in_scope_{market_name}.json yet, run overnight_scope first")
+        return []
+    try:
+        with open(scope_path, encoding="utf-8") as f:
+            result = json.load(f)
+        return result.get("kept", [])
+    except Exception as e:
+        logger.error(f"  Error loading in_scope_{market_name}.json: {e}")
+        return []
+
+
+def get_open_positions(market_name: str, all_tickers: list[str], logger: logging.Logger) -> list[str]:
+    """Get tickers with open positions in this market (intersection of exec state positions and market tickers)."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    state_path = STATE_DIR / "execution_state.json"
+    if not state_path.exists():
+        return []
+    try:
+        with open(state_path, encoding="utf-8") as f:
+            exec_state = json.load(f)
+        positions = exec_state.get("positions", {})
+        open_in_market = [t for t in positions.keys() if t in all_tickers]
+        return sorted(open_in_market)
+    except Exception as e:
+        logger.error(f"  Error loading execution_state.json: {e}")
+        return []
+
+
+def next_round_robin_slice(
+    market_name: str,
+    in_scope: list[str],
+    max_items: int,
+    daemon_state: dict,
+    logger: logging.Logger,
+) -> list[str]:
+    """Get next slice of round-robin tickers.
+
+    Updates cursor in daemon_state. Wraps daily.
+    """
+    if not in_scope:
+        return []
+
+    cursors = daemon_state.setdefault("cursors", {})
+    today = datetime.now().date().isoformat()
+    key = f"{market_name}:{today}"
+
+    cursor = cursors.get(key, 0)
+    slice_end = min(cursor + max_items, len(in_scope))
+    slice_tickers = in_scope[cursor:slice_end]
+
+    if slice_end >= len(in_scope):
+        cursors[key] = 0
+        logger.debug(f"  {market_name}: round-robin wrapped")
+    else:
+        cursors[key] = slice_end
+
+    return slice_tickers
+
+
+def process_cycle(
+    market_name: str,
+    market_cfg: dict,
+    config: dict,
+    daemon_state: dict,
+    portfolio: object,
+    broker: object,
+    logger: logging.Logger,
+) -> int:
+    """Run one market cycle: prioritize open positions, then round-robin through candidates.
+
+    Returns number of tickers processed.
+    """
+    from .batch import process_ticker
+
+    in_scope = load_in_scope_tickers(market_name, logger)
+    if not in_scope:
+        logger.debug(f"  {market_name}: no in-scope tickers")
+        return 0
+
+    # Open positions always run first
+    open_positions = get_open_positions(market_name, in_scope, logger)
+    must_run = [t for t in open_positions if t in in_scope]
+
+    # Remaining budget for candidates
+    max_seconds = config.get("daytime", {}).get("max_seconds_per_cycle", 1500)
+    cycle_start = time.time()
+
+    # Daemon cycles skip chart/HTML rendering unless a signal fires; a market
+    # config can override by setting defaults.signal_reports_only = false.
+    defaults = {"signal_reports_only": True, **market_cfg.get("defaults", {})}
+    processed = []
+    skipped_budget = []
+
+    # Stage 1: must-run (open positions)
+    logger.info(f"[{market_name}] Must-run ({len(must_run)} positions):")
+    for ticker in must_run:
+        remaining = max_seconds - (time.time() - cycle_start)
+        if remaining <= 0:
+            logger.debug(f"  {ticker}: budget exhausted")
+            skipped_budget.append(ticker)
+            break
+
+        logger.debug(f"  Processing {ticker}")
+        ticker_cfg = {"ticker": ticker}
+        result = process_ticker(ticker_cfg, defaults, send_email=True)
+        processed.append(result)
+
+    # Stage 2: candidates (round-robin through rest)
+    remaining_budget = max_seconds - (time.time() - cycle_start)
+    buffer_secs = config.get("daytime", {}).get("cycle_buffer_minutes", 5) * 60
+    if remaining_budget > buffer_secs:
+        remaining_budget -= buffer_secs
+        candidates = next_round_robin_slice(
+            market_name,
+            [t for t in in_scope if t not in must_run],
+            len(in_scope),
+            daemon_state,
+            logger,
+        )
+
+        logger.info(f"[{market_name}] Round-robin ({len(candidates)} candidates, {remaining_budget:.0f}s budget):")
+        for ticker in candidates:
+            now_remaining = max_seconds - (time.time() - cycle_start)
+            if now_remaining <= buffer_secs:
+                logger.debug(f"  {ticker}: budget near exhausted ({now_remaining:.0f}s left)")
+                skipped_budget.append(ticker)
+                break
+
+            logger.debug(f"  Processing {ticker}")
+            ticker_cfg = {"ticker": ticker}
+            result = process_ticker(ticker_cfg, defaults, send_email=True)
+            processed.append(result)
+
+    # Execute signals once for all processed tickers this cycle
+    if processed:
+        from .execute import execute_signals
+        ticker_list = [p["ticker"] for p in processed if p.get("status") == "OK"]
+        if ticker_list:
+            # Dry-run broker fills at supplied prices — feed it this cycle's closes
+            # so the trade log records real prices instead of 0.0.
+            if hasattr(broker, "set_prices"):
+                broker.set_prices({
+                    p["ticker"]: p["result"]["close"]
+                    for p in processed
+                    if p.get("result") and p["result"].get("close")
+                })
+            logger.info(f"[{market_name}] Executing signals for {len(ticker_list)} processed tickers...")
+            try:
+                limit_tracker = portfolio.get_limit_tracker()
+                exec_cfg = config.get("execution", {})
+                daily_buy_limit = exec_cfg.get("daily_buy_limit", 2)
+                daily_sell_limit = exec_cfg.get("daily_sell_limit")
+                buys, sells, skipped = execute_signals(
+                    ticker_list, DATA_DIR, portfolio, limit_tracker, broker,
+                    daily_buy_limit, daily_sell_limit
+                )
+                logger.info(f"  BUY:  {len(buys)}, SELL: {len(sells)}, Skipped: {len(skipped)}")
+                for b in buys:
+                    logger.info(f"    BUY: {b}")
+                for s in sells:
+                    logger.info(f"    SELL: {s}")
+                portfolio.save()
+            except Exception as e:
+                logger.error(f"  Error executing signals: {e}")
+
+    elapsed = time.time() - cycle_start
+    logger.info(f"[{market_name}] Cycle done: {len(processed)} tickers processed, "
+                f"{len(skipped_budget)} skipped (budget), {elapsed:.0f}s elapsed")
+    return len(processed)
+
+
+def check_overnight_screening(
+    config: dict,
+    daemon_state: dict,
+    logger: logging.Logger,
+) -> None:
+    """Check if overnight screening should run, and run if needed."""
+    tz = ZoneInfo(config.get("overnight_timezone", "Europe/London"))
+    now = datetime.now(tz)
+    run_time_str = config.get("overnight_run_time", "02:00")
+    run_hour, run_minute = map(int, run_time_str.split(":"))
+
+    today = now.date().isoformat()
+    last_date = daemon_state.get("last_overnight_date")
+
+    if last_date == today:
+        return
+
+    if now.hour == run_hour and now.minute >= run_minute:
+        logger.info("Running overnight scope screening...")
+        try:
+            from .overnight_scope import main as run_overnight_scope
+            run_overnight_scope()
+            daemon_state["last_overnight_date"] = today
+            save_daemon_state(daemon_state)
+            logger.info("Overnight scope screening complete")
+        except Exception as e:
+            logger.error(f"Error in overnight screening: {e}")
+
+
+def main() -> int:
+    """Main daemon loop."""
+    logger = setup_logging()
+    logger.info("="*64)
+    logger.info("Live daemon starting")
+    logger.info("="*64)
+
+    config = load_config()
+    daemon_state = load_daemon_state()
+    exec_cfg = config.get("execution", {})
+    dry_run = exec_cfg.get("dry_run", True)
+
+    # Startup self-checks — a half-broken environment (e.g. hmmlearn that
+    # imports but cannot fit) must abort here, not trade without signals.
+    from ..core.self_check import SelfCheckError, run_startup_checks
+    try:
+        run_startup_checks(require_broker=not dry_run, logger=logger)
+    except SelfCheckError as e:
+        logger.critical(str(e))
+        return 1
+
+    # Set up broker
+    if dry_run:
+        from ..broker.null_adapter import NullBroker
+        logger.info("Using NullBroker (dry run mode)")
+        broker = NullBroker(prices={})
+    else:
+        from ..broker.ibkr_adapter import IBKRAdapter
+        logger.info("Using IBKRAdapter (live paper trading)")
+        broker = IBKRAdapter()
+
+    # Set up portfolio
+    from ..broker.portfolio import PortfolioManager
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    state_path = STATE_DIR / "execution_state.json"
+    capital_pot = float(exec_cfg.get("capital_pot", 20000))
+    max_positions = int(exec_cfg.get("max_positions", 5))
+    portfolio = PortfolioManager(capital_pot, max_positions, state_path)
+
+    try:
+        broker.connect()
+        logger.info("Broker connected")
+    except Exception as e:
+        logger.error(f"Error connecting to broker: {e}")
+        if not dry_run:
+            return 1
+
+    try:
+        poll_interval = config.get("daytime", {}).get("poll_interval_seconds", 60)
+        last_cycle_hour = {}
+
+        logger.info("Entering main loop")
+        while True:
+            try:
+                # Check overnight screening
+                check_overnight_screening(config, daemon_state, logger)
+
+                # Check each market
+                now = datetime.now(timezone.utc)
+                for market_name, market_cfg in config.get("markets", {}).items():
+                    if not is_trading_hours(market_cfg, logger):
+                        continue
+
+                    current_hour = now.hour
+                    last_hour = last_cycle_hour.get(market_name, -1)
+
+                    if current_hour != last_hour:
+                        logger.info(f"\n{'='*64}")
+                        logger.info(f"[{market_name}] Starting cycle")
+                        logger.info(f"{'='*64}")
+
+                        process_cycle(
+                            market_name, market_cfg, config,
+                            daemon_state, portfolio, broker, logger
+                        )
+
+                        last_cycle_hour[market_name] = current_hour
+                        save_daemon_state(daemon_state)
+
+                # Sleep
+                logger.debug(f"Sleeping {poll_interval}s...")
+                time.sleep(poll_interval)
+
+            except KeyboardInterrupt:
+                logger.info("Keyboard interrupt, shutting down")
+                break
+            except Exception as e:
+                logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
+                time.sleep(5)
+
+    finally:
+        try:
+            broker.disconnect()
+            logger.info("Broker disconnected")
+        except Exception as e:
+            logger.error(f"Error disconnecting broker: {e}")
+
+        logger.info("="*64)
+        logger.info("Live daemon stopped")
+        logger.info("="*64)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

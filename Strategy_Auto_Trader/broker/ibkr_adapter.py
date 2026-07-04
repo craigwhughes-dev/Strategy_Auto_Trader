@@ -28,11 +28,15 @@ class IBKRAdapter:
         port: int = 7497,
         client_id: int = 1,
         timeout: float = 30.0,
+        connect_timeout: float = 30.0,
     ) -> None:
         self._host = host
         self._port = port
         self._client_id = client_id
         self._timeout = timeout
+        # ib_insync's default connect timeout (4s) is too tight for a busy
+        # TWS; its handshake is also known to time out transiently.
+        self._connect_timeout = connect_timeout
         self._ib = None
 
     def connect(self) -> None:
@@ -44,7 +48,12 @@ class IBKRAdapter:
                 "ib_insync is not installed. Run: uv add ib_insync"
             ) from exc
         self._ib = IB()
-        self._ib.connect(self._host, self._port, clientId=self._client_id)
+        self._ib.connect(self._host, self._port, clientId=self._client_id,
+                         timeout=self._connect_timeout)
+
+    def managed_accounts(self) -> list[str]:
+        """Return the account ids the session is authorised for."""
+        return list(self._ib.managedAccounts())
 
     def disconnect(self) -> None:
         """Disconnect cleanly (safe to call even if not connected)."""

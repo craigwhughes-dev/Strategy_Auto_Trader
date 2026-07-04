@@ -76,6 +76,9 @@ def _build_argv(ticker_cfg: dict, defaults: dict) -> list[str]:
     if merged.get("exit_consolidation", False):
         argv.append("--exit-consolidation")
 
+    if merged.get("signal_reports_only", False):
+        argv.append("--signal-reports-only")
+
     strategy = merged.pop("strategy", None)
     if strategy:
         argv.extend(["--strategy", str(strategy)])
@@ -260,6 +263,76 @@ def _get_entry_price(ticker: str, buy_date_str: str) -> float | None:
     return None
 
 
+def process_ticker(
+    ticker_cfg: dict, defaults: dict, send_email: bool
+) -> dict:
+    """Run model for a single ticker, collect results, email if signal fires, journal trades.
+
+    Returns dict with keys: ticker, status, time, result (if successful).
+    """
+    ticker = ticker_cfg.get("ticker", "???")
+    argv = _build_argv(ticker_cfg, defaults)
+    t0 = time.time()
+    try:
+        run_single(argv)
+        elapsed = time.time() - t0
+
+        result = _collect_results(ticker)
+        if result:
+            from ..output.journal import BACKTEST_JOURNAL, append_trades, extract_trades_from_csv
+
+            strategy_name = str({**defaults, **ticker_cfg}.get("strategy", "default"))
+            csv_path = Path(result["run_dir"]) / "compositeBacktest.csv"
+            trades = extract_trades_from_csv(ticker, csv_path, strategy=strategy_name)
+            journal_trade_count = append_trades(BACKTEST_JOURNAL, trades)
+
+            if send_email and result["trade_event"] in ("BUY", "SELL"):
+                from ..output.trade_state import record_buy, record_sell, has_open_buy
+
+                if _should_send_buy_alert(result):
+                    try:
+                        from ..output.emailer import send_trade_alert
+                        send_trade_alert(result)
+                        record_buy(ticker, {
+                            "strategy": strategy_name,
+                            "signal": result["trade_event"],
+                            "score": result["signal_score"],
+                            "gate_flag": result["quality_gate"],
+                            "price": result["close"],
+                            "regime": result["regime_signal"],
+                            "rsi": result["rsi"],
+                            "volume_ratio": result["volume_ratio"],
+                            "kelly_fraction": result["kelly_fraction"],
+                            "stop_level": result["stop_level"],
+                            "target_level": result["target_level"],
+                            "portfolio_value": result["portfolio_value"],
+                        })
+                    except Exception as exc:
+                        print(f"  Email error: {exc}")
+                elif _should_send_sell_alert(result, ticker):
+                    try:
+                        from ..output.emailer import send_trade_alert
+                        send_trade_alert(result)
+                        record_sell(ticker, {
+                            "price": result["close"],
+                            "reason": result["sell_reason"] or result["quality_gate_reason"],
+                            "strategy_return": result["strategy_return"],
+                            "bh_return": result["bh_return"],
+                        })
+                    except Exception as exc:
+                        print(f"  Email error: {exc}")
+                elif result["trade_event"] == "SELL":
+                    print(f"  SELL skipped (no prior BUY since reference date)")
+
+            return {"ticker": ticker, "status": "OK", "time": elapsed, "result": result}
+        else:
+            return {"ticker": ticker, "status": "OK", "time": elapsed, "result": None}
+
+    except Exception as exc:
+        elapsed = time.time() - t0
+        return {"ticker": ticker, "status": f"FAIL: {exc}", "time": elapsed}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="batch-runner")
     parser.add_argument("--watchlist", type=Path, default=DEFAULTS_FILE,
@@ -314,7 +387,6 @@ def main() -> int:
     run_results = []    # status tracking
     collected = []      # successfully collected results for email
     failed_list = []    # failed tickers
-    journal_trade_count = 0
 
     for i, ticker_cfg in enumerate(tickers, 1):
         ticker = ticker_cfg.get("ticker", "???")
@@ -322,70 +394,13 @@ def main() -> int:
         print(f" [{i}/{len(tickers)}]  {ticker}")
         print(f"{'='*64}")
 
-        argv = _build_argv(ticker_cfg, defaults)
-        t0 = time.time()
-        try:
-            run_single(argv)
-            elapsed = time.time() - t0
-            run_results.append({"ticker": ticker, "status": "OK", "time": elapsed})
+        result_dict = process_ticker(ticker_cfg, defaults, send_email)
+        run_results.append({"ticker": result_dict["ticker"], "status": result_dict["status"], "time": result_dict["time"]})
 
-            result = _collect_results(ticker)
-            if result:
-                collected.append(result)
-
-                from ..output.journal import BACKTEST_JOURNAL, append_trades, extract_trades_from_csv
-
-                strategy_name = str({**defaults, **ticker_cfg}.get("strategy", "default"))
-                csv_path = Path(result["run_dir"]) / "compositeBacktest.csv"
-                trades = extract_trades_from_csv(ticker, csv_path, strategy=strategy_name)
-                journal_trade_count += append_trades(BACKTEST_JOURNAL, trades)
-
-                # Send trade alert:
-                # BUY: send if profitable OR outperforming, then record in state
-                # SELL: only send if we previously sent a BUY for this ticker
-                if send_email and result["trade_event"] in ("BUY", "SELL"):
-                    from ..output.trade_state import record_buy, record_sell, has_open_buy
-
-                    if _should_send_buy_alert(result):
-                        try:
-                            from ..output.emailer import send_trade_alert
-                            send_trade_alert(result)
-                            record_buy(ticker, {
-                                "strategy": strategy_name,
-                                "signal": result["trade_event"],
-                                "score": result["signal_score"],
-                                "gate_flag": result["quality_gate"],
-                                "price": result["close"],
-                                "regime": result["regime_signal"],
-                                "rsi": result["rsi"],
-                                "volume_ratio": result["volume_ratio"],
-                                "kelly_fraction": result["kelly_fraction"],
-                                "stop_level": result["stop_level"],
-                                "target_level": result["target_level"],
-                                "portfolio_value": result["portfolio_value"],
-                            })
-                        except Exception as exc:
-                            print(f"  Email error: {exc}")
-                    elif _should_send_sell_alert(result, ticker):
-                        try:
-                            from ..output.emailer import send_trade_alert
-                            send_trade_alert(result)
-                            record_sell(ticker, {
-                                "price": result["close"],
-                                "reason": result["sell_reason"] or result["quality_gate_reason"],
-                                "strategy_return": result["strategy_return"],
-                                "bh_return": result["bh_return"],
-                            })
-                        except Exception as exc:
-                            print(f"  Email error: {exc}")
-                    elif result["trade_event"] == "SELL":
-                        print(f"  SELL skipped (no prior BUY since reference date)")
-
-        except Exception as exc:
-            elapsed = time.time() - t0
-            print(f"\n  ERROR: {exc}")
-            run_results.append({"ticker": ticker, "status": f"FAIL: {exc}", "time": elapsed})
-            failed_list.append({"ticker": ticker, "error": str(exc)})
+        if result_dict["status"] == "OK" and result_dict.get("result"):
+            collected.append(result_dict["result"])
+        elif result_dict["status"] != "OK":
+            failed_list.append({"ticker": ticker, "error": result_dict["status"]})
 
     # ── print summary ────────────────────────────────────────────────────────
     print(f"\n\n{'='*64}")

@@ -192,3 +192,86 @@ class TestStrategy:
         bt = consolidated_backtest(df, entry_strategy=DefaultEntry(), exit_strategy=DefaultExit())
         assert "n_bars" in bt
         assert bt["n_bars"] >= 0
+
+    # -- HMM-independent entries (reconstructed from data/journals/backtest.csv)
+    #
+    # These two conservative trades scored high enough on the non-HMM votes
+    # alone that the BUY decision holds even when the HMM indicator is skipped
+    # (RegimeState sentinel with regime_signal=None / hmm_vote=None).
+
+    @staticmethod
+    def _hmm_disabled_state():
+        from Strategy_Auto_Trader.plugins.types import RegimeState
+        return RegimeState(p_bull=0.0, p_bear=0.0, p_bull_smooth=0.0,
+                           regime_signal=None, hmm_vote=None)
+
+    def test_conservative_googl_2023_12_18_buy_without_hmm(self):
+        # GOOGL 2023-12-18 09:30 EST: score 9.5 (all five votes +1),
+        # regime_at_entry 0.7783, rsi 71.60, volume_ratio 2.25.
+        from Strategy_Auto_Trader.plugins.types import RegimeState
+        from Strategy_Auto_Trader.strategy.conservative import ConservativeEntry
+        entry = ConservativeEntry()
+        mom = {
+            "cur_rsi": 71.60,
+            "recent_cross_above_50": False,
+            "recent_cross_below_40": False,
+            "above_sma20": True,
+            "above_sma50": True,
+            "above_sma200": True,
+            "volume_ratio": 2.25,
+        }
+        regime = RegimeState(p_bull=0.78, p_bear=0.0, p_bull_smooth=0.78,
+                             regime_signal=0.7783, hmm_vote=2)
+        with_hmm = entry.evaluate(regime, mom, 2.25)
+        assert with_hmm.flag == "BUY"
+        assert with_hmm.score == 9.5   # matches the journal entry_score
+
+        without_hmm = entry.evaluate(self._hmm_disabled_state(), mom, 2.25)
+        assert without_hmm.flag == "BUY"
+        assert without_hmm.score == 7.5   # 9.5 minus the hmm weight (2.0)
+
+    def test_conservative_googl_2024_05_24_buy_without_hmm_at_boundary(self):
+        # GOOGL 2024-05-24 15:30 EDT: score 6.5 (rsi and volume votes neutral),
+        # regime_at_entry 0.9870, rsi 46.84, volume_ratio 1.01.
+        # Without the HMM's 2.0 the score is exactly the 4.5 buy threshold —
+        # boundary case: score >= threshold must still be a BUY.
+        from Strategy_Auto_Trader.plugins.types import RegimeState
+        from Strategy_Auto_Trader.strategy.conservative import ConservativeEntry
+        entry = ConservativeEntry()
+        mom = {
+            "cur_rsi": 46.84,
+            "recent_cross_above_50": False,
+            "recent_cross_below_40": False,
+            "above_sma20": True,
+            "above_sma50": True,
+            "above_sma200": True,
+            "volume_ratio": 1.01,
+        }
+        regime = RegimeState(p_bull=0.99, p_bear=0.0, p_bull_smooth=0.99,
+                             regime_signal=0.9870, hmm_vote=2)
+        with_hmm = entry.evaluate(regime, mom, 1.01)
+        assert with_hmm.flag == "BUY"
+        assert with_hmm.score == 6.5   # matches the journal entry_score
+
+        without_hmm = entry.evaluate(self._hmm_disabled_state(), mom, 1.01)
+        assert without_hmm.flag == "BUY"
+        assert without_hmm.score == 4.5   # exactly at buy_threshold
+
+    def test_optimised_entry_does_not_crash_without_hmm(self):
+        # Optimised's regime_signal<=0 veto needs the HMM; with the disabled
+        # sentinel the veto is skipped rather than raising on None comparison.
+        from Strategy_Auto_Trader.strategy.optimised import OptimisedEntry
+        entry = OptimisedEntry()
+        mom = {
+            "cur_rsi": 60.0,
+            "recent_cross_above_50": False,
+            "recent_cross_below_40": False,
+            "above_sma20": True,
+            "above_sma50": True,
+            "above_sma200": True,
+            "volume_ratio": 2.0,
+        }
+        decision = entry.evaluate(self._hmm_disabled_state(), mom, 2.0)
+        # rsi 1.0 + trend 2.0 + sma200 3.0 + volume 1.0 = 7.0 >= 6.0
+        assert decision.flag == "BUY"
+        assert decision.score == 7.0

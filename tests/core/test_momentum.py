@@ -135,6 +135,35 @@ class TestMomentum:
         # Weighted voting: markov=1.0, rsi=1.5, trend=1.0, hmm=1.0 -> 4.5
         assert result_bull["max_score"] == 4.5
 
+    def test_composite_signal_missing_rsi_excluded_from_score(self):
+        from Strategy_Auto_Trader.core.momentum import composite_signal
+        mom = {
+            "above_sma20": True,
+            "above_sma50": True,
+        }
+        result = composite_signal(0.5, mom)
+        assert "rsi" not in result["votes"]
+        assert "rsi" not in result["weights"]
+        # markov=1.0 + trend=1.0 only -> max_score 2.0 (rsi's 1.5 not counted)
+        assert result["max_score"] == 2.0
+        assert result["score"] == 2.0
+
+    def test_composite_signal_missing_rsi_matches_zero_weight_run(self):
+        from Strategy_Auto_Trader.core.momentum import composite_signal
+        mom_full = {
+            "cur_rsi": 60,
+            "recent_cross_above_50": False,
+            "recent_cross_below_40": False,
+            "above_sma20": True,
+            "above_sma50": True,
+        }
+        mom_norsi = {k: v for k, v in mom_full.items()
+                     if k not in ("cur_rsi", "recent_cross_above_50", "recent_cross_below_40")}
+        zeroed = composite_signal(0.5, mom_full, weights={"rsi": 0.0})
+        skipped = composite_signal(0.5, mom_norsi)
+        assert skipped["score"] == zeroed["score"]
+        assert skipped["flag"] == zeroed["flag"]
+
     def test_momentum_signals_returns_dict(self):
         from Strategy_Auto_Trader.core.momentum import momentum_signals
         close = _rising_prices(300)

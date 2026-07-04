@@ -67,15 +67,16 @@ def composite_signal(
         votes["markov"] = 0
     vote_weights["markov"] = w["markov"]
 
-    # RSI momentum
-    rsi = mom["cur_rsi"]
-    if rsi >= 50 or mom["recent_cross_above_50"]:
-        votes["rsi"] = 1
-    elif rsi < 40 or mom["recent_cross_below_40"]:
-        votes["rsi"] = -1
-    else:
-        votes["rsi"] = 0
-    vote_weights["rsi"] = w["rsi"]
+    # RSI momentum (skipped when upstream disabled the RSI indicator)
+    if "cur_rsi" in mom:
+        rsi = mom["cur_rsi"]
+        if rsi >= 50 or mom["recent_cross_above_50"]:
+            votes["rsi"] = 1
+        elif rsi < 40 or mom["recent_cross_below_40"]:
+            votes["rsi"] = -1
+        else:
+            votes["rsi"] = 0
+        vote_weights["rsi"] = w["rsi"]
 
     # Merged short-term trend: SMA20 + SMA50
     # Both above = bullish, both below = bearish, mixed = neutral

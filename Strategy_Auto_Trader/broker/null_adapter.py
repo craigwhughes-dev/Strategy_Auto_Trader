@@ -19,6 +19,10 @@ class NullBroker:
         self._positions: dict[str, int] = {}
         self.orders: list[FillResult] = []
 
+    def set_prices(self, prices: dict[str, float]) -> None:
+        """Update fill prices (dry-run daemon feeds latest closes each cycle)."""
+        self._prices.update(prices)
+
     def connect(self) -> None:
         pass
 

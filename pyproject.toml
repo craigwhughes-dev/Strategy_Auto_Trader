@@ -15,6 +15,9 @@ dependencies = [
 hmm = ["hmmlearn>=0.3"]
 ibkr = ["ib_insync>=0.9"]
 
+[dependency-groups]
+dev = ["pytest>=8"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

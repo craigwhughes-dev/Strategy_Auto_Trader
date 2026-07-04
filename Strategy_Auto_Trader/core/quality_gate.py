@@ -14,9 +14,9 @@ or hourly bars.
 from __future__ import annotations
 
 
-def _is_weak_buy_context(markov_sig: float, mom: dict) -> bool:
+def _is_weak_buy_context(markov_sig: float | None, mom: dict) -> bool:
     conditions = 0
-    if markov_sig < 0.25:
+    if markov_sig is not None and markov_sig < 0.25:
         conditions += 1
     if not (mom.get("above_sma20", False) and mom.get("above_sma50", False)):
         conditions += 1
@@ -30,9 +30,9 @@ def _is_weak_buy_context(markov_sig: float, mom: dict) -> bool:
     return conditions >= 2
 
 
-def _is_adverse_exit_context(markov_sig: float, mom: dict) -> bool:
+def _is_adverse_exit_context(markov_sig: float | None, mom: dict) -> bool:
     conditions = 0
-    if markov_sig < -0.20:
+    if markov_sig is not None and markov_sig < -0.20:
         conditions += 1
     if mom.get("cur_rsi", 50.0) < 40 or mom.get("recent_cross_below_40", False):
         conditions += 1
@@ -46,7 +46,7 @@ def _is_adverse_exit_context(markov_sig: float, mom: dict) -> bool:
     return conditions >= 2
 
 
-def _apply_quality_gate(sig: dict, mom: dict, markov_sig: float, currently_in: bool) -> dict:
+def _apply_quality_gate(sig: dict, mom: dict, markov_sig: float | None, currently_in: bool) -> dict:
     """Apply the veto layer.
 
     sig.get("flag") == "BUY" and not currently_in and weak context -> HOLD.

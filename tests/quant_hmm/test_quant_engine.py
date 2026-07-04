@@ -349,6 +349,34 @@ class TestQuantEngine:
         assert exit_ == 0.45
         assert stop == 0.07
 
+    # -- fit_hmm_expanding error handling ---------------------------------------
+
+    def test_fit_hmm_expanding_raises_on_broken_hmmlearn(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import fit_hmm_expanding
+        with mock.patch.dict(
+                "sys.modules", {"hmmlearn": None, "hmmlearn.hmm": None}):
+            with pytest.raises(RuntimeError, match="missing or broken"):
+                fit_hmm_expanding(np.random.default_rng(0).normal(size=200))
+
+    def test_fit_hmm_expanding_warns_when_all_seeds_fail(self, caplog):
+        pytest.importorskip("hmmlearn")
+        import logging
+        from Strategy_Auto_Trader.quant_hmm import quant_engine as qe
+
+        class ExplodingHMM:
+            def __init__(self, **kwargs):
+                pass
+
+            def fit(self, X):
+                raise ValueError("degenerate data")
+
+        with mock.patch("hmmlearn.hmm.GaussianHMM", ExplodingHMM), \
+             caplog.at_level(logging.WARNING,
+                             logger="Strategy_Auto_Trader.quant_hmm.quant_engine"):
+            result = qe.fit_hmm_expanding(np.zeros(200), n_seeds=2)
+        assert result is None
+        assert any("all 2 seeds" in r.message for r in caplog.records)
+
     # -- _compute_volume_ratio -------------------------------------------------
 
     def test_compute_volume_ratio_none_returns_ones(self):

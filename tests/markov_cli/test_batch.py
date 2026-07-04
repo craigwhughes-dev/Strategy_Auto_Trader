@@ -31,6 +31,16 @@ class TestBatch:
         idx = argv.index("--years")
         assert argv[idx + 1] == "3"
 
+    def test_build_argv_signal_reports_only(self):
+        from Strategy_Auto_Trader.markov_cli.batch import _build_argv
+        argv = _build_argv({"ticker": "AAPL"}, {"signal_reports_only": True})
+        assert "--signal-reports-only" in argv
+
+    def test_build_argv_signal_reports_only_absent_by_default(self):
+        from Strategy_Auto_Trader.markov_cli.batch import _build_argv
+        argv = _build_argv({"ticker": "AAPL"}, {})
+        assert "--signal-reports-only" not in argv
+
     def test_build_argv_long_only_flag(self):
         from Strategy_Auto_Trader.markov_cli.batch import _build_argv
         cfg = {"ticker": "AAPL"}

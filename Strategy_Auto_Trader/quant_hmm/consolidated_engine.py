@@ -79,11 +79,12 @@ def _precompute_hourly_vote_series(
     sar_af_start: float = 0.02,
     sar_af_step: float = 0.02,
     sar_af_max: float = 0.20,
+    rsi_enabled: bool = True,
 ) -> dict:
     """Precompute all causal indicator series needed by the consolidated per-bar loop."""
     close_s = pd.Series(close) if not isinstance(close, pd.Series) else close
 
-    rsi_full   = compute_rsi(close_s, rsi_period)
+    rsi_full   = compute_rsi(close_s, rsi_period) if rsi_enabled else None
     sma20_full = compute_sma(close_s, ma_fast)
     sma50_full = compute_sma(close_s, ma_slow)
     sma200_full = compute_sma(close_s, ma_trend)
@@ -91,8 +92,10 @@ def _precompute_hourly_vote_series(
     log_rets = np.log(close_s / close_s.shift(1))
     rolling_vol_full = log_rets.rolling(vol_stop_window).std()
 
-    rsi_x_above_50 = (rsi_full >= 50) & (rsi_full.shift(1) < 50)
-    rsi_x_below_40 = (rsi_full < 40) & (rsi_full.shift(1) >= 40)
+    rsi_x_above_50 = rsi_x_below_40 = None
+    if rsi_full is not None:
+        rsi_x_above_50 = (rsi_full >= 50) & (rsi_full.shift(1) < 50)
+        rsi_x_below_40 = (rsi_full < 40) & (rsi_full.shift(1) >= 40)
 
     vol_ratio_full = None
     if volume is not None and len(volume) > 20:
@@ -105,9 +108,11 @@ def _precompute_hourly_vote_series(
     if need_exit:
         macd_line_full, macd_sig_full, _ = compute_macd(close_s)
         macd_bear_x = (macd_line_full < macd_sig_full) & (macd_line_full.shift(1) >= macd_sig_full.shift(1))
-        rsi_ob_exit = (rsi_full < 70) & (rsi_full.shift(1) >= 70)
-        rsi_mom_loss = ((rsi_full < 50) & (rsi_full.shift(1) >= 50)
-                        & (rsi_full.rolling(6).max().shift(1) >= 60))
+        # Exit indicators need RSI even when the RSI vote is disabled.
+        rsi_exit = rsi_full if rsi_full is not None else compute_rsi(close_s, rsi_period)
+        rsi_ob_exit = (rsi_exit < 70) & (rsi_exit.shift(1) >= 70)
+        rsi_mom_loss = ((rsi_exit < 50) & (rsi_exit.shift(1) >= 50)
+                        & (rsi_exit.rolling(6).max().shift(1) >= 60))
         bb_mid, bb_up, bb_lo = compute_bollinger(close_s)
         bb_w = (bb_up - bb_lo) / bb_mid
         bb_w_avg = bb_w.rolling(20).mean()
@@ -152,20 +157,20 @@ def _build_mom_snap(
     sma50_full  = pre["sma50_full"]
     sma200_full = pre["sma200_full"]
 
-    cur_rsi   = float(rsi_full.iloc[t])
     cur_sma20 = float(sma20_full.iloc[t])
     cur_sma50 = float(sma50_full.iloc[t])
 
-    recent_above_50 = bool(pre["rsi_x_above_50"].iloc[max(0, t - rsi_cross_lookback): t + 1].any())
-    recent_below_40 = bool(pre["rsi_x_below_40"].iloc[max(0, t - rsi_cross_lookback): t + 1].any())
-
     snap: dict = {
-        "cur_rsi": cur_rsi,
-        "recent_cross_above_50": recent_above_50,
-        "recent_cross_below_40": recent_below_40,
         "above_sma20": cur_close > cur_sma20,
         "above_sma50": cur_close > cur_sma50,
     }
+
+    if rsi_full is not None:
+        snap["cur_rsi"] = float(rsi_full.iloc[t])
+        snap["recent_cross_above_50"] = bool(
+            pre["rsi_x_above_50"].iloc[max(0, t - rsi_cross_lookback): t + 1].any())
+        snap["recent_cross_below_40"] = bool(
+            pre["rsi_x_below_40"].iloc[max(0, t - rsi_cross_lookback): t + 1].any())
 
     if pre["vol_ratio_full"] is not None and t < len(pre["vol_ratio_full"]):
         vr = pre["vol_ratio_full"][t]
@@ -283,6 +288,7 @@ def consolidated_backtest(
     # strategy injection (supersedes signal_generator + quality_gate + exit_rules when set)
     entry_strategy: EntryStrategyProtocol | None = None,
     exit_strategy: ExitStrategyProtocol | None = None,
+    skip_unused_indicators: bool = True,
 ) -> dict:
     """Walk-forward consolidated backtest on hourly data.
 
@@ -334,6 +340,17 @@ def consolidated_backtest(
     )
 
     effective_weights = {**_CONSOLIDATED_WEIGHTS, **(weights or {})}
+
+    # Skip whole-run setup for indicators the active strategy weights at zero
+    # (opt out with skip_unused_indicators=False, e.g. for strategy development).
+    # A vol-filter-vetoed strategy returns permanent HOLD without ever reading
+    # the regime, so the HMM can be skipped for the whole run in that case too.
+    _active_weights = getattr(entry_strategy, "_weights", None) or effective_weights
+    _vol_filter_vetoed = getattr(entry_strategy, "_vol_filter_ok", True) is False
+    hmm_enabled = not skip_unused_indicators or (
+        _active_weights.get("hmm", 0) != 0 and not _vol_filter_vetoed
+    )
+    rsi_enabled = not skip_unused_indicators or _active_weights.get("rsi", 0) != 0
 
     regime_plugin: RegimeModelProtocol = regime_model or HMMRegimeModel(
         min_train_bars=min_train_bars,
@@ -404,6 +421,7 @@ def consolidated_backtest(
         exit_on_consolidation=exit_on_consolidation,
         use_sar_stop=use_sar_stop, sar_af_start=sar_af_start,
         sar_af_step=sar_af_step, sar_af_max=sar_af_max,
+        rsi_enabled=rsi_enabled,
     )
 
     # ------------------------------------------------------------------
@@ -419,15 +437,24 @@ def consolidated_backtest(
     days_in_trade = 0
     prev_signal_flag: str | None = None
 
-    for t in range(min_train_bars, n):
-        # 1. Periodic HMM refit on expanding window
-        if regime_plugin.needs_refit(t):
-            regime_plugin.refit(returns[:t])
+    # Static sentinel used when the HMM indicator is skipped for this run.
+    _hmm_disabled_state = RegimeState(
+        p_bull=0.0, p_bear=0.0, p_bull_smooth=0.0,
+        regime_signal=None, hmm_vote=None,
+    )
 
-        # 2. HMM forward step → RegimeState (or skip bar if not yet fitted)
-        regime_state = regime_plugin.step(returns, t)
-        if regime_state is None:
-            continue
+    for t in range(min_train_bars, n):
+        if hmm_enabled:
+            # 1. Periodic HMM refit on expanding window
+            if regime_plugin.needs_refit(t):
+                regime_plugin.refit(returns[:t])
+
+            # 2. HMM forward step → RegimeState (or skip bar if not yet fitted)
+            regime_state = regime_plugin.step(returns, t)
+            if regime_state is None:
+                continue
+        else:
+            regime_state = _hmm_disabled_state
 
         # 3. Momentum snapshot for this bar
         mom_snap = _build_mom_snap(t, float(close[t]), pre)
@@ -538,7 +565,8 @@ def consolidated_backtest(
             "p_bull": round(regime_state.p_bull, 4),
             "p_bull_smooth": round(regime_state.p_bull_smooth, 4),
             "p_bear": round(regime_state.p_bear, 4),
-            "regime_signal": round(regime_state.regime_signal, 4),
+            "regime_signal": (round(regime_state.regime_signal, 4)
+                              if regime_state.regime_signal is not None else None),
             "hmm_vote": regime_state.hmm_vote,
             # --- Momentum indicators ---
             "rsi": round(mom_snap.get("cur_rsi", float("nan")), 2),

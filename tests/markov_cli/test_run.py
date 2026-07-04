@@ -21,6 +21,19 @@ class TestRun:
         assert args.buy_threshold == 3.0
         assert args.regime_smooth == 24
         assert args.min_hold_bars == 48
+        assert args.skip_unused_indicators is True
+        assert args.hmm_cache is True
+
+    def test_build_arg_parser_no_hmm_cache_flag(self):
+        from Strategy_Auto_Trader.markov_cli.run import _build_arg_parser
+        args = _build_arg_parser().parse_args(["--ticker", "AAPL", "--no-hmm-cache"])
+        assert args.hmm_cache is False
+
+    def test_build_arg_parser_signal_reports_only(self):
+        from Strategy_Auto_Trader.markov_cli.run import _build_arg_parser
+        assert _build_arg_parser().parse_args(["--ticker", "AAPL"]).signal_reports_only is False
+        args = _build_arg_parser().parse_args(["--ticker", "AAPL", "--signal-reports-only"])
+        assert args.signal_reports_only is True
 
     def test_fetch_company_info_success(self):
         from Strategy_Auto_Trader.markov_cli import run as run_mod

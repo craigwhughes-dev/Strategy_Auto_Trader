@@ -1,0 +1,46 @@
+{
+  "markets": {
+    "sp500": {
+      "watchlist": "config/watchlist_sp500.json",
+      "timezone": "America/New_York",
+      "trading_start": "09:30",
+      "trading_end": "16:00",
+      "defaults": {
+        "strategy": "optimised"
+      }
+    }
+  },
+  "markets_disabled": {
+    "ftse": {
+      "watchlist": "config/watchlist_ftse.json",
+      "timezone": "Europe/London",
+      "trading_start": "08:00",
+      "trading_end": "16:30"
+    }
+  },
+  "overnight_run_time": "02:00",
+  "overnight_timezone": "Europe/London",
+  "vol_screen": {
+    "enabled": true,
+    "min_trend_quality": 0.0,
+    "period": "2y"
+  },
+  "sentiment_screen": {
+    "enabled": true,
+    "min_sentiment_score": -0.3,
+    "exclude_labels": ["bearish"]
+  },
+  "exempt_if_open_position": true,
+  "daytime": {
+    "cycle_buffer_minutes": 5,
+    "max_seconds_per_cycle": 1500,
+    "poll_interval_seconds": 60
+  },
+  "execution": {
+    "capital_pot": 10000,
+    "max_positions": 40,
+    "daily_buy_limit": null,
+    "daily_sell_limit": null,
+    "dry_run": true
+  }
+}

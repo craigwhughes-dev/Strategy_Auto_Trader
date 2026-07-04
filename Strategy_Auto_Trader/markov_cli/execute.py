@@ -55,12 +55,97 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv: list[str] | None = None) -> int:
-    from ..broker.portfolio import PortfolioManager
+def execute_signals(
+    tickers: list[str],
+    data_dir: Path,
+    portfolio: object,
+    limit_tracker: object,
+    broker: object,
+    daily_buy_limit: int | None = 2,
+    daily_sell_limit: int | None = None,
+) -> tuple[list[str], list[str], list[str]]:
+    """Execute BUY/SELL signals for the given tickers.
+
+    Returns (buys, sells, skipped) lists of strings for logging/display.
+    Modifies portfolio and limit_tracker state in place.
+    """
     from ..broker.signal_reader import read_latest_signal
     from ..broker.types import OrderRequest
 
+    buys: list[str] = []
+    sells: list[str] = []
+    skipped: list[str] = []
+
+    buy_signals: list[tuple[str, dict]] = []
+    sell_signals: list[tuple[str, dict]] = []
+
+    for ticker in tickers:
+        signal = read_latest_signal(ticker, data_dir)
+        if signal is None or signal["flag"] == "HOLD":
+            skipped.append(ticker)
+            continue
+        if signal["flag"] == "BUY":
+            buy_signals.append((ticker, signal))
+        elif signal["flag"] == "SELL":
+            sell_signals.append((ticker, signal))
+
+    buy_signals.sort(key=lambda x: x[1]["kelly_fraction"], reverse=True)
+
+    for ticker, signal in buy_signals:
+        if not limit_tracker.can_buy(daily_buy_limit):
+            skipped.append(f"{ticker}(daily limit reached)")
+            continue
+        if not portfolio.can_open(ticker):
+            skipped.append(f"{ticker}(at capacity)")
+            continue
+        qty = portfolio.compute_quantity(
+            signal["kelly_fraction"], signal["close"]
+        )
+        if qty < 1:
+            skipped.append(f"{ticker}(qty=0)")
+            continue
+        fill = broker.place_order(OrderRequest(ticker, "BUY", qty))
+        portfolio.record_entry(
+            ticker, fill,
+            signal["kelly_fraction"],
+            signal["stop_level"],
+            signal["target_level"],
+        )
+        limit_tracker.record_buy()
+        buys.append(f"{ticker} x{qty} @ {fill.fill_price:.2f}")
+
+    for ticker, signal in sell_signals:
+        if not limit_tracker.can_sell(daily_sell_limit):
+            skipped.append(f"{ticker}(daily sell limit reached)")
+            continue
+        if ticker not in portfolio.positions:
+            skipped.append(f"{ticker}(no position)")
+            continue
+        qty = portfolio.positions[ticker]["quantity"]
+        fill = broker.place_order(OrderRequest(ticker, "SELL", qty))
+        portfolio.record_exit(ticker, fill)
+        limit_tracker.record_sell()
+        sells.append(f"{ticker} x{qty} @ {fill.fill_price:.2f}")
+
+    return buys, sells, skipped
+
+
+def main(argv: list[str] | None = None) -> int:
+    from ..broker.portfolio import PortfolioManager
+    from ..broker.signal_reader import read_latest_signal
+
     args = _build_arg_parser().parse_args(argv)
+
+    if not args.dry_run:
+        # Execution reads precomputed signals (no HMM here), but a real
+        # order run must verify the broker library before touching state.
+        from ..core.self_check import SelfCheckError, run_startup_checks
+        try:
+            run_startup_checks(require_hmm=False, require_broker=True)
+        except SelfCheckError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+
     data_dir = Path(args.data_dir)
     watchlist = _load_watchlist(Path(args.watchlist))
     defaults = watchlist.get("defaults", {})
@@ -92,61 +177,11 @@ def main(argv: list[str] | None = None) -> int:
         broker = IBKRAdapter()
 
     broker.connect()
-    buys: list[str] = []
-    sells: list[str] = []
-    skipped: list[str] = []
     try:
-        buy_signals: list[tuple[str, dict]] = []
-        sell_signals: list[tuple[str, dict]] = []
-
-        for ticker in tickers:
-            signal = read_latest_signal(ticker, data_dir)
-            if signal is None or signal["flag"] == "HOLD":
-                skipped.append(ticker)
-                continue
-            if signal["flag"] == "BUY":
-                buy_signals.append((ticker, signal))
-            elif signal["flag"] == "SELL":
-                sell_signals.append((ticker, signal))
-
-        buy_signals.sort(key=lambda x: x[1]["kelly_fraction"], reverse=True)
-
-        for ticker, signal in buy_signals:
-            if not limit_tracker.can_buy(daily_buy_limit):
-                skipped.append(f"{ticker}(daily limit reached)")
-                continue
-            if not portfolio.can_open(ticker):
-                skipped.append(f"{ticker}(at capacity)")
-                continue
-            qty = portfolio.compute_quantity(
-                signal["kelly_fraction"], signal["close"]
-            )
-            if qty < 1:
-                skipped.append(f"{ticker}(qty=0)")
-                continue
-            fill = broker.place_order(OrderRequest(ticker, "BUY", qty))
-            portfolio.record_entry(
-                ticker, fill,
-                signal["kelly_fraction"],
-                signal["stop_level"],
-                signal["target_level"],
-            )
-            limit_tracker.record_buy()
-            buys.append(f"{ticker} x{qty} @ {fill.fill_price:.2f}")
-
-        for ticker, signal in sell_signals:
-            if not limit_tracker.can_sell(daily_sell_limit):
-                skipped.append(f"{ticker}(daily sell limit reached)")
-                continue
-            if ticker not in portfolio.positions:
-                skipped.append(f"{ticker}(no position)")
-                continue
-            qty = portfolio.positions[ticker]["quantity"]
-            fill = broker.place_order(OrderRequest(ticker, "SELL", qty))
-            portfolio.record_exit(ticker, fill)
-            limit_tracker.record_sell()
-            sells.append(f"{ticker} x{qty} @ {fill.fill_price:.2f}")
-
+        buys, sells, skipped = execute_signals(
+            tickers, data_dir, portfolio, limit_tracker, broker,
+            daily_buy_limit, daily_sell_limit
+        )
     finally:
         broker.disconnect()
 

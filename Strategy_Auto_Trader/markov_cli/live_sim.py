@@ -69,13 +69,25 @@ def _fetch_and_extract(
     entry_s, exit_s = resolve_strategy(strategy_name, vol_filter_ok=vol_filter_ok)
     position_sizer = KellySizer(use_kelly=True, lookback=20)
 
+    from pathlib import Path
+    from ..plugins.persistent_hmm import PersistentHMMRegimeModel
+    safe_ticker = ticker.replace("/", "-").replace("\\", "-")
+    cache_dir = Path(__file__).resolve().parent.parent.parent / "state" / "hmm_cache"
+    regime_model = PersistentHMMRegimeModel(
+        cache_dir / f"{safe_ticker}.pkl",
+        dates=df.index,
+        closes=df["Close"].values,
+    )
+
     bt = consolidated_backtest(
         df,
+        regime_model=regime_model,
         position_sizer=position_sizer,
         context_adjuster=SentimentAdjuster(),
         entry_strategy=entry_s,
         exit_strategy=exit_s,
     )
+    regime_model.save()
     detail = bt.get("detail", pd.DataFrame())
     if detail.empty:
         print(f"  {ticker}: insufficient data, skipping")

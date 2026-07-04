@@ -68,6 +68,32 @@ class TestOptimisedStrategy:
         assert decision.flag == "HOLD"
         assert "RSI" in decision.reason
 
+    def test_optimised_rsi_veto_googl_2024_03_14_regardless_of_hmm(self):
+        # Reconstructed from data/journals/backtest.csv: GOOGL 2024-03-14 09:30
+        # EDT, rsi_at_entry 72.68, regime_at_entry 0.9199, volume_ratio 1.91.
+        # The journal (generated before the RSI>70 veto existed) shows this as
+        # an entered optimised trade; current code must veto it to HOLD — and
+        # the outcome is identical for every possible HMM state, including the
+        # disabled-HMM sentinel, since the veto fires on RSI alone.
+        from Strategy_Auto_Trader.strategy.optimised import OptimisedEntry
+        from Strategy_Auto_Trader.plugins.types import RegimeState
+        entry = OptimisedEntry()
+        mom = {"cur_rsi": 72.68, "recent_cross_above_50": False,
+               "recent_cross_below_40": False, "above_sma20": True,
+               "above_sma50": True, "above_sma200": True, "volume_ratio": 1.91}
+        regimes = [
+            RegimeState(p_bull=0.92, p_bear=0.0, p_bull_smooth=0.92,
+                        regime_signal=0.9199, hmm_vote=2),   # as journalled
+            RegimeState(p_bull=0.5, p_bear=0.3, p_bull_smooth=0.5,
+                        regime_signal=0.2, hmm_vote=1),      # sideways
+            RegimeState(p_bull=0.0, p_bear=0.0, p_bull_smooth=0.0,
+                        regime_signal=None, hmm_vote=None),  # HMM disabled
+        ]
+        for regime in regimes:
+            decision = entry.evaluate(regime, mom, 1.91, currently_in=False)
+            assert decision.flag == "HOLD", f"not vetoed for hmm_vote={regime.hmm_vote}"
+            assert "RSI > 70" in decision.reason
+
     def test_optimised_entry_vetoes_negative_regime(self):
         from Strategy_Auto_Trader.strategy.optimised import OptimisedEntry
         from Strategy_Auto_Trader.plugins.types import RegimeState
