@@ -70,6 +70,7 @@ def execute_signals(
     Modifies portfolio and limit_tracker state in place.
     """
     from ..broker.signal_reader import read_latest_signal
+    from ..broker.symbols import sizing_price
     from ..broker.types import OrderRequest
 
     buys: list[str] = []
@@ -99,7 +100,7 @@ def execute_signals(
             skipped.append(f"{ticker}(at capacity)")
             continue
         qty = portfolio.compute_quantity(
-            signal["kelly_fraction"], signal["close"]
+            signal["kelly_fraction"], sizing_price(ticker, signal["close"])
         )
         if qty < 1:
             skipped.append(f"{ticker}(qty=0)")

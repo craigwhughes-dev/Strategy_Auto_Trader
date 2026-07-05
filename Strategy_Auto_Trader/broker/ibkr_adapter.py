@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from .symbols import ibkr_contract_params
 from .types import FillResult, OrderRequest
 
 
@@ -62,9 +63,9 @@ class IBKRAdapter:
             self._ib = None
 
     def get_last_price(self, ticker: str) -> float:
-        """Return last traded / midpoint price for a US equity."""
+        """Return last traded / midpoint price (pence for LSE tickers)."""
         from ib_insync import Stock
-        contract = Stock(ticker, "SMART", "USD")
+        contract = Stock(*ibkr_contract_params(ticker))
         self._ib.qualifyContracts(contract)
         tdata = self._ib.reqMktData(contract, "", True, False)
         self._ib.sleep(2)
@@ -78,7 +79,7 @@ class IBKRAdapter:
     def place_order(self, req: OrderRequest) -> FillResult:
         """Submit a market order and wait for fill (up to self._timeout seconds)."""
         from ib_insync import Stock, MarketOrder
-        contract = Stock(req.ticker, "SMART", "USD")
+        contract = Stock(*ibkr_contract_params(req.ticker))
         self._ib.qualifyContracts(contract)
         order = MarketOrder(req.action, req.quantity)
         trade = self._ib.placeOrder(contract, order)

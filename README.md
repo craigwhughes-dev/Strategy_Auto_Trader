@@ -110,3 +110,17 @@ tests/           # pytest suite (mirrors the package structure)
 - **[USERGUIDE.md](USERGUIDE.md)** — every CLI option, signal weighting, exit rule, output file, watchlist format, email setup, and IBKR configuration
 - **[README_DAEMON.md](README_DAEMON.md)** — deploying the continuous trading daemon on Windows Task Scheduler
 - **[TASK_SCHEDULER_SETUP.md](TASK_SCHEDULER_SETUP.md)** — scheduled batch runs after LSE/NYSE close
+
+## Example email
+
+Trade alerts arrive as a self-contained HTML email per ticker: the signal (BUY/SELL/HOLD) with the composite score, the individual signal votes behind it, momentum indicators, trailing-stop status, and the exit-indicator panel (MACD and RSI-reversal state). A BUY alert looks like this:
+
+![Example BUY alert email for GOOGL](docs/example_email.png)
+
+The daily roundup email is a companion summary: one row per watchlist ticker showing its current signal (with any trade event highlighted), close price, composite score, P&L, and strategy return versus buy-and-hold.
+
+## IBKR paper trading
+
+When the daemon runs with dry-run disabled, orders route to Interactive Brokers TWS (paper account) and appear in the TWS Mosaic view:
+
+![IBKR TWS paper trading view](docs/ibkr_trader_view.png)

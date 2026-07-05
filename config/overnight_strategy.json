@@ -1,5 +1,16 @@
 {
   "markets": {
+    "ftse": {
+      "watchlist": "config/watchlist_ftse.json",
+      "timezone": "Europe/London",
+      "trading_start": "08:00",
+      "trading_end": "16:30",
+      "defaults": {
+        "strategy": "optimised"
+      }
+    }
+  },
+  "markets_disabled": {
     "sp500": {
       "watchlist": "config/watchlist_sp500.json",
       "timezone": "America/New_York",
@@ -8,14 +19,6 @@
       "defaults": {
         "strategy": "optimised"
       }
-    }
-  },
-  "markets_disabled": {
-    "ftse": {
-      "watchlist": "config/watchlist_ftse.json",
-      "timezone": "Europe/London",
-      "trading_start": "08:00",
-      "trading_end": "16:30"
     }
   },
   "overnight_run_time": "02:00",
@@ -41,6 +44,6 @@
     "max_positions": 40,
     "daily_buy_limit": null,
     "daily_sell_limit": null,
-    "dry_run": true
+    "dry_run": false
   }
 }

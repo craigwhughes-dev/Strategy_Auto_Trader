@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from pathlib import Path
 
 import pandas as pd
 
@@ -247,6 +248,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vol-filter-exempt", nargs="+", default=[],
                         help="Strategy names that trade the full ticker list, bypassing the vol filter "
                              "(other strategies in --strategies still get filtered)")
+    parser.add_argument("--journal", default=None,
+                        help="Journal CSV to append trades to (default: data/journals/live.csv)")
     args = parser.parse_args(argv)
 
     print(f"Live simulation: {len(args.tickers)} tickers x {len(args.strategies)} strategies")
@@ -291,8 +294,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         all_executed.extend(executed)
 
-    n_logged = append_trades(LIVE_JOURNAL, all_executed)
-    print(f"\n{'='*64}\n {n_logged} trade(s) logged to {LIVE_JOURNAL}\n{'='*64}")
+    journal_path = Path(args.journal) if args.journal else LIVE_JOURNAL
+    n_logged = append_trades(journal_path, all_executed)
+    print(f"\n{'='*64}\n {n_logged} trade(s) logged to {journal_path}\n{'='*64}")
     return 0
 
 
