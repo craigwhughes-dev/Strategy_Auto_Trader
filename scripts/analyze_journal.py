@@ -43,8 +43,8 @@ def _fmt(df: pd.DataFrame) -> None:
         print(df.to_string())
 
 
-def load_journal() -> pd.DataFrame:
-    df = pd.read_csv(JOURNAL)
+def load_journal(path: Path | None = None) -> pd.DataFrame:
+    df = pd.read_csv(path or JOURNAL)
     n_raw = len(df)
     # vol-filter skip rows have no exit; keep only closed round trips
     df = df[df["date_closed"].notna() & (df["date_closed"].astype(str) != "")].copy()
@@ -52,8 +52,9 @@ def load_journal() -> pd.DataFrame:
         df[col] = pd.to_datetime(df[col], utc=True, format="mixed")
     for col in ("entry_score", "entry_price", "regime_at_entry", "rsi_at_entry",
                 "volume_ratio", "exit_price", "pnl_usd", "return_pct",
-                "days_held", "peak_gain", "peak_loss"):
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+                "days_held", "peak_gain", "peak_loss", "bh_return"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
     print(f"Loaded {n_raw} rows -> {len(df)} closed trades "
           f"({n_raw - len(df)} skip/open rows dropped)")
     print(f"Window: {df['date_opened'].min()} .. {df['date_closed'].max()}")
@@ -226,13 +227,96 @@ def a9_concentration(df: pd.DataFrame, best: str) -> None:
               "choices as fragile / overfit-prone.")
 
 
+def a10_capital_efficiency(df: pd.DataFrame, capital: float | None = None,
+                           risk_free: float = 0.045) -> dict | None:
+    """Exposure-adjusted comparison vs buy & hold.
+
+    The journal has no position-size column, so each trade's notional is
+    recovered as pnl_usd / return_pct (return_pct is a fraction). Trades with
+    a zero return carry no recoverable notional and are excluded from the
+    dollar-day sums (their P&L is zero, so total_pnl is unaffected).
+    """
+    _hr("A10  Capital efficiency: return per dollar-year deployed vs buy & hold")
+    d = df[df["return_pct"].notna() & (df["return_pct"] != 0)].copy()
+    if d.empty:
+        print("No trades with recoverable notional (all zero-return); skipping.")
+        return None
+
+    d["notional"] = d["pnl_usd"] / d["return_pct"]
+    d["exposure_days"] = (d["date_closed"] - d["date_opened"]).dt.total_seconds() / 86400.0
+    dollar_days = float((d["notional"] * d["exposure_days"]).sum())
+    span_days = (df["date_closed"].max() - df["date_opened"].min()).total_seconds() / 86400.0
+    total_pnl = float(df["pnl_usd"].sum())
+
+    if dollar_days <= 0 or span_days <= 0:
+        print("Zero dollar-days or zero window span; skipping.")
+        return None
+
+    avg_deployed = dollar_days / span_days
+    ann_on_deployed = total_pnl / dollar_days * 365.0
+
+    # peak concurrent exposure: exposure can only peak at an entry timestamp
+    max_concurrent, max_when = 0.0, None
+    for t in d["date_opened"]:
+        open_now = d[(d["date_opened"] <= t) & (d["date_closed"] > t)]
+        s = float(open_now["notional"].sum())
+        if s > max_concurrent:
+            max_concurrent, max_when = s, t
+
+    years = span_days / 365.0
+    print(f"Window: {span_days:,.0f} days ({years:.2f}y), {len(d)} trades with notional")
+    print(f"Total P&L:                       {total_pnl:>12,.2f}")
+    print(f"Avg capital deployed:            {avg_deployed:>12,.2f}")
+    print(f"Peak concurrent exposure:        {max_concurrent:>12,.2f}  at {max_when}")
+    print(f"Return per dollar-year deployed: {ann_on_deployed:>12.2%}")
+
+    bh_ann = None
+    if "bh_return" in df.columns and df["bh_return"].notna().any():
+        last = df.sort_values("date_closed").groupby("ticker").last()
+        bh_avg = float(last["bh_return"].mean())
+        if bh_avg > -1:
+            bh_ann = (1.0 + bh_avg) ** (365.0 / span_days) - 1.0
+            print(f"Buy & hold (equal-weight, same tickers/window, annualised): {bh_ann:.2%}")
+            print("  -> B&H is 100% deployed, so this is directly comparable to the "
+                  "per-dollar-year figure above.")
+
+    blended_ann = None
+    if capital:
+        utilisation = avg_deployed / capital
+        idle_yield = (capital - avg_deployed) * risk_free * years
+        blended_ann = (1.0 + (total_pnl + idle_yield) / capital) ** (1.0 / years) - 1.0
+        print(f"\nWith total capital {capital:,.0f} (utilisation {utilisation:.1%}, "
+              f"idle cash at {risk_free:.1%} risk-free):")
+        print(f"Blended portfolio return (annualised): {blended_ann:.2%}")
+        print("Reading: if per-dollar-year beats B&H but the blended figure lags, "
+              "the edge is real and utilisation is the bottleneck — size up or "
+              "run more concurrent positions rather than changing the signals.")
+
+    return {
+        "total_pnl": total_pnl,
+        "dollar_days": dollar_days,
+        "span_days": span_days,
+        "avg_deployed": avg_deployed,
+        "ann_return_on_deployed": ann_on_deployed,
+        "max_concurrent": max_concurrent,
+        "bh_annualised": bh_ann,
+        "blended_annualised": blended_ann,
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--no-forward", action="store_true",
                     help="skip the A7 forward-return fetches")
+    ap.add_argument("--journal", default=None,
+                    help="journal CSV to analyse (default: data/journals/live.csv)")
+    ap.add_argument("--capital", type=float, default=None,
+                    help="total account capital, enables blended-return figure in A10")
+    ap.add_argument("--risk-free", type=float, default=0.045,
+                    help="annual risk-free rate applied to idle cash in A10 (default 0.045)")
     args = ap.parse_args()
 
-    df = load_journal()
+    df = load_journal(Path(args.journal) if args.journal else None)
     a1 = a1_per_strategy(df)
     a2_entry_score(df)
     a3_rsi(df)
@@ -242,6 +326,7 @@ def main() -> None:
     if not args.no_forward:
         a7_forward_returns(df)
     a8_days_held(df)
+    a10_capital_efficiency(df, capital=args.capital, risk_free=args.risk_free)
     best = a1["total_pnl"].idxmax()
     a9_concentration(df, best)
     recommended_parameters(df, best)

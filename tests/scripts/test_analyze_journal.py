@@ -382,6 +382,111 @@ class TestA9Concentration:
         assert "A9  Per-ticker P&L" in captured.out
 
 
+class TestA10CapitalEfficiency:
+
+    @staticmethod
+    def _df(rows):
+        df = pd.DataFrame(rows)
+        for col in ("date_opened", "date_closed"):
+            df[col] = pd.to_datetime(df[col], utc=True, format="mixed")
+        return df
+
+    def test_basic_single_trade(self, capsys):
+        from scripts import analyze_journal
+        # $1000 notional held 36.5 days for +$50 -> 5% per 0.1y = 50%/dollar-year
+        df = self._df([{
+            "date_opened": "2025-01-01", "date_closed": "2025-02-06 12:00:00",
+            "ticker": "SPY", "pnl_usd": 50.0, "return_pct": 0.05,
+        }])
+        r = analyze_journal.a10_capital_efficiency(df)
+        assert r is not None
+        assert r["total_pnl"] == pytest.approx(50.0)
+        assert r["dollar_days"] == pytest.approx(1000.0 * 36.5)
+        assert r["ann_return_on_deployed"] == pytest.approx(0.50)
+        assert r["max_concurrent"] == pytest.approx(1000.0)
+        assert "A10" in capsys.readouterr().out
+
+    def test_overlapping_trades_peak_exposure(self):
+        from scripts import analyze_journal
+        df = self._df([
+            {"date_opened": "2025-01-01", "date_closed": "2025-01-20",
+             "ticker": "A", "pnl_usd": 10.0, "return_pct": 0.01},   # 1000
+            {"date_opened": "2025-01-10", "date_closed": "2025-01-30",
+             "ticker": "B", "pnl_usd": 40.0, "return_pct": 0.02},   # 2000
+            {"date_opened": "2025-02-05", "date_closed": "2025-02-15",
+             "ticker": "C", "pnl_usd": -15.0, "return_pct": -0.03},  # 500
+        ])
+        r = analyze_journal.a10_capital_efficiency(df)
+        assert r["max_concurrent"] == pytest.approx(3000.0)
+
+    def test_disjoint_trades_peak_is_largest_single(self):
+        from scripts import analyze_journal
+        df = self._df([
+            {"date_opened": "2025-01-01", "date_closed": "2025-01-10",
+             "ticker": "A", "pnl_usd": 10.0, "return_pct": 0.01},   # 1000
+            {"date_opened": "2025-02-01", "date_closed": "2025-02-10",
+             "ticker": "B", "pnl_usd": 5.0, "return_pct": 0.02},    # 250
+        ])
+        r = analyze_journal.a10_capital_efficiency(df)
+        assert r["max_concurrent"] == pytest.approx(1000.0)
+
+    def test_zero_return_rows_excluded_from_notional(self):
+        from scripts import analyze_journal
+        df = self._df([
+            {"date_opened": "2025-01-01", "date_closed": "2025-01-10",
+             "ticker": "A", "pnl_usd": 10.0, "return_pct": 0.01},
+            {"date_opened": "2025-01-02", "date_closed": "2025-01-05",
+             "ticker": "B", "pnl_usd": 0.0, "return_pct": 0.0},
+        ])
+        r = analyze_journal.a10_capital_efficiency(df)
+        assert r["dollar_days"] == pytest.approx(1000.0 * 9)
+        assert r["max_concurrent"] == pytest.approx(1000.0)
+
+    def test_all_zero_returns_skips(self, capsys):
+        from scripts import analyze_journal
+        df = self._df([{
+            "date_opened": "2025-01-01", "date_closed": "2025-01-10",
+            "ticker": "A", "pnl_usd": 0.0, "return_pct": 0.0,
+        }])
+        assert analyze_journal.a10_capital_efficiency(df) is None
+        assert "skipping" in capsys.readouterr().out
+
+    def test_bh_comparison_uses_last_row_per_ticker(self, capsys):
+        from scripts import analyze_journal
+        df = self._df([
+            {"date_opened": "2025-01-01", "date_closed": "2025-07-02 12:00:00",
+             "ticker": "A", "pnl_usd": 10.0, "return_pct": 0.01, "bh_return": 0.05},
+            {"date_opened": "2025-07-03", "date_closed": "2026-01-01",
+             "ticker": "A", "pnl_usd": 10.0, "return_pct": 0.01, "bh_return": 0.10},
+        ])
+        r = analyze_journal.a10_capital_efficiency(df)
+        # span = 365d, last bh_return for A = 0.10 -> annualised 10%
+        assert r["bh_annualised"] == pytest.approx(0.10, rel=1e-3)
+        assert "Buy & hold" in capsys.readouterr().out
+
+    def test_blended_return_with_capital(self, capsys):
+        from scripts import analyze_journal
+        # one trade, $1000 deployed the whole 365d window, +$100
+        df = self._df([{
+            "date_opened": "2025-01-01", "date_closed": "2026-01-01",
+            "ticker": "A", "pnl_usd": 100.0, "return_pct": 0.10,
+        }])
+        r = analyze_journal.a10_capital_efficiency(df, capital=10_000.0, risk_free=0.04)
+        # idle 9000 * 4% = 360; (100+360)/10000 = 4.6% over exactly 1 year
+        assert r["blended_annualised"] == pytest.approx(0.046, rel=1e-3)
+        assert "utilisation" in capsys.readouterr().out
+
+    def test_no_capital_no_blended(self):
+        from scripts import analyze_journal
+        df = self._df([{
+            "date_opened": "2025-01-01", "date_closed": "2025-02-01",
+            "ticker": "A", "pnl_usd": 10.0, "return_pct": 0.01,
+        }])
+        r = analyze_journal.a10_capital_efficiency(df)
+        assert r["blended_annualised"] is None
+        assert r["bh_annualised"] is None
+
+
 class TestRecommendedParameters:
 
     def test_recommended_parameters_basic(self, capsys):
