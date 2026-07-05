@@ -209,6 +209,29 @@ def send_daily_roundup(results: list[dict], failed: list[dict]) -> None:
     print(f"  Roundup email sent: {subject}")
 
 
+def send_reconciliation_alert(discrepancies: list[str]) -> None:
+    """Alert that broker account positions disagree with internal state."""
+    items = "".join(
+        f'<li style="color:#ffcdd2;padding:4px 0">{d}</li>' for d in discrepancies
+    )
+    html = f"""<html><body style="margin:0;padding:20px;background:#0f1117;font-family:system-ui,sans-serif;color:#e0e0e0">
+<div style="max-width:700px;margin:0 auto">
+  <h1 style="color:#ef9a9a;margin:0 0 4px">Reconciliation mismatch</h1>
+  <div style="color:#888;margin-bottom:16px">IBKR account positions disagree with execution_state.json</div>
+  <div style="background:#2a1a1a;border:1px solid #4a2a2a;border-radius:8px;padding:12px 16px;margin:16px 0">
+    <ul style="margin:0;padding-left:20px">{items}</ul>
+  </div>
+  <p style="color:#ddd">New entries are halted until reconciliation passes clean.
+  Resolve the discrepancy manually (TWS and/or state/execution_state.json), then
+  the next nightly check — or a daemon restart — will re-enable buying.</p>
+</div></body></html>"""
+
+    n = len(discrepancies)
+    subject = f"RECONCILIATION MISMATCH: {n} discrepanc{'ies' if n != 1 else 'y'} — new entries halted"
+    _send(subject, html)
+    print(f"  Reconciliation alert sent: {subject}")
+
+
 def send_portfolio_status(positions: list[dict]) -> None:
     """Send a portfolio status email showing all active trades with P&L since entry."""
     if not positions:

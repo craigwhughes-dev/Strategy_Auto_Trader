@@ -23,6 +23,7 @@
   },
   "overnight_run_time": "02:00",
   "overnight_timezone": "Europe/London",
+  "reconciliation_run_time": "21:30",
   "vol_screen": {
     "enabled": true,
     "min_trend_quality": 0.0,

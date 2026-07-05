@@ -258,6 +258,150 @@ def test_process_cycle_market_config_can_override_reports_default(monkeypatch):
     assert captured["defaults"]["signal_reports_only"] is False
 
 
+class TestReconciliation:
+    """run_reconciliation / check_nightly_reconciliation / halt enforcement."""
+
+    def _portfolio(self, positions):
+        p = mock.Mock()
+        p.positions = positions
+        return p
+
+    def _broker(self, positions):
+        b = mock.Mock()
+        b.get_open_positions.return_value = positions
+        return b
+
+    def test_clean_pass_clears_halt(self, monkeypatch):
+        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
+        daemon_state = {"halt_new_entries": True}
+
+        outcome = live_daemon.run_reconciliation(
+            self._portfolio({"SPY": {"quantity": 10}}),
+            self._broker({"SPY": 10}),
+            daemon_state, mock.Mock(),
+        )
+        assert outcome == "clean"
+        assert daemon_state["halt_new_entries"] is False
+        assert daemon_state["reconciliation_discrepancies"] == []
+
+    def test_mismatch_sets_halt_and_emails(self, monkeypatch):
+        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
+        sent = {}
+        from Strategy_Auto_Trader.output import emailer
+        monkeypatch.setattr(emailer, "send_reconciliation_alert",
+                            lambda d: sent.update(discrepancies=d))
+        daemon_state = {}
+
+        outcome = live_daemon.run_reconciliation(
+            self._portfolio({"SPY": {"quantity": 10}}),
+            self._broker({"SPY": 7}),
+            daemon_state, mock.Mock(),
+        )
+        assert outcome == "mismatch"
+        assert daemon_state["halt_new_entries"] is True
+        assert len(daemon_state["reconciliation_discrepancies"]) == 1
+        assert len(sent["discrepancies"]) == 1
+
+    def test_email_failure_does_not_mask_mismatch(self, monkeypatch):
+        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
+        from Strategy_Auto_Trader.output import emailer
+        monkeypatch.setattr(emailer, "send_reconciliation_alert",
+                            mock.Mock(side_effect=RuntimeError("smtp down")))
+        daemon_state = {}
+
+        outcome = live_daemon.run_reconciliation(
+            self._portfolio({"SPY": {"quantity": 10}}),
+            self._broker({}),
+            daemon_state, mock.Mock(),
+        )
+        assert outcome == "mismatch"
+        assert daemon_state["halt_new_entries"] is True
+
+    def test_broker_fetch_error_returns_error_and_keeps_halt(self, monkeypatch):
+        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
+        broker = mock.Mock()
+        broker.get_open_positions.side_effect = ConnectionError("TWS gone")
+        daemon_state = {"halt_new_entries": True}
+
+        outcome = live_daemon.run_reconciliation(
+            self._portfolio({}), broker, daemon_state, mock.Mock(),
+        )
+        assert outcome == "error"
+        assert daemon_state["halt_new_entries"] is True
+
+    def _nightly(self, monkeypatch, daemon_state, outcome, at_hour=21, at_minute=30):
+        config = {"overnight_timezone": "Europe/London",
+                  "reconciliation_run_time": "21:30"}
+        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
+        run_mock = mock.Mock(return_value=outcome)
+        monkeypatch.setattr(live_daemon, "run_reconciliation", run_mock)
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(
+                2026, 7, 6, at_hour, at_minute, tzinfo=ZoneInfo("Europe/London"))
+            live_daemon.check_nightly_reconciliation(
+                config, daemon_state, mock.Mock(), mock.Mock(), mock.Mock())
+        return run_mock
+
+    def test_nightly_runs_at_configured_time(self, monkeypatch):
+        daemon_state = {}
+        run_mock = self._nightly(monkeypatch, daemon_state, "clean")
+        assert run_mock.called
+        assert daemon_state["last_reconcile_date"] == "2026-07-06"
+
+    def test_nightly_skips_before_run_time(self, monkeypatch):
+        daemon_state = {}
+        run_mock = self._nightly(monkeypatch, daemon_state, "clean", at_hour=15)
+        assert not run_mock.called
+        assert "last_reconcile_date" not in daemon_state
+
+    def test_nightly_skips_if_already_run_today(self, monkeypatch):
+        daemon_state = {"last_reconcile_date": "2026-07-06"}
+        run_mock = self._nightly(monkeypatch, daemon_state, "clean")
+        assert not run_mock.called
+
+    def test_nightly_mismatch_still_marks_date(self, monkeypatch):
+        daemon_state = {}
+        self._nightly(monkeypatch, daemon_state, "mismatch")
+        assert daemon_state["last_reconcile_date"] == "2026-07-06"
+
+    def test_nightly_fetch_error_retries(self, monkeypatch):
+        daemon_state = {}
+        self._nightly(monkeypatch, daemon_state, "error")
+        assert "last_reconcile_date" not in daemon_state
+
+
+def test_process_cycle_halt_flag_blocks_new_entries(monkeypatch):
+    """halt_new_entries forces daily_buy_limit=0 into execute_signals."""
+    from Strategy_Auto_Trader.markov_cli import batch, execute
+
+    def fake_process_ticker(ticker_cfg, defaults, send_email):
+        return {"ticker": "AAPL", "status": "OK", "time": 0.0,
+                "result": {"ticker": "AAPL", "close": 100.0}}
+
+    captured = {}
+
+    def fake_execute_signals(tickers, data_dir, portfolio, limit_tracker,
+                             broker, daily_buy_limit, daily_sell_limit):
+        captured["daily_buy_limit"] = daily_buy_limit
+        return [], [], []
+
+    monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
+    monkeypatch.setattr(execute, "execute_signals", fake_execute_signals)
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+
+    config = {
+        "daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0},
+        "execution": {"daily_buy_limit": 5},
+    }
+    daemon_state = {"cursors": {}, "halt_new_entries": True}
+    live_daemon.process_cycle(
+        "test_market", {}, config, daemon_state,
+        portfolio=mock.Mock(), broker=mock.Mock(spec=[]), logger=mock.Mock(),
+    )
+    assert captured["daily_buy_limit"] == 0
+
+
 def test_main_refuses_to_start_when_self_check_fails(monkeypatch, config):
     """A failed startup self-check must abort the daemon with exit code 1
     before any broker/portfolio setup happens."""

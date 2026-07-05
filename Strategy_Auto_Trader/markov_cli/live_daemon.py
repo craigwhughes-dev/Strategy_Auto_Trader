@@ -257,6 +257,12 @@ def process_cycle(
                 exec_cfg = config.get("execution", {})
                 daily_buy_limit = exec_cfg.get("daily_buy_limit", 2)
                 daily_sell_limit = exec_cfg.get("daily_sell_limit")
+                if daemon_state.get("halt_new_entries"):
+                    # Reconciliation mismatch: block new entries (buy limit 0)
+                    # but still allow exits of existing positions.
+                    logger.warning(f"[{market_name}] Reconciliation mismatch "
+                                   f"unresolved — new entries blocked")
+                    daily_buy_limit = 0
                 buys, sells, skipped = execute_signals(
                     ticker_list, DATA_DIR, portfolio, limit_tracker, broker,
                     daily_buy_limit, daily_sell_limit
@@ -303,6 +309,81 @@ def check_overnight_screening(
             logger.info("Overnight scope screening complete")
         except Exception as e:
             logger.error(f"Error in overnight screening: {e}")
+
+
+def run_reconciliation(
+    portfolio: object,
+    broker: object,
+    daemon_state: dict,
+    logger: logging.Logger,
+) -> bool:
+    """Compare broker account positions against internal execution state.
+
+    On mismatch: log, email an alert, and set halt_new_entries so no new
+    positions are opened until a clean pass. Never auto-corrects either side.
+    Returns "clean", "mismatch", or "error" (broker positions unavailable).
+    """
+    from ..broker.reconcile import reconcile_positions
+
+    try:
+        broker_positions = broker.get_open_positions()
+    except Exception as e:
+        logger.error(f"Reconciliation: could not fetch broker positions: {e}")
+        return "error"
+
+    discrepancies = reconcile_positions(portfolio.positions, broker_positions)
+
+    if discrepancies:
+        logger.error(f"RECONCILIATION MISMATCH ({len(discrepancies)} discrepancies) "
+                     f"— halting new entries:")
+        for d in discrepancies:
+            logger.error(f"  {d}")
+        daemon_state["halt_new_entries"] = True
+        daemon_state["reconciliation_discrepancies"] = discrepancies
+        save_daemon_state(daemon_state)
+        try:
+            from ..output.emailer import send_reconciliation_alert
+            send_reconciliation_alert(discrepancies)
+        except Exception as e:
+            logger.error(f"Reconciliation: alert email failed: {e}")
+        return "mismatch"
+
+    if daemon_state.get("halt_new_entries"):
+        logger.info("Reconciliation clean — re-enabling new entries")
+    else:
+        logger.info(f"Reconciliation clean: {len(portfolio.positions)} internal "
+                    f"positions match broker")
+    daemon_state["halt_new_entries"] = False
+    daemon_state["reconciliation_discrepancies"] = []
+    save_daemon_state(daemon_state)
+    return "clean"
+
+
+def check_nightly_reconciliation(
+    config: dict,
+    daemon_state: dict,
+    portfolio: object,
+    broker: object,
+    logger: logging.Logger,
+) -> None:
+    """Run reconciliation once per day at the configured time (after close)."""
+    tz = ZoneInfo(config.get("overnight_timezone", "Europe/London"))
+    now = datetime.now(tz)
+    run_time_str = config.get("reconciliation_run_time", "21:30")
+    run_hour, run_minute = map(int, run_time_str.split(":"))
+
+    today = now.date().isoformat()
+    if daemon_state.get("last_reconcile_date") == today:
+        return
+
+    if now.hour == run_hour and now.minute >= run_minute:
+        logger.info("Running nightly position reconciliation...")
+        outcome = run_reconciliation(portfolio, broker, daemon_state, logger)
+        # A broker fetch error is not a daily result — leave the date unset so
+        # it retries on the next poll within the run window.
+        if outcome in ("clean", "mismatch"):
+            daemon_state["last_reconcile_date"] = today
+            save_daemon_state(daemon_state)
 
 
 def main() -> int:
@@ -352,6 +433,13 @@ def main() -> int:
         if not dry_run:
             return 1
 
+    # Startup reconciliation — catch drift from downtime, crashes between
+    # fill and state write, or manual TWS trades. Skipped in dry_run because
+    # the NullBroker holds no real account.
+    if not dry_run:
+        logger.info("Running startup position reconciliation...")
+        run_reconciliation(portfolio, broker, daemon_state, logger)
+
     try:
         poll_interval = config.get("daytime", {}).get("poll_interval_seconds", 60)
         last_cycle_hour = {}
@@ -361,6 +449,12 @@ def main() -> int:
             try:
                 # Check overnight screening
                 check_overnight_screening(config, daemon_state, logger)
+
+                # Nightly broker/state reconciliation (real broker only)
+                if not dry_run:
+                    check_nightly_reconciliation(
+                        config, daemon_state, portfolio, broker, logger
+                    )
 
                 # Check each market
                 now = datetime.now(timezone.utc)
