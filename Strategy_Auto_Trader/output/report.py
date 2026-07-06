@@ -485,6 +485,16 @@ def write_daily_summary(
     f'<td style="padding:5px 12px;color:#82b1ff;text-align:right;white-space:nowrap">{_f2(bt.get("sharpe_bh",float("nan")))}</td>'
     f'</tr>',
     f'<tr>'
+    f'<td style="padding:5px 12px;color:#aaa">Sortino (ann.)</td>'
+    f'<td style="padding:5px 12px;color:#69f0ae;text-align:right;white-space:nowrap">{_f2(bt.get("sortino_strategy",float("nan")))}</td>'
+    f'<td style="padding:5px 12px;color:#82b1ff;text-align:right;white-space:nowrap">{_f2(bt.get("sortino_bh",float("nan")))}</td>'
+    f'</tr>',
+    f'<tr>'
+    f'<td style="padding:5px 12px;color:#aaa">Calmar</td>'
+    f'<td style="padding:5px 12px;color:#69f0ae;text-align:right;white-space:nowrap">{_f2(bt.get("calmar_strategy",float("nan")))}</td>'
+    f'<td style="padding:5px 12px;color:#82b1ff;text-align:right;white-space:nowrap">{_f2(bt.get("calmar_bh",float("nan")))}</td>'
+    f'</tr>',
+    f'<tr>'
     f'<td style="padding:5px 12px;color:#aaa">Total return</td>'
     f'<td style="padding:5px 12px;color:#69f0ae;text-align:right;white-space:nowrap">{_pct(bt.get("total_return_strategy",float("nan")), sign=True)}</td>'
     f'<td style="padding:5px 12px;color:#82b1ff;text-align:right;white-space:nowrap">{_pct(bt.get("total_return_bh",float("nan")), sign=True)}</td>'

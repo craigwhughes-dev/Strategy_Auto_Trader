@@ -75,6 +75,12 @@ def record_sell(ticker: str, context: dict | None = None) -> None:
     entry_price = float(entry.get("price", 0) or 0)
     exit_price = float(context.get("price", 0) or 0)
     return_pct = (exit_price - entry_price) / entry_price if entry_price else 0.0
+
+    # Market's move over the hold: bh_return is cumulative, so compound the
+    # entry-time and exit-time values (0.0 when entry predates the field)
+    bh_at_entry = float(entry.get("bh_return", 0) or 0)
+    bh_at_exit = float(context.get("bh_return", 0) or 0)
+    market_ret = ((1 + bh_at_exit) / (1 + bh_at_entry) - 1.0) if bh_at_entry > -1 else 0.0
     date_opened = entry.get("date", "")
     date_closed = str(date.today())
     try:
@@ -106,6 +112,7 @@ def record_sell(ticker: str, context: dict | None = None) -> None:
         days_held=days_held,
         strategy_return=float(context.get("strategy_return", 0) or 0),
         bh_return=float(context.get("bh_return", 0) or 0),
+        market_ret_during_hold=market_ret,
     )
     append_trades(LIVE_JOURNAL, [record])
 

@@ -52,9 +52,12 @@ def load_journal(path: Path | None = None) -> pd.DataFrame:
         df[col] = pd.to_datetime(df[col], utc=True, format="mixed")
     for col in ("entry_score", "entry_price", "regime_at_entry", "rsi_at_entry",
                 "volume_ratio", "exit_price", "pnl_usd", "return_pct",
-                "days_held", "peak_gain", "peak_loss", "bh_return"):
+                "days_held", "peak_gain", "peak_loss", "bh_return",
+                "market_ret_during_hold"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+    # Blank strategy loads as NaN, which groupby silently drops — keep the rows
+    df["strategy"] = df["strategy"].fillna("").astype(str)
     print(f"Loaded {n_raw} rows -> {len(df)} closed trades "
           f"({n_raw - len(df)} skip/open rows dropped)")
     print(f"Window: {df['date_opened'].min()} .. {df['date_closed'].max()}")
@@ -212,7 +215,110 @@ def a8_days_held(df: pd.DataFrame) -> None:
     _fmt(g)
 
 
-def a9_concentration(df: pd.DataFrame, best: str) -> None:
+def a11_mfe_mae(df: pd.DataFrame) -> None:
+    """MFE/MAE: peak_gain is the max favorable excursion during the hold,
+    peak_loss the max adverse excursion. Winners' MAE percentiles say how much
+    room a stop must give; losers' MFE says how much profit trades gave back."""
+    _hr("A11  MFE/MAE: excursion analysis for stop/target placement")
+    d = df[df["peak_gain"].notna() & df["peak_loss"].notna()].copy()
+    if d.empty:
+        print("No excursion data (peak_gain/peak_loss missing); skipping.")
+        return
+    d["outcome"] = np.where(d["return_pct"] > 0, "win", "loss")
+
+    print("\n-- MFE (peak_gain) / MAE (peak_loss) by strategy x outcome --")
+    g = d.groupby(["strategy", "outcome"]).agg(
+        n=("return_pct", "size"),
+        avg_mfe=("peak_gain", "mean"),
+        avg_mae=("peak_loss", "mean"),
+        avg_ret=("return_pct", "mean"),
+    )
+    _fmt(g)
+
+    winners = d[d["outcome"] == "win"]
+    if len(winners):
+        pct = winners["peak_loss"].quantile([.5, .75, .9])
+        print(f"\nWinners' MAE percentiles (how far winners went underwater first):")
+        print(f"  p50 {pct[.5]:.2%}   p75 {pct[.75]:.2%}   p90 {pct[.9]:.2%}")
+        print("  Reading: a stop tighter than the p90 figure would have killed "
+              "~10% of eventual winners.")
+
+    losers = d[d["outcome"] == "loss"]
+    if len(losers):
+        once_green = losers[losers["peak_gain"] > 0.01]
+        print(f"\nLosers that were once >1% in profit: {len(once_green)}/{len(losers)} "
+              f"({len(once_green) / len(losers):.0%}), avg MFE given back "
+              f"{once_green['peak_gain'].mean():.2%}" if len(once_green)
+              else f"\nLosers that were once >1% in profit: 0/{len(losers)}")
+        print("  Reading: a high share here argues for a tighter trailing stop "
+              "or profit-scaled stop tightening.")
+
+    avg_mfe = float(d["peak_gain"].mean())
+    avg_mae = float(abs(d["peak_loss"]).mean())
+    if avg_mae > 0:
+        print(f"\nEdge ratio (avg MFE / avg |MAE|, all trades): {avg_mfe / avg_mae:.2f} "
+              f"(>1 means trades run further in your favour than against)")
+
+
+def a12_market_adjusted(df: pd.DataFrame) -> None:
+    """MAP: trade return minus the market's own move over the same hold window.
+    Separates stock-picking skill from 'the whole market went up that week'."""
+    _hr("A12  Market-adjusted profitability (trade return - market return during hold)")
+    if "market_ret_during_hold" not in df.columns or df["market_ret_during_hold"].isna().all():
+        print("No market_ret_during_hold data (journal predates the column); skipping.")
+        return
+    d = df[df["market_ret_during_hold"].notna()].copy()
+    d["map"] = d["return_pct"] - d["market_ret_during_hold"]
+
+    g = d.groupby("strategy").agg(
+        n=("map", "size"),
+        avg_ret=("return_pct", "mean"),
+        avg_market=("market_ret_during_hold", "mean"),
+        avg_map=("map", "mean"),
+        med_map=("map", "median"),
+        beat_market=("map", lambda s: (s > 0).mean()),
+    )
+    _fmt(g)
+
+    print("\n-- by exit_reason (pooled) --")
+    _fmt(d.groupby("exit_reason").agg(
+        n=("map", "size"),
+        avg_map=("map", "mean"),
+        avg_market=("market_ret_during_hold", "mean"),
+    ))
+    print("\nReading: avg_map ~ 0 with positive avg_ret means the strategy is "
+          "riding market beta, not picking stocks; negative avg_map on winners "
+          "means B&H over the same windows would have done better.")
+
+
+SECTOR_CACHE = REPO_ROOT / "data" / "sector_cache.json"
+
+
+def _fetch_sectors(tickers: list[str]) -> dict[str, str]:
+    """Ticker -> sector via yfinance, cached in data/sector_cache.json."""
+    import json
+    cache: dict[str, str] = {}
+    if SECTOR_CACHE.exists():
+        try:
+            cache = json.loads(SECTOR_CACHE.read_text(encoding="utf-8"))
+        except Exception:
+            cache = {}
+
+    missing = [t for t in tickers if t not in cache]
+    if missing:
+        import yfinance as yf
+        print(f"Fetching sector info for {len(missing)} tickers ...")
+        for t in missing:
+            try:
+                cache[t] = yf.Ticker(t).info.get("sector") or "Unknown"
+            except Exception:
+                cache[t] = "Unknown"
+        SECTOR_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        SECTOR_CACHE.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+    return cache
+
+
+def a9_concentration(df: pd.DataFrame, best: str, with_sectors: bool = True) -> None:
     _hr(f"A9  Per-ticker P&L concentration for best strategy ('{best}')")
     d = df[df["strategy"] == best]
     g = d.groupby("ticker")["pnl_usd"].agg(["sum", "count"]).sort_values(
@@ -225,6 +331,27 @@ def a9_concentration(df: pd.DataFrame, best: str) -> None:
     if total > 0 and top3 / total > 0.8:
         print("WARNING: >80% of the edge sits in 3 tickers — treat parameter "
               "choices as fragile / overfit-prone.")
+
+    if not with_sectors:
+        return
+    sectors = _fetch_sectors(sorted(d["ticker"].unique()))
+    s = d.copy()
+    s["sector"] = s["ticker"].map(sectors).fillna("Unknown")
+    print("\n-- P&L and exposure by sector --")
+    shares = s.groupby("sector").size() / len(s)
+    by_sector = s.groupby("sector").agg(
+        n_trades=("pnl_usd", "size"),
+        n_tickers=("ticker", "nunique"),
+        total_pnl=("pnl_usd", "sum"),
+    ).sort_values("total_pnl", ascending=False)
+    by_sector["trade_share"] = shares
+    _fmt(by_sector)
+    hhi = float((shares ** 2).sum())
+    print(f"\nSector Herfindahl (by trade count): {hhi:.3f} "
+          f"(1/HHI = {1 / hhi:.1f} effective sectors)")
+    if shares.max() > 0.5:
+        print(f"WARNING: {shares.idxmax()} is {shares.max():.0%} of all trades — "
+              "an unintended sector bet for a long-only book.")
 
 
 def a10_capital_efficiency(df: pd.DataFrame, capital: float | None = None,
@@ -308,6 +435,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--no-forward", action="store_true",
                     help="skip the A7 forward-return fetches")
+    ap.add_argument("--no-sector", action="store_true",
+                    help="skip the A9 sector-concentration fetches")
     ap.add_argument("--journal", default=None,
                     help="journal CSV to analyse (default: data/journals/live.csv)")
     ap.add_argument("--capital", type=float, default=None,
@@ -327,8 +456,10 @@ def main() -> None:
         a7_forward_returns(df)
     a8_days_held(df)
     a10_capital_efficiency(df, capital=args.capital, risk_free=args.risk_free)
+    a11_mfe_mae(df)
+    a12_market_adjusted(df)
     best = a1["total_pnl"].idxmax()
-    a9_concentration(df, best)
+    a9_concentration(df, best, with_sectors=not args.no_sector)
     recommended_parameters(df, best)
 
 

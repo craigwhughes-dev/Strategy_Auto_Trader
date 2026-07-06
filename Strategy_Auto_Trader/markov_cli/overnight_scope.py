@@ -69,6 +69,7 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict) -> dict:
     vol_cfg = market_cfg.get("vol_screen", {})
     do_vol_screen = vol_cfg.get("enabled", True)
     min_trend_quality = vol_cfg.get("min_trend_quality", 0.0)
+    max_downside_vol = vol_cfg.get("max_downside_vol", None)
     vol_period = vol_cfg.get("period", "2y")
 
     # Check sentiment config
@@ -92,6 +93,7 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict) -> dict:
         vol_kept, vol_profiles = screen_tickers(
             all_tickers,
             min_trend_quality=min_trend_quality,
+            max_downside_vol=max_downside_vol,
             period=vol_period,
             verbose=False
         )

@@ -42,8 +42,10 @@ def main() -> int:
                         help="Key in tickers JSON (default: ftse100)")
     parser.add_argument("--start-date", default="2026-01-12",
                         help="Only include trades entered on or after this date")
-    parser.add_argument("--max-vol", type=float, default=0.35,
-                        help="Max annualised volatility — skip stocks above this (default: 0.35 = 35%%)")
+    parser.add_argument(
+        "--max-downside-vol", type=float, default=0.25,
+        help="Max downside vol — skip stocks above this (default: 0.25 = 25%%)"
+    )
     parser.add_argument("--buy-threshold", type=float, default=3.0,
                         help="Minimum composite score to trigger BUY (default: 3.0)")
     parser.add_argument("--lot-size", type=float, default=100.0,
@@ -63,8 +65,11 @@ def main() -> int:
         print(f"No tickers found under key '{args.index}'")
         return 1
 
-    print(f"Trade report: {len(tickers)} {args.index} tickers, start={args.start_date}, "
-          f"lot=GBP{args.lot_size:.0f}, cost=GBP{args.trade_cost:.0f}")
+    print(
+        f"Trade report: {len(tickers)} {args.index} tickers, start={args.start_date}, "
+        f"max_downside_vol={args.max_downside_vol:.2%}, "
+        f"lot=GBP{args.lot_size:.0f}, cost=GBP{args.trade_cost:.0f}"
+    )
 
     from ..quant_hmm.consolidated_engine import consolidated_backtest
 
@@ -82,8 +87,9 @@ def main() -> int:
             continue
 
         close_arr = df["Close"].dropna()
-        ann_vol = float(close_arr.pct_change().std() * np.sqrt(252 * 6.5))
-        if ann_vol > args.max_vol:
+        returns = close_arr.pct_change().dropna()
+        downside_vol = float(np.sqrt(np.mean(np.minimum(returns, 0.0) ** 2)) * np.sqrt(252))
+        if downside_vol > args.max_downside_vol:
             continue
 
         try:

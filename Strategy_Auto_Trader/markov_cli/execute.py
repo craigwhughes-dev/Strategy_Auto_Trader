@@ -111,9 +111,11 @@ def execute_signals(
             signal["kelly_fraction"],
             signal["stop_level"],
             signal["target_level"],
+            signal_price=signal["close"],
         )
         limit_tracker.record_buy()
-        buys.append(f"{ticker} x{qty} @ {fill.fill_price:.2f}")
+        buys.append(f"{ticker} x{qty} @ {fill.fill_price:.2f}"
+                    f"{_slippage_tag(signal['close'], fill.fill_price, 'BUY')}")
 
     for ticker, signal in sell_signals:
         if not limit_tracker.can_sell(daily_sell_limit):
@@ -124,11 +126,19 @@ def execute_signals(
             continue
         qty = portfolio.positions[ticker]["quantity"]
         fill = broker.place_order(OrderRequest(ticker, "SELL", qty))
-        portfolio.record_exit(ticker, fill)
+        portfolio.record_exit(ticker, fill, signal_price=signal["close"])
         limit_tracker.record_sell()
-        sells.append(f"{ticker} x{qty} @ {fill.fill_price:.2f}")
+        sells.append(f"{ticker} x{qty} @ {fill.fill_price:.2f}"
+                     f"{_slippage_tag(signal['close'], fill.fill_price, 'SELL')}")
 
     return buys, sells, skipped
+
+
+def _slippage_tag(signal_price: float, fill_price: float, action: str) -> str:
+    """Suffix like ' (slippage +3.2bps)' for order log lines, '' when unknown."""
+    from ..broker.portfolio import slippage_bps
+    bps = slippage_bps(signal_price, fill_price, action)
+    return f" (slippage {bps:+.1f}bps)" if bps is not None else ""
 
 
 def main(argv: list[str] | None = None) -> int:

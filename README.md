@@ -124,3 +124,133 @@ The daily roundup email is a companion summary: one row per watchlist ticker sho
 When the daemon runs with dry-run disabled, orders route to Interactive Brokers TWS (paper account) and appear in the TWS Mosaic view:
 
 ![IBKR TWS paper trading view](docs/ibkr_trader_view.png)
+
+## Complete Metrics Reference
+
+### Risk/Return Metrics
+Backtest engine, computed for Strategy and Buy & Hold (source: `quant_engine.py`)
+
+| Metric | Formula | Notes |
+|--------|---------|-------|
+| Sharpe (annualised) | `mean(returns) / std(returns) × √1700` | Risk-adjusted return |
+| Sortino (annualised) | `mean(returns) / downside_dev × √1700` | Downside risk only |
+| Calmar | `annualised_return / \|max_drawdown\|` | Return per unit max loss |
+| Total Return | `(final_equity − 1) × 100%` | End-to-end P&L % |
+| Max Drawdown | Worst peak-to-trough on equity curve | Maximum loss from peak |
+| Kelly Fraction | `(win_rate × b − loss_rate) / b` | Position sizing (capped 25%) |
+| Information Ratio | `mean(strat − bh) / std(strat − bh) × √1700` | Consistency of outperformance vs buy & hold |
+| Up Capture | Compounded strategy return / benchmark return on up bars | >1 = gains more than the market when it rises |
+| Down Capture | Same, on down bars | <1 = loses less when the market falls (0 = fully sidestepped) |
+
+### Trade-Level Metrics
+Per-trade and aggregate statistics (reported in `quant_run.py`, `quant_trade_report.py`, console summaries, and HTML backtest report)
+
+| Metric | Description |
+|--------|-------------|
+| Trade count | Total buys, sells, and open positions |
+| Win rate % | Closed winners / (winners + losers) × 100 |
+| Avg win % | Mean return on winning trades |
+| Avg loss % | Mean return on losing trades |
+| Profit factor | Sum of wins / sum of losses |
+| Avg P&L per trade | Total P&L / trade count |
+| Avg hours held | Mean duration of closed trades |
+| Total P&L (£) | Cash P&L after transaction costs |
+| Final portfolio value (£) | Starting capital + P&L |
+| Transaction costs (£) | Sum of trade costs |
+| Days in market | Active trading days / total window days |
+
+### Journal Analysis (A1–A12)
+Live-sim and backtest trade journal breakdown (source: `analyze_journal.py`)
+
+| Analysis | Measures |
+|----------|----------|
+| A1: Per-strategy outcomes | n, hit_rate, avg_ret, med_ret, profit_factor, total_pnl, avg_days |
+| A2–A5: Bucketed by signal | Entry score / RSI / regime / volume — same stats as A1 per bucket |
+| A6: Exit-reason breakdown | Count of exits by reason (regime, stop-loss, take-profit) |
+| A7: Forward returns | % return of the market after our exit (did we sell too early?) |
+| A8: Days-held distribution | Histogram of trade durations |
+| A9: Concentration | % of P&L from top-N tickers, Herfindahl index; sector concentration (P&L and trade share by sector, sector Herfindahl, unintended-sector-bet warning) |
+| A10: Capital efficiency | Recovered notional per trade, dollar-days of exposure, avg deployed capital, peak concurrent exposure, return per dollar-year deployed (annualised), annualised buy-and-hold equal-weight benchmark |
+| A11: MFE/MAE excursions | Max favorable / adverse excursion per trade (from peak_gain/peak_loss); winners' MAE percentiles (stop placement), losers' give-back share (trailing-stop tuning), edge ratio (avg MFE / avg \|MAE\|) |
+| A12: Market-adjusted P&L | Trade return minus the market's move during the same hold window (MAP); % of trades beating the market, by strategy and exit reason — separates stock-picking from market beta |
+
+### Trend/Regime Quality
+Market micro-structure metrics (source: `vol_screen.py`)
+
+| Metric | Description |
+|--------|-------------|
+| Annualised volatility | Daily returns std × √252 |
+| Kaufman Efficiency Ratio | Net move / total path length (0–1, higher = more trending) |
+| Lag-1 autocorrelation | Return serial dependence (positive = momentum, negative = mean-reverting) |
+| Choppiness Index (14-day avg) | 0–100, higher = choppier / less trendy |
+| Sign-change frequency | % of days where return sign flips vs prior day |
+| Trend quality (composite) | Weighted score: `1.5 × (ER − 0.07)/0.05 + autocorr + …` (higher = better for HMM) |
+
+*Reported in: per-ticker summary columns in `quant_trade_report.py`*
+
+### Market Sentiment
+Per-ticker sentiment inputs and composite score (source: `sentiment.py`)
+
+#### Options IV
+| Metric | Signal | Notes |
+|--------|--------|-------|
+| iv_rank | — | Current IV as percentile vs 1-year range (0–100) |
+| iv_current | — | Median IV across calls and puts |
+| iv_signal | +1, 0, −1 | Low IV = cheap entry, high IV = risky |
+| put_call_ratio | — | Put OI / call OI |
+| put_call_signal | +1, 0, −1 | Contrarian: high P/C >1.2 bullish, <0.5 bearish |
+| skew | — | OTM put IV − OTM call IV (positive = fear) |
+
+#### VIX
+| Metric | Signal | Notes |
+|--------|--------|-------|
+| vix_current | — | Current level |
+| vix_sma20 | — | 20-day moving average |
+| vix_regime | — | "low_vol", "normal", "high_vol", "crisis" |
+| vix_signal | +1, 0, −1 | Low vol safe, high vol caution |
+| vix_term_structure | — | "contango" or "backwardation" |
+
+#### Insider Activity
+| Metric | Signal | Notes |
+|--------|--------|-------|
+| insider_buys_90d | — | Count in last 90 days |
+| insider_sells_90d | — | Count in last 90 days |
+| insider_net | — | Buys − sells |
+| insider_signal | +1, 0, −1 | Net buying (≥2) bullish, selling (≥3) bearish |
+| insider_total_value | — | Notional of recent transactions |
+
+#### Short Interest
+| Metric | Signal | Notes |
+|--------|--------|-------|
+| short_pct_float | — | % of float shorted |
+| short_ratio | — | Days to cover |
+| short_signal | +1, 0 | >10% squeeze potential |
+
+#### Composite Score
+| Metric | Notes |
+|--------|-------|
+| sentiment_score | Weighted −1 to +1 (options 1.5×, insider 2.0×, VIX 1.0×, short 0.5×) |
+| sentiment_label | "bullish" (>0.3), "neutral" (±0.3), "bearish" (<−0.3) |
+| confidence | Count of data sources (0–4) |
+
+*Reported in: per-trade detail, per-ticker summary, and HTML report (`quant_trade_report.py`); also fed into the engine to adjust entry/exit thresholds (`quant_engine.py`)*
+
+### Execution Quality
+IBKR execution path (source: `broker/portfolio.py`, logged per order in `state/execution_state.json` and the daemon log)
+
+| Metric | Description |
+|--------|-------------|
+| Slippage (bps) | `(fill − signal close) / signal close × 10,000`, sign-adjusted so positive = worse than the signal price for both BUYs and SELLs |
+
+### Metrics by Output Location
+Where each metric appears in the report outputs
+
+| Output | Metrics Shown |
+|--------|---------------|
+| Console backtest summary | Risk/return (all 8, incl. IR and up/down capture), trade stats, days in market |
+| HTML backtest report | Risk/return + Kelly, trade counts, P&L, txn costs |
+| Per-ticker summary (A1+journal) | Risk/return, trade stats, profit factor, trend quality, efficiency ratio, sentiment labels |
+| Strategy comparison table | Risk/return, trade counts, win rate, avg win/loss, profit factor |
+| Backtest chart legend | Sharpe, Sortino vs B&H |
+| Live journal analysis | A1–A12: everything above except risk/return ratios (only raw P&L) |
+| Execution log / state | Fill price, signal price, slippage bps per order |

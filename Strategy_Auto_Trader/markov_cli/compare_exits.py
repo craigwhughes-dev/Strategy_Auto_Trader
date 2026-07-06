@@ -95,6 +95,7 @@ def main() -> int:
                     "ticker": ticker,
                     "strategy": strat["name"],
                     "sharpe": bt["sharpe_strategy"],
+                    "sortino": bt.get("sortino_strategy", float("nan")),
                     "total_return": bt["total_return_strategy"],
                     "max_dd": bt["max_drawdown_strategy"],
                     "pl": bt["total_pl"],
@@ -111,7 +112,8 @@ def main() -> int:
             except Exception as exc:
                 all_results.append({
                     "ticker": ticker, "strategy": strat["name"],
-                    "sharpe": float("nan"), "total_return": float("nan"),
+                    "sharpe": float("nan"), "sortino": float("nan"),
+                    "total_return": float("nan"),
                     "max_dd": float("nan"), "pl": float("nan"),
                     "bh_return": float("nan"), "n_trades": 0,
                     "wins": 0, "losses": 0, "win_rate": 0,
@@ -153,6 +155,7 @@ def main() -> int:
     agg = df_res.groupby("strategy").agg({
         "total_return": "mean",
         "sharpe": "mean",
+        "sortino": "mean",
         "max_dd": "mean",
         "pl": "mean",
         "n_trades": "mean",
@@ -163,12 +166,12 @@ def main() -> int:
     strat_order = [s["name"] for s in STRATEGIES]
     agg = agg.loc[[s for s in strat_order if s in agg.index]]
 
-    print(f"\n  {'Strategy':<22s} {'Avg P&L':>10s} {'Avg Return':>10s} {'Win%':>6s} {'AvgW':>7s} {'AvgL':>7s} {'Sharpe':>7s} {'Trades':>7s}")
-    print(f"  {'-'*22} {'-'*10} {'-'*10} {'-'*6} {'-'*7} {'-'*7} {'-'*7} {'-'*7}")
+    print(f"\n  {'Strategy':<22s} {'Avg P&L':>10s} {'Avg Return':>10s} {'Win%':>6s} {'AvgW':>7s} {'AvgL':>7s} {'Sharpe':>7s} {'Sortino':>8s} {'Trades':>7s}")
+    print(f"  {'-'*22} {'-'*10} {'-'*10} {'-'*6} {'-'*7} {'-'*7} {'-'*7} {'-'*8} {'-'*7}")
     for strat_name, row in agg.iterrows():
         print(f"  {strat_name:<22s} {row['pl']:>+9,.0f} {row['total_return']*100:>+9.1f}% "
               f"{row['win_rate']:>5.0f}% {row['avg_win']:>+6.1f}% {row['avg_loss']:>+6.1f}% "
-              f"{row['sharpe']:>7.3f} {row['n_trades']:>6.0f}")
+              f"{row['sharpe']:>7.3f} {row['sortino']:>8.3f} {row['n_trades']:>6.0f}")
 
     print(f"\n  {'Strategy':<22s} {'Profitable':>11s} {'Profitable %':>13s}")
     print(f"  {'-'*22} {'-'*11} {'-'*13}")

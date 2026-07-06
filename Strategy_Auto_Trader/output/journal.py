@@ -49,6 +49,7 @@ class TradeRecord:
     peak_loss: float = 0.0
     strategy_return: float = 0.0
     bh_return: float = 0.0
+    market_ret_during_hold: float = 0.0
     notes: str = ""
 
 
@@ -67,12 +68,33 @@ def _existing_keys(journal_path: Path) -> set[tuple]:
         return {_trade_key(row) for row in csv.DictReader(f)}
 
 
+def _migrate_journal(journal_path: Path) -> None:
+    """Rewrite a journal whose header predates the current schema.
+
+    New columns are appended over time (e.g. market_ret_during_hold); old rows
+    get empty values for them so DictWriter stays aligned with the header.
+    """
+    with open(journal_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None or list(reader.fieldnames) == JOURNAL_FIELDNAMES:
+            return
+        rows = list(reader)
+
+    with open(journal_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=JOURNAL_FIELDNAMES, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in JOURNAL_FIELDNAMES})
+
+
 def append_trades(journal_path: Path, trades: list[TradeRecord]) -> int:
     """Append trades to a journal CSV, skipping any already recorded. Returns count appended."""
     if not trades:
         return 0
 
     journal_path.parent.mkdir(parents=True, exist_ok=True)
+    if journal_path.exists():
+        _migrate_journal(journal_path)
     existing = _existing_keys(journal_path)
     write_header = not journal_path.exists()
 
@@ -140,6 +162,7 @@ def extract_trades_from_detail(
                 "stop_level": float(row.get("stop_level", 0) or 0),
                 "target_level": float(row.get("target_level", 0) or 0),
                 "portfolio_value": float(row.get("portfolio_value", 0) or 0),
+                "bh_equity": float(row.get("bh_equity", 0) or 0),
             }
             trough_price = open_trade["entry_price"]
             peak_price = open_trade["entry_price"]
@@ -152,6 +175,11 @@ def extract_trades_from_detail(
             date_opened = pd.Timestamp(open_trade["date_opened"])
             date_closed = pd.Timestamp(row.get("date", ""))
             days_held = (date_closed - date_opened).days
+
+            # Market's own move over the hold window (for market-adjusted P&L)
+            bh_at_entry = open_trade["bh_equity"]
+            bh_at_exit = float(row.get("bh_equity", 0) or 0)
+            market_ret = (bh_at_exit / bh_at_entry - 1.0) if bh_at_entry > 0 else 0.0
 
             trades.append(TradeRecord(
                 date_opened=open_trade["date_opened"],
@@ -178,6 +206,7 @@ def extract_trades_from_detail(
                 peak_loss=(trough_price - entry_price) / entry_price if entry_price else 0.0,
                 strategy_return=float(row.get("strategy_equity", 1.0) or 1.0) - 1.0,
                 bh_return=float(row.get("bh_equity", 1.0) or 1.0) - 1.0,
+                market_ret_during_hold=market_ret,
             ))
             open_trade = None
             trough_price = float("inf")

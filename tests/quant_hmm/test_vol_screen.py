@@ -70,14 +70,30 @@ class TestVolScreen:
 
         def fake_profile(ticker, period="2y"):
             scores = {"GOOD": 1.0, "BAD": -2.0, "BORDERLINE": 0.0}
-            return {"ticker": ticker, "ann_vol": 0.2, "efficiency_ratio": 0.1,
-                    "autocorr": 0.0, "choppiness_idx": 47.0, "sign_change_freq": 0.5,
-                    "trend_quality": scores[ticker]}
+            return {"ticker": ticker, "ann_vol": 0.2, "downside_vol": 0.15,
+                    "efficiency_ratio": 0.1, "autocorr": 0.0, "choppiness_idx": 47.0,
+                    "sign_change_freq": 0.5, "trend_quality": scores[ticker]}
 
         with mock.patch.object(vs, "volatility_profile", side_effect=fake_profile):
             kept, profiles = vs.screen_tickers(
                 ["GOOD", "BAD", "BORDERLINE"], min_trend_quality=0.0, verbose=False)
         assert kept == ["GOOD", "BORDERLINE"]
+        assert len(profiles) == 3
+
+    def test_screen_tickers_filters_by_downside_vol(self):
+        from Strategy_Auto_Trader.quant_hmm import vol_screen as vs
+
+        def fake_profile(ticker, period="2y"):
+            vols = {"LOW": 0.15, "HIGH": 0.30, "MEDIUM": 0.22}
+            return {"ticker": ticker, "ann_vol": 0.35, "downside_vol": vols[ticker],
+                    "efficiency_ratio": 0.1, "autocorr": 0.0, "choppiness_idx": 47.0,
+                    "sign_change_freq": 0.5, "trend_quality": 0.5}
+
+        with mock.patch.object(vs, "volatility_profile", side_effect=fake_profile):
+            kept, profiles = vs.screen_tickers(
+                ["LOW", "MEDIUM", "HIGH"], min_trend_quality=0.0,
+                max_downside_vol=0.25, verbose=False)
+        assert kept == ["LOW", "MEDIUM"]
         assert len(profiles) == 3
 
     def test_screen_tickers_skips_failed_fetches(self):

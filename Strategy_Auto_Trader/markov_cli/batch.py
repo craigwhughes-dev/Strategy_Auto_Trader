@@ -306,6 +306,7 @@ def process_ticker(
                             "stop_level": result["stop_level"],
                             "target_level": result["target_level"],
                             "portfolio_value": result["portfolio_value"],
+                            "bh_return": result["bh_return"],
                         })
                     except Exception as exc:
                         print(f"  Email error: {exc}")

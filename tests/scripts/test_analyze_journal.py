@@ -582,3 +582,100 @@ class TestSyntheticJournalIntegration:
             assert len(df) == 2
             assert pd.isna(df.iloc[0]["entry_score"])
             assert pd.isna(df.iloc[1]["entry_price"])
+
+
+def _excursion_df():
+    return pd.DataFrame({
+        "strategy": ["trend"] * 4 + ["default"] * 2,
+        "ticker": ["SPY", "QQQ", "IWM", "DIA", "SPY", "QQQ"],
+        "return_pct": [0.10, 0.05, -0.04, -0.02, 0.08, -0.06],
+        "pnl_usd": [100.0, 50.0, -40.0, -20.0, 80.0, -60.0],
+        "days_held": [3, 5, 2, 1, 4, 2],
+        "peak_gain": [0.12, 0.06, 0.03, 0.005, 0.09, 0.02],
+        "peak_loss": [-0.02, -0.01, -0.06, -0.03, -0.015, -0.08],
+        "market_ret_during_hold": [0.04, 0.01, -0.02, 0.00, 0.05, -0.01],
+        "exit_reason": ["target", "regime", "stop", "stop", "target", "stop"],
+    })
+
+
+class TestA11MfeMae:
+
+    def test_prints_excursion_stats(self, capsys):
+        from scripts import analyze_journal
+        analyze_journal.a11_mfe_mae(_excursion_df())
+        out = capsys.readouterr().out
+        assert "A11" in out
+        assert "avg_mfe" in out
+        assert "Winners' MAE percentiles" in out
+        assert "Edge ratio" in out
+
+    def test_skips_without_excursion_data(self, capsys):
+        from scripts import analyze_journal
+        df = _excursion_df().assign(peak_gain=np.nan, peak_loss=np.nan)
+        analyze_journal.a11_mfe_mae(df)
+        out = capsys.readouterr().out
+        assert "skipping" in out
+
+    def test_edge_ratio_value(self, capsys):
+        from scripts import analyze_journal
+        df = _excursion_df()
+        analyze_journal.a11_mfe_mae(df)
+        out = capsys.readouterr().out
+        expected = df["peak_gain"].mean() / df["peak_loss"].abs().mean()
+        assert f"{expected:.2f}" in out
+
+
+class TestA12MarketAdjusted:
+
+    def test_prints_map_stats(self, capsys):
+        from scripts import analyze_journal
+        analyze_journal.a12_market_adjusted(_excursion_df())
+        out = capsys.readouterr().out
+        assert "A12" in out
+        assert "avg_map" in out
+        assert "beat_market" in out
+
+    def test_skips_when_column_missing(self, capsys):
+        from scripts import analyze_journal
+        df = _excursion_df().drop(columns=["market_ret_during_hold"])
+        analyze_journal.a12_market_adjusted(df)
+        out = capsys.readouterr().out
+        assert "skipping" in out
+
+    def test_skips_when_column_all_nan(self, capsys):
+        from scripts import analyze_journal
+        df = _excursion_df().assign(market_ret_during_hold=np.nan)
+        analyze_journal.a12_market_adjusted(df)
+        out = capsys.readouterr().out
+        assert "skipping" in out
+
+
+class TestSectorConcentration:
+
+    def test_a9_with_cached_sectors(self, tmp_path, capsys):
+        from scripts import analyze_journal
+        import json
+        cache = tmp_path / "sector_cache.json"
+        cache.write_text(json.dumps({
+            "SPY": "Broad", "QQQ": "Tech", "IWM": "Broad", "DIA": "Broad",
+        }))
+        with mock.patch.object(analyze_journal, "SECTOR_CACHE", cache):
+            analyze_journal.a9_concentration(_excursion_df(), "trend")
+        out = capsys.readouterr().out
+        assert "P&L and exposure by sector" in out
+        assert "Herfindahl" in out
+
+    def test_a9_no_sector_flag_skips_fetch(self, capsys):
+        from scripts import analyze_journal
+        analyze_journal.a9_concentration(_excursion_df(), "trend", with_sectors=False)
+        out = capsys.readouterr().out
+        assert "sector" not in out.lower()
+
+    def test_fetch_sectors_all_cached_no_network(self, tmp_path):
+        from scripts import analyze_journal
+        import json
+        cache = tmp_path / "sector_cache.json"
+        cache.write_text(json.dumps({"SPY": "Broad"}))
+        with mock.patch.object(analyze_journal, "SECTOR_CACHE", cache):
+            sectors = analyze_journal._fetch_sectors(["SPY"])
+        assert sectors == {"SPY": "Broad"}

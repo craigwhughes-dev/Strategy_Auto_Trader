@@ -590,3 +590,93 @@ class TestAppendTrades:
             reader = csv.DictReader(f)
             row = next(reader)
             assert row["exit_price"] == "0.0"
+
+
+class TestMarketReturnDuringHold:
+
+    def _detail(self, bh_entry, bh_exit):
+        return pd.DataFrame({
+            "date": ["2020-01-01", "2020-01-05"],
+            "trade_event": ["BUY", "SELL"],
+            "close": [100.0, 110.0],
+            "entry_price": [100.0, None],
+            "kelly_fraction": [0.1, None],
+            "portfolio_value": [10000.0, None],
+            "bh_equity": [bh_entry, bh_exit],
+            "sell_reason": [None, "profit"],
+        })
+
+    def test_market_return_compounded_over_hold(self):
+        result = extract_trades_from_detail("SPY", self._detail(1.08, 1.12))
+        assert len(result) == 1
+        assert abs(result[0].market_ret_during_hold - (1.12 / 1.08 - 1)) < 1e-9
+
+    def test_market_fell_during_hold_negative(self):
+        result = extract_trades_from_detail("SPY", self._detail(1.10, 1.045))
+        assert result[0].market_ret_during_hold < 0
+
+    def test_missing_bh_equity_defaults_zero(self):
+        detail = self._detail(1.0, 1.0).drop(columns=["bh_equity"])
+        result = extract_trades_from_detail("SPY", detail)
+        assert result[0].market_ret_during_hold == 0.0
+
+    def test_zero_bh_equity_at_entry_no_division_error(self):
+        result = extract_trades_from_detail("SPY", self._detail(0.0, 1.1))
+        assert result[0].market_ret_during_hold == 0.0
+
+
+class TestJournalMigration:
+
+    OLD_HEADER = ("date_opened,ticker,strategy,vol_filter,entry_signal,entry_score,"
+                  "entry_gate_flag,entry_price,regime_at_entry,rsi_at_entry,volume_ratio,"
+                  "kelly_fraction,date_closed,exit_reason,exit_price,stop_level,"
+                  "target_level,pnl_usd,return_pct,days_held,peak_gain,peak_loss,"
+                  "strategy_return,bh_return,notes")
+
+    def _write_old_schema(self, path):
+        path.write_text(
+            self.OLD_HEADER + "\n"
+            "2020-01-01,SPY,trend,,mom,0.5,ok,100.0,0.8,55.0,1.2,0.1,"
+            "2020-01-05,profit,110.0,95.0,105.0,100.0,0.1,4,0.15,-0.02,0.2,0.12,old row\n"
+        )
+
+    def test_append_to_old_schema_migrates_header(self, tmp_path):
+        journal_path = tmp_path / "journal.csv"
+        self._write_old_schema(journal_path)
+
+        new_trade = TradeRecord(
+            date_opened="2020-02-01", ticker="QQQ", strategy="default",
+            date_closed="2020-02-05", market_ret_during_hold=0.03,
+        )
+        count = append_trades(journal_path, [new_trade])
+        assert count == 1
+
+        with open(journal_path, newline="") as f:
+            reader = csv.DictReader(f)
+            assert list(reader.fieldnames) == JOURNAL_FIELDNAMES
+            rows = list(reader)
+        assert len(rows) == 2
+        assert rows[0]["market_ret_during_hold"] == ""
+        assert rows[0]["notes"] == "old row"
+        assert float(rows[1]["market_ret_during_hold"]) == 0.03
+
+    def test_migration_preserves_dedupe(self, tmp_path):
+        journal_path = tmp_path / "journal.csv"
+        self._write_old_schema(journal_path)
+
+        dup = TradeRecord(
+            date_opened="2020-01-01", ticker="SPY", strategy="trend",
+            date_closed="2020-01-05",
+        )
+        assert append_trades(journal_path, [dup]) == 0
+
+    def test_current_schema_not_rewritten(self, tmp_path):
+        journal_path = tmp_path / "journal.csv"
+        t1 = TradeRecord(date_opened="2020-01-01", ticker="SPY", date_closed="2020-01-05")
+        t2 = TradeRecord(date_opened="2020-01-06", ticker="QQQ", date_closed="2020-01-10")
+        append_trades(journal_path, [t1])
+        append_trades(journal_path, [t2])
+
+        with open(journal_path, newline="") as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) == 2

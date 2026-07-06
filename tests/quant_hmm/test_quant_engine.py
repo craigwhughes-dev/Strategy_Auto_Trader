@@ -409,6 +409,75 @@ class TestQuantEngine:
         eq = np.array([1.0, 1.2, 0.9])
         assert abs(_max_dd(eq) - (-0.25)) < 1e-10
 
+    # -- _sortino ------------------------------------------------------------
+
+    def test_sortino_empty_returns_nan(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _sortino
+        assert math.isnan(_sortino(np.array([])))
+
+    def test_sortino_all_positive_returns_nan(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _sortino
+        assert math.isnan(_sortino(np.full(100, 0.01)))
+
+    def test_sortino_below_min_downside_bars_returns_nan(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import (
+            _sortino, _MIN_DOWNSIDE_BARS,
+        )
+        r = np.full(200, 0.01)
+        r[:_MIN_DOWNSIDE_BARS - 1] = -0.01
+        assert math.isnan(_sortino(r))
+
+    def test_sortino_at_min_downside_bars_is_finite(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import (
+            _sortino, _MIN_DOWNSIDE_BARS,
+        )
+        r = np.full(200, 0.01)
+        r[:_MIN_DOWNSIDE_BARS] = -0.01
+        assert np.isfinite(_sortino(r))
+
+    def test_sortino_known_value_full_sample_convention(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import (
+            _sortino, _HOURS_PER_YEAR, _MIN_DOWNSIDE_BARS,
+        )
+        r = np.concatenate([np.full(_MIN_DOWNSIDE_BARS, -0.02), np.full(80, 0.01)])
+        downside_dev = np.sqrt(np.mean(np.minimum(r, 0.0) ** 2))
+        expected = np.mean(r) / downside_dev * np.sqrt(_HOURS_PER_YEAR)
+        assert abs(_sortino(r) - expected) < 1e-12
+
+    def test_sortino_exceeds_sharpe_for_positive_skew(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _sharpe, _sortino
+        rng = np.random.default_rng(42)
+        r = np.where(rng.random(2000) < 0.3, -0.005, 0.02)
+        assert _sortino(r) > _sharpe(r) > 0
+
+    # -- _calmar ------------------------------------------------------------
+
+    def test_calmar_empty_returns_nan(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _calmar
+        assert math.isnan(_calmar(np.array([])))
+
+    def test_calmar_no_drawdown_returns_nan(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _calmar
+        assert math.isnan(_calmar(np.array([1.0, 1.1, 1.2])))
+
+    def test_calmar_nonpositive_final_equity_returns_nan(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _calmar
+        assert math.isnan(_calmar(np.array([1.0, 0.5, 0.0])))
+
+    def test_calmar_known_value(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import (
+            _calmar, _HOURS_PER_YEAR,
+        )
+        eq = np.array([1.0, 1.2, 0.9, 1.1])
+        years = len(eq) / _HOURS_PER_YEAR
+        expected = (1.1 ** (1 / years) - 1) / 0.25
+        assert math.isclose(_calmar(eq), expected, rel_tol=1e-12)
+
+    def test_calmar_negative_for_losing_strategy(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _calmar
+        eq = np.linspace(1.0, 0.8, 100)
+        assert _calmar(eq) < 0
+
     # -- _simulate_portfolio_value ---------------------------------------------
 
     def test_simulate_portfolio_value_deducts_cost_on_trade_events(self):
@@ -441,3 +510,91 @@ class TestQuantEngine:
         assert result["final_portfolio"] == 1079.0
         assert result["total_pl"] == 79.0
         assert result["final_kelly"] == 0.12
+        for key in ("sortino_strategy", "sortino_bh", "calmar_strategy", "calmar_bh"):
+            assert key in result
+
+
+class TestInformationRatio:
+
+    def _ir(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _information_ratio
+        return _information_ratio
+
+    def test_empty_arrays_nan(self):
+        import math
+        assert math.isnan(self._ir()(np.array([]), np.array([])))
+
+    def test_mismatched_lengths_nan(self):
+        import math
+        assert math.isnan(self._ir()(np.array([0.01, 0.02]), np.array([0.01])))
+
+    def test_identical_returns_nan(self):
+        import math
+        r = np.array([0.01, -0.02, 0.03, 0.0])
+        assert math.isnan(self._ir()(r, r))
+
+    def test_consistent_outperformance_positive(self):
+        rng = np.random.default_rng(42)
+        bh = rng.normal(0.0, 0.01, 500)
+        strat = bh + rng.normal(0.001, 0.002, 500)
+        assert self._ir()(strat, bh) > 0
+
+    def test_consistent_underperformance_negative(self):
+        rng = np.random.default_rng(42)
+        bh = rng.normal(0.0, 0.01, 500)
+        strat = bh + rng.normal(-0.001, 0.002, 500)
+        assert self._ir()(strat, bh) < 0
+
+    def test_annualisation_scale(self):
+        # active = [+0.01, -0.01, ...]: mean 0 exactly -> IR 0
+        strat = np.array([0.02, 0.00] * 50)
+        bh = np.array([0.01, 0.01] * 50)
+        assert abs(self._ir()(strat, bh)) < 1e-12
+
+
+class TestCaptureRatio:
+
+    def _cr(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _capture_ratio
+        return _capture_ratio
+
+    def test_empty_arrays_nan(self):
+        import math
+        assert math.isnan(self._cr()(np.array([]), np.array([]), up=True))
+
+    def test_full_replication_capture_one(self):
+        r = np.array([0.01, -0.02, 0.03, -0.01])
+        assert abs(self._cr()(r, r, up=True) - 1.0) < 1e-12
+        assert abs(self._cr()(r, r, up=False) - 1.0) < 1e-12
+
+    def test_flat_strategy_zero_capture(self):
+        strat = np.zeros(4)
+        bh = np.array([0.01, -0.02, 0.03, -0.01])
+        assert self._cr()(strat, bh, up=True) == 0.0
+        assert self._cr()(strat, bh, up=False) == 0.0
+
+    def test_no_down_bars_nan(self):
+        import math
+        strat = np.array([0.01, 0.02])
+        bh = np.array([0.01, 0.02])
+        assert math.isnan(self._cr()(strat, bh, up=False))
+
+    def test_no_up_bars_nan(self):
+        import math
+        strat = np.array([-0.01, -0.02])
+        bh = np.array([-0.01, -0.02])
+        assert math.isnan(self._cr()(strat, bh, up=True))
+
+    def test_half_position_half_capture(self):
+        bh = np.array([0.02, -0.02])
+        strat = bh * 0.5
+        up = self._cr()(strat, bh, up=True)
+        down = self._cr()(strat, bh, up=False)
+        assert abs(up - 0.5) < 0.01
+        assert abs(down - 0.5) < 0.01
+
+    def test_stats_and_empty_result_carry_new_keys(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _empty_result
+        empty = _empty_result(1000.0)
+        for key in ("information_ratio", "up_capture", "down_capture"):
+            assert key in empty

@@ -10,6 +10,18 @@ from pathlib import Path
 from .types import FillResult
 
 
+def slippage_bps(signal_price: float, fill_price: float, action: str) -> float | None:
+    """Execution slippage in basis points, positive = worse than signal price.
+
+    BUY: paying above the signal close costs; SELL: filling below it costs.
+    Returns None when either price is missing (dry-run brokers may fill at 0).
+    """
+    if signal_price <= 0 or fill_price <= 0:
+        return None
+    raw = (fill_price - signal_price) / signal_price * 10_000
+    return round(raw if action == "BUY" else -raw, 1)
+
+
 class PortfolioManager:
     """Manages a fixed capital pot across a capped number of concurrent positions.
 
@@ -101,6 +113,7 @@ class PortfolioManager:
         kelly_fraction: float,
         stop_level: float,
         target_level: float,
+        signal_price: float = 0.0,
     ) -> None:
         """Record a new open position after a BUY fill."""
         today = datetime.now(timezone.utc).date().isoformat()
@@ -118,9 +131,11 @@ class PortfolioManager:
             "date": today,
             "fill_price": fill.fill_price,
             "quantity": fill.quantity,
+            "signal_price": signal_price,
+            "slippage_bps": slippage_bps(signal_price, fill.fill_price, "BUY"),
         })
 
-    def record_exit(self, ticker: str, fill: FillResult) -> None:
+    def record_exit(self, ticker: str, fill: FillResult, signal_price: float = 0.0) -> None:
         """Remove position and log realised P&L after a SELL fill."""
         pos = self._state["positions"].pop(ticker, None)
         entry_price = pos["fill_price"] if pos else 0.0
@@ -132,4 +147,6 @@ class PortfolioManager:
             "fill_price": fill.fill_price,
             "quantity": fill.quantity,
             "pl": pl,
+            "signal_price": signal_price,
+            "slippage_bps": slippage_bps(signal_price, fill.fill_price, "SELL"),
         })

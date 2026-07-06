@@ -28,7 +28,8 @@ def volatility_profile(ticker: str, period: str = "2y") -> dict | None:
     """Compute volatility-character metrics for a ticker from daily data.
 
     Returns dict with:
-      - ann_vol: annualised volatility of daily returns
+      - ann_vol: annualised total volatility (both up and down moves)
+      - downside_vol: annualised downside volatility only (RMS of negative returns)
       - efficiency_ratio: Kaufman ER, net move / total path length (0-1, higher=more trending)
       - autocorr: lag-1 autocorrelation of daily returns (positive=momentum, negative=mean-reverting)
       - choppiness_idx: 14-day Choppiness Index, averaged (0-100, higher=choppier)
@@ -54,6 +55,7 @@ def volatility_profile(ticker: str, period: str = "2y") -> dict | None:
 
     returns = close.pct_change().dropna()
     ann_vol = float(returns.std() * np.sqrt(252))
+    downside_vol = float(np.sqrt(np.mean(np.minimum(returns, 0.0) ** 2)) * np.sqrt(252))
 
     net_change = abs(float(close.iloc[-1]) - float(close.iloc[0]))
     path_length = float(close.diff().abs().sum())
@@ -91,6 +93,7 @@ def volatility_profile(ticker: str, period: str = "2y") -> dict | None:
     return {
         "ticker": ticker,
         "ann_vol": round(ann_vol, 4),
+        "downside_vol": round(downside_vol, 4),
         "efficiency_ratio": round(efficiency_ratio, 4),
         "autocorr": round(autocorr, 4),
         "choppiness_idx": round(choppiness_idx, 2) if np.isfinite(choppiness_idx) else None,
@@ -103,11 +106,13 @@ def screen_tickers(
     tickers: list[str],
     *,
     min_trend_quality: float = 0.0,
+    max_downside_vol: float | None = None,
     period: str = "2y",
     verbose: bool = True,
 ) -> tuple[list[str], list[dict]]:
-    """Filter a ticker list down to those with acceptable trend quality.
+    """Filter a ticker list down to those with acceptable trend quality and downside vol.
 
+    If max_downside_vol is None, only trend_quality is checked.
     Returns (kept_tickers, all_profiles).
     """
     kept = []
@@ -122,7 +127,8 @@ def screen_tickers(
             continue
         profiles.append(prof)
         if prof["trend_quality"] >= min_trend_quality:
-            kept.append(ticker)
+            if max_downside_vol is None or prof["downside_vol"] <= max_downside_vol:
+                kept.append(ticker)
 
     return kept, profiles
 
@@ -150,11 +156,11 @@ def main() -> int:
     kept, profiles = screen_tickers(tickers, min_trend_quality=args.min_trend_quality, period=args.period)
 
     df = pd.DataFrame(profiles).sort_values("trend_quality", ascending=False)
-    print(f"\n{'Ticker':10s} {'TrendQ':>8s} {'EffRatio':>9s} {'Autocorr':>9s} {'AnnVol':>8s} {'SignChg':>8s}  Verdict")
+    print(f"\n{'Ticker':10s} {'TrendQ':>8s} {'EffRatio':>9s} {'Autocorr':>9s} {'AnnVol':>8s} {'DownVol':>8s} {'SignChg':>8s}  Verdict")
     for _, row in df.iterrows():
         verdict = "KEEP" if row["trend_quality"] >= args.min_trend_quality else "exclude (choppy)"
         print(f"{row['ticker']:10s} {row['trend_quality']:>8.2f} {row['efficiency_ratio']:>9.3f} "
-              f"{row['autocorr']:>9.3f} {row['ann_vol']:>8.3f} {row['sign_change_freq']:>8.3f}  {verdict}")
+              f"{row['autocorr']:>9.3f} {row['ann_vol']:>8.3f} {row['downside_vol']:>8.3f} {row['sign_change_freq']:>8.3f}  {verdict}")
 
     print(f"\n  Kept: {len(kept)}/{len(tickers)} tickers (trend_quality >= {args.min_trend_quality})")
     return 0

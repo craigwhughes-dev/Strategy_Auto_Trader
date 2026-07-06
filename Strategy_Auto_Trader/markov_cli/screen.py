@@ -53,6 +53,8 @@ def _screen_one(ticker: str, years: int = 2) -> dict | None:
         "strategy_return": bt["total_return_strategy"],
         "bh_return": bt["total_return_bh"],
         "sharpe": bt["sharpe_strategy"],
+        "sortino": bt.get("sortino_strategy", float("nan")),
+        "calmar": bt.get("calmar_strategy", float("nan")),
         "max_dd": bt["max_drawdown_strategy"],
         "final_portfolio": bt["final_portfolio"],
         "pl": bt["total_pl"],
@@ -115,12 +117,14 @@ def main() -> int:
     print(f"Winners saved to {out_path}")
 
     winners_sorted = sorted(winners, key=lambda r: r["strategy_return"], reverse=True)
-    print(f"\n{'Ticker':<10s} {'Strat':>8s} {'B&H':>8s} {'Sharpe':>7s} {'MaxDD':>7s} {'P&L':>10s} {'Trades':>6s}")
-    print("-" * 60)
+    print(f"\n{'Ticker':<10s} {'Strat':>8s} {'B&H':>8s} {'Sharpe':>7s} {'Sortino':>8s} {'Calmar':>7s} {'MaxDD':>7s} {'P&L':>10s} {'Trades':>6s}")
+    print("-" * 77)
     for r in winners_sorted:
-        sharpe = f"{r['sharpe']:.2f}" if np.isfinite(r["sharpe"]) else "NaN"
+        def _f2(v):
+            return f"{v:.2f}" if np.isfinite(v) else "NaN"
         print(f"{r['ticker']:<10s} {r['strategy_return']*100:>+7.1f}% "
-              f"{r['bh_return']*100:>+7.1f}% {sharpe:>7s} "
+              f"{r['bh_return']*100:>+7.1f}% {_f2(r['sharpe']):>7s} "
+              f"{_f2(r.get('sortino', float('nan'))):>8s} {_f2(r.get('calmar', float('nan'))):>7s} "
               f"{r['max_dd']*100:>6.1f}% {r['pl']:>+9,.0f} {r['n_trades']:>6d}")
 
     return 0

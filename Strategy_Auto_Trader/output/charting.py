@@ -109,9 +109,11 @@ def plot_backtest(
     ax_equity.legend(
         title=(
             f"Strategy: {bt['total_return_strategy']*100:+.1f}%  "
-            f"Sharpe {bt['sharpe_strategy']:.2f}\n"
+            f"Sharpe {bt['sharpe_strategy']:.2f}  "
+            f"Sortino {bt.get('sortino_strategy', float('nan')):.2f}\n"
             f"B&H:      {bt['total_return_bh']*100:+.1f}%  "
-            f"Sharpe {bt['sharpe_bh']:.2f}\n"
+            f"Sharpe {bt['sharpe_bh']:.2f}  "
+            f"Sortino {bt.get('sortino_bh', float('nan')):.2f}\n"
             f"{cfg_label}"
         ),
         title_fontsize=7.5, loc="upper left", fontsize=8,

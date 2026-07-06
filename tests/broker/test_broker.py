@@ -891,3 +891,72 @@ class TestBroker:
         assert not tracker.can_buy(2)
         buys, _ = tracker.get_today_counts()
         assert buys == 2
+
+
+class TestSlippageBps:
+
+    def _sl(self):
+        from Strategy_Auto_Trader.broker.portfolio import slippage_bps
+        return slippage_bps
+
+    # -- BVA: missing prices --------------------------------------------------
+
+    def test_zero_signal_price_none(self):
+        assert self._sl()(0.0, 100.0, "BUY") is None
+
+    def test_zero_fill_price_none(self):
+        assert self._sl()(100.0, 0.0, "BUY") is None
+
+    def test_negative_signal_price_none(self):
+        assert self._sl()(-100.0, 100.0, "SELL") is None
+
+    # -- sign conventions: positive = cost ------------------------------------
+
+    def test_buy_above_signal_positive(self):
+        assert self._sl()(100.0, 100.5, "BUY") == 50.0
+
+    def test_buy_below_signal_negative(self):
+        assert self._sl()(100.0, 99.5, "BUY") == -50.0
+
+    def test_sell_below_signal_positive(self):
+        assert self._sl()(100.0, 99.5, "SELL") == 50.0
+
+    def test_sell_above_signal_negative(self):
+        assert self._sl()(100.0, 100.5, "SELL") == -50.0
+
+    def test_exact_fill_zero(self):
+        assert self._sl()(100.0, 100.0, "BUY") == 0.0
+        assert self._sl()(100.0, 100.0, "SELL") == 0.0
+
+    def test_rounding_one_decimal(self):
+        assert self._sl()(3.0, 3.001, "BUY") == 3.3
+
+    def test_record_entry_logs_slippage(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.types import FillResult
+        pm = PortfolioManager(20_000.0, 5, tmp_path / "state.json")
+        fill = FillResult("AAPL", "BUY", 195.5, 10, "2026-07-06T00:00:00+00:00")
+        pm.record_entry("AAPL", fill, 0.10, 185.0, 224.0, signal_price=195.0)
+        log = pm.trade_log[-1]
+        assert log["signal_price"] == 195.0
+        assert log["slippage_bps"] == pytest.approx(25.6, abs=0.1)
+
+    def test_record_exit_logs_slippage(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.types import FillResult
+        pm = PortfolioManager(20_000.0, 5, tmp_path / "state.json")
+        buy = FillResult("MSFT", "BUY", 300.0, 10, "2026-07-01T00:00:00+00:00")
+        pm.record_entry("MSFT", buy, 0.12, 285.0, 345.0, signal_price=300.0)
+        sell = FillResult("MSFT", "SELL", 329.0, 10, "2026-07-06T00:00:00+00:00")
+        pm.record_exit("MSFT", sell, signal_price=330.0)
+        log = pm.trade_log[-1]
+        assert log["signal_price"] == 330.0
+        assert log["slippage_bps"] == pytest.approx(30.3, abs=0.1)
+
+    def test_record_entry_without_signal_price_none_slippage(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.types import FillResult
+        pm = PortfolioManager(20_000.0, 5, tmp_path / "state.json")
+        fill = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-06T00:00:00+00:00")
+        pm.record_entry("AAPL", fill, 0.10, 185.0, 224.0)
+        assert pm.trade_log[-1]["slippage_bps"] is None

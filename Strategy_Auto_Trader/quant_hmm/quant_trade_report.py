@@ -346,6 +346,8 @@ def _build_ticker_summary_row(
         "Avg P&L/Trade": round(total_pl / n_tt, 2),
         "Avg Hours Held": round(avg_hours, 0),
         "Sharpe": round(bt["sharpe_strategy"], 3) if np.isfinite(bt["sharpe_strategy"]) else "N/A",
+        "Sortino": round(bt["sortino_strategy"], 3) if np.isfinite(bt.get("sortino_strategy", float("nan"))) else "N/A",
+        "Calmar": round(bt["calmar_strategy"], 3) if np.isfinite(bt.get("calmar_strategy", float("nan"))) else "N/A",
         "Max DD": f"{bt['max_drawdown_strategy']*100:.1f}%" if np.isfinite(bt["max_drawdown_strategy"]) else "N/A",
     }
     if sent_data:

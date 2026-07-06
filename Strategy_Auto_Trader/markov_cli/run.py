@@ -162,6 +162,8 @@ def _print_backtest_summary(bt: dict) -> None:
 
     print(f"  {'':30s}  {'Strategy':>10s}  {'Buy & Hold':>10s}")
     print(f"  {'Sharpe (annualised)':30s}  {_f(bt['sharpe_strategy']):>10s}  {_f(bt['sharpe_bh']):>10s}")
+    print(f"  {'Sortino (annualised)':30s}  {_f(bt.get('sortino_strategy', float('nan'))):>10s}  {_f(bt.get('sortino_bh', float('nan'))):>10s}")
+    print(f"  {'Calmar':30s}  {_f(bt.get('calmar_strategy', float('nan'))):>10s}  {_f(bt.get('calmar_bh', float('nan'))):>10s}")
     print(f"  {'Max drawdown':30s}  {_pct(bt['max_drawdown_strategy']):>10s}  {_pct(bt['max_drawdown_bh']):>10s}")
     print(f"  {'Total return':30s}  {_pct(bt['total_return_strategy']):>10s}  {_pct(bt['total_return_bh']):>10s}")
     print(f"  {'Bars in market':30s}  {bt['n_bars']:>10d}")

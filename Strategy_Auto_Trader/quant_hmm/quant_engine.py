@@ -229,12 +229,79 @@ def _compute_volume_ratio(volume: np.ndarray | None, n: int, lookback: int = 100
         return np.where(vol_avg > 0, volume / vol_avg, 1.0)
 
 
+# Annualise: assume ~1700 trading hours/year
+_HOURS_PER_YEAR = 1700
+# Sortino needs enough negative-return bars for a stable downside-deviation
+# estimate; below this the ratio is noise (hourly series are mostly zeros
+# when the strategy is flat)
+_MIN_DOWNSIDE_BARS = 20
+
+
 def _sharpe(r: np.ndarray) -> float:
     std = np.std(r, ddof=1)
     if std == 0 or not np.isfinite(std):
         return float("nan")
-    # Annualise: assume ~1700 trading hours/year
-    return float(np.mean(r) / std * np.sqrt(1700))
+    return float(np.mean(r) / std * np.sqrt(_HOURS_PER_YEAR))
+
+
+def _sortino(r: np.ndarray) -> float:
+    """Annualised Sortino ratio: mean return over downside deviation.
+
+    Full-sample convention: downside deviation is the RMS of min(r, 0) over
+    ALL bars, not the std of the negative subset (which overstates the ratio).
+    """
+    if len(r) == 0 or int((r < 0).sum()) < _MIN_DOWNSIDE_BARS:
+        return float("nan")
+    downside_dev = float(np.sqrt(np.mean(np.minimum(r, 0.0) ** 2)))
+    if downside_dev == 0 or not np.isfinite(downside_dev):
+        return float("nan")
+    return float(np.mean(r) / downside_dev * np.sqrt(_HOURS_PER_YEAR))
+
+
+def _information_ratio(strat_ret: np.ndarray, bh_ret: np.ndarray) -> float:
+    """Annualised Information Ratio: mean active return over tracking error.
+
+    Active return is strategy minus benchmark (buy & hold) per bar. Measures
+    consistency of outperformance rather than its size.
+    """
+    if len(strat_ret) == 0 or len(strat_ret) != len(bh_ret):
+        return float("nan")
+    active = strat_ret - bh_ret
+    te = np.std(active, ddof=1)
+    if te == 0 or not np.isfinite(te):
+        return float("nan")
+    return float(np.mean(active) / te * np.sqrt(_HOURS_PER_YEAR))
+
+
+def _capture_ratio(strat_ret: np.ndarray, bh_ret: np.ndarray, *, up: bool) -> float:
+    """Up/down capture: compounded strategy return over compounded benchmark
+    return, restricted to bars where the benchmark was up (or down).
+
+    Up capture > 1 means the strategy gains more than the market in up bars;
+    down capture < 1 means it loses less in down bars (0 = fully sidestepped).
+    """
+    if len(strat_ret) == 0 or len(strat_ret) != len(bh_ret):
+        return float("nan")
+    mask = bh_ret > 0 if up else bh_ret < 0
+    if not mask.any():
+        return float("nan")
+    bench = float(np.prod(1 + bh_ret[mask]) - 1)
+    if bench == 0 or not np.isfinite(bench):
+        return float("nan")
+    strat = float(np.prod(1 + strat_ret[mask]) - 1)
+    return strat / bench
+
+
+def _calmar(equity: np.ndarray) -> float:
+    """Calmar ratio: annualised return / |max drawdown| of the equity curve."""
+    if len(equity) == 0 or equity[-1] <= 0:
+        return float("nan")
+    max_dd = _max_dd(equity)
+    if not np.isfinite(max_dd) or max_dd == 0:
+        return float("nan")
+    years = len(equity) / _HOURS_PER_YEAR
+    ann_return = float(equity[-1]) ** (1 / years) - 1
+    return float(ann_return / abs(max_dd))
 
 
 def _max_dd(eq: np.ndarray) -> float:
@@ -273,6 +340,13 @@ def _build_quant_backtest_stats(
     return {
         "sharpe_strategy": _sharpe(strat_ret),
         "sharpe_bh": _sharpe(bh_ret),
+        "sortino_strategy": _sortino(strat_ret),
+        "sortino_bh": _sortino(bh_ret),
+        "calmar_strategy": _calmar(strat_equity),
+        "calmar_bh": _calmar(bh_equity),
+        "information_ratio": _information_ratio(strat_ret, bh_ret),
+        "up_capture": _capture_ratio(strat_ret, bh_ret, up=True),
+        "down_capture": _capture_ratio(strat_ret, bh_ret, up=False),
         "total_return_strategy": float(strat_equity[-1] - 1) if len(strat_equity) else 0,
         "total_return_bh": float(bh_equity[-1] - 1) if len(bh_equity) else 0,
         "max_drawdown_strategy": _max_dd(strat_equity),
@@ -476,6 +550,10 @@ def quant_backtest(
 def _empty_result(initial_cash):
     return {
         "sharpe_strategy": float("nan"), "sharpe_bh": float("nan"),
+        "sortino_strategy": float("nan"), "sortino_bh": float("nan"),
+        "calmar_strategy": float("nan"), "calmar_bh": float("nan"),
+        "information_ratio": float("nan"),
+        "up_capture": float("nan"), "down_capture": float("nan"),
         "total_return_strategy": 0, "total_return_bh": 0,
         "max_drawdown_strategy": float("nan"), "max_drawdown_bh": float("nan"),
         "initial_cash": initial_cash, "final_portfolio": initial_cash, "total_pl": 0,

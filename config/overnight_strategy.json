@@ -27,6 +27,7 @@
   "vol_screen": {
     "enabled": true,
     "min_trend_quality": 0.0,
+    "max_downside_vol": 0.25,
     "period": "2y"
   },
   "sentiment_screen": {
