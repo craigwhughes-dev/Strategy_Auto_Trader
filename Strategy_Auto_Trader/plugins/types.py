@@ -40,6 +40,7 @@ class BarData:
     rsi_ob: bool            # RSI dropped below 70 on this bar
     rsi_ml: bool            # RSI momentum loss on this bar
     consol: bool            # Consolidation (BB + ATR squeeze) on this bar
+    cur_rsi: float | None = None   # current-bar RSI value (for mean-reversion exits)
 
 
 @dataclass

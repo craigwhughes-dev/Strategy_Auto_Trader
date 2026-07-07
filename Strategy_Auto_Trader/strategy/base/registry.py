@@ -13,6 +13,7 @@ To register a new strategy:
 
 from __future__ import annotations
 
+from ..choppy_vol import ChoppyVolEntry, ChoppyVolExit
 from ..conservative import ConservativeEntry, ConservativeExit
 from ..default import DefaultEntry, DefaultExit
 from ..optimised import OptimisedEntry, OptimisedExit
@@ -35,6 +36,10 @@ STRATEGY_REGISTRY: dict[str, dict[str, type]] = {
         "entry": OptimisedEntry,
         "exit":  OptimisedExit,
     },
+    "choppy_vol": {
+        "entry": ChoppyVolEntry,
+        "exit":  ChoppyVolExit,
+    },
 }
 
 
@@ -47,15 +52,19 @@ def resolve_strategy(
     """Instantiate the entry and exit classes for a named strategy.
 
     The volatility/choppiness pre-screen (quant_hmm.vol_screen) is baked into
-    every strategy's entry decision — a ticker classified as choppy/mean-
-    reverting is vetoed to permanent HOLD, regardless of caller.
+    every trend-following strategy's entry decision — a ticker classified as
+    choppy/mean-reverting is vetoed to permanent HOLD, regardless of caller.
+    "choppy_vol" is the exception: it ignores vol_filter_ok entirely (see
+    strategy/choppy_vol.py) since it's the strategy meant to trade those
+    vetoed tickers instead of leaving them idle — resolve it explicitly for
+    a ticker whose trend_quality is low rather than relying on this filter.
 
     vol_filter_ok, if given explicitly, overrides the computed check (True
-    forces the filter off for this instance, e.g. a --vol-filter-exempt
-    strategy; False forces a veto without a lookup). Otherwise, if `ticker`
-    is given, trend_quality is computed and the filter applied automatically.
-    With neither, the filter defaults to "on"/permissive (True) since there
-    is no ticker to evaluate.
+    forces the filter off for this instance, e.g. choppy_vol or another
+    vol-filter-exempt strategy; False forces a veto without a lookup).
+    Otherwise, if `ticker` is given, trend_quality is computed and the
+    filter applied automatically. With neither, the filter defaults to
+    "on"/permissive (True) since there is no ticker to evaluate.
 
     Returns (entry_instance, exit_instance).
     Raises KeyError for unknown names.

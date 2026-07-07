@@ -138,6 +138,20 @@ class TestConsolidatedEngine:
         pre = _precompute_hourly_vote_series(close, None, use_sar_stop=False)
         assert pre["sar_full"] is None
 
+    def test_precompute_consol_and_bb_pctb_always_populated(self):
+        """choppy_vol reads these from mom_snap regardless of exit_on_* flags —
+        they must not be gated behind need_exit like macd_bear_x/rsi_ob_exit."""
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import _precompute_hourly_vote_series
+        close = pd.Series(np.linspace(100, 120, 300))
+        pre = _precompute_hourly_vote_series(
+            close, None, exit_on_macd_cross=False, exit_on_rsi_reversal=False,
+            exit_on_consolidation=False,
+        )
+        assert pre["need_exit"] is False
+        assert pre["consol_full"] is not None
+        assert pre["bb_pctb_full"] is not None
+        assert pre["macd_bear_x"] is None   # still exit-only, correctly gated
+
     # -- _build_mom_snap --------------------------------------------------
 
     def test_build_mom_snap_returns_expected_keys(self):
@@ -150,8 +164,11 @@ class TestConsolidatedEngine:
         pre = _precompute_hourly_vote_series(close, volume)
         snap = _build_mom_snap(250, float(close.iloc[250]), pre)
         for key in ("cur_rsi", "recent_cross_above_50", "recent_cross_below_40",
-                    "above_sma20", "above_sma50", "volume_ratio"):
+                    "above_sma20", "above_sma50", "volume_ratio",
+                    "consolidation", "bb_pctb"):
             assert key in snap, f"missing key: {key}"
+        assert isinstance(snap["consolidation"], bool)
+        assert isinstance(snap["bb_pctb"], float)
 
     def test_build_mom_snap_above_sma200_populated_after_warmup(self):
         from Strategy_Auto_Trader.quant_hmm.consolidated_engine import (

@@ -104,7 +104,7 @@ def _precompute_hourly_vote_series(
         vol_ratio_full = (vol_s / vol_avg).values
 
     need_exit = exit_on_macd_cross or exit_on_rsi_reversal or exit_on_consolidation
-    macd_bear_x = rsi_ob_exit = rsi_mom_loss = consol_full = None
+    macd_bear_x = rsi_ob_exit = rsi_mom_loss = None
     if need_exit:
         macd_line_full, macd_sig_full, _ = compute_macd(close_s)
         macd_bear_x = (macd_line_full < macd_sig_full) & (macd_line_full.shift(1) >= macd_sig_full.shift(1))
@@ -113,14 +113,19 @@ def _precompute_hourly_vote_series(
         rsi_ob_exit = (rsi_exit < 70) & (rsi_exit.shift(1) >= 70)
         rsi_mom_loss = ((rsi_exit < 50) & (rsi_exit.shift(1) >= 50)
                         & (rsi_exit.rolling(6).max().shift(1) >= 60))
-        bb_mid, bb_up, bb_lo = compute_bollinger(close_s)
-        bb_w = (bb_up - bb_lo) / bb_mid
-        bb_w_avg = bb_w.rolling(20).mean()
-        bb_sq = bb_w < bb_w_avg
-        atr_s = compute_atr(close_s, window=14)
-        atr_avg_s = atr_s.rolling(20).mean()
-        atr_r_s = atr_s / atr_avg_s
-        consol_full = bb_sq & (atr_r_s < 0.75)
+
+    # Consolidation (BB squeeze + low ATR) and %b are always computed, not
+    # gated behind need_exit — entry strategies (e.g. choppy_vol) read them
+    # from mom_snap too.
+    bb_mid, bb_up, bb_lo = compute_bollinger(close_s)
+    bb_w = (bb_up - bb_lo) / bb_mid
+    bb_w_avg = bb_w.rolling(20).mean()
+    bb_sq = bb_w < bb_w_avg
+    atr_s = compute_atr(close_s, window=14)
+    atr_avg_s = atr_s.rolling(20).mean()
+    atr_r_s = atr_s / atr_avg_s
+    consol_full = bb_sq & (atr_r_s < 0.75)
+    bb_pctb_full = (close_s - bb_lo) / (bb_up - bb_lo)
 
     sar_full = None
     if use_sar_stop:
@@ -141,6 +146,7 @@ def _precompute_hourly_vote_series(
         "rsi_ob_exit": rsi_ob_exit,
         "rsi_mom_loss": rsi_mom_loss,
         "consol_full": consol_full,
+        "bb_pctb_full": bb_pctb_full,
         "sar_full": sar_full,
     }
 
@@ -181,6 +187,18 @@ def _build_mom_snap(
         sv = sma200_s.iloc[t]
         if pd.notna(sv):
             snap["above_sma200"] = cur_close > float(sv)
+
+    consol_full = pre.get("consol_full")
+    if consol_full is not None and t < len(consol_full):
+        cv = consol_full.iloc[t]
+        if pd.notna(cv):
+            snap["consolidation"] = bool(cv)
+
+    bb_pctb_full = pre.get("bb_pctb_full")
+    if bb_pctb_full is not None and t < len(bb_pctb_full):
+        bv = bb_pctb_full.iloc[t]
+        if pd.notna(bv):
+            snap["bb_pctb"] = float(bv)
 
     return snap
 
@@ -500,6 +518,7 @@ def consolidated_backtest(
                 rsi_ob=rsi_ob,
                 rsi_ml=rsi_ml,
                 consol=consol,
+                cur_rsi=mom_snap.get("cur_rsi"),
             )
             exit_result = _exit.check(trade_state, bar_data)
             exit_hit = exit_result.exit_hit
