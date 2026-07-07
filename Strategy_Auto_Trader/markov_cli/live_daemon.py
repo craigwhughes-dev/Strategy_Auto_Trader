@@ -164,6 +164,96 @@ def next_round_robin_slice(
     return slice_tickers
 
 
+def execute_signals_with_retry(
+    market_name: str,
+    ticker_list: list[str],
+    data_dir: Path,
+    portfolio: object,
+    limit_tracker: object,
+    broker: object,
+    daily_buy_limit: int | None,
+    daily_sell_limit: int | None,
+    logger: logging.Logger,
+    max_retries: int = 3,
+) -> tuple[list[str], list[str], list[str]]:
+    """Execute signals with automatic reconnect and retry on socket errors.
+
+    Detects connection failures (socket disconnect, timeout, etc.) and attempts
+    to reconnect the broker before retrying signal execution. Non-connection
+    errors are raised immediately.
+
+    Returns (buys, sells, skipped) tuple. On connection failure after max_retries,
+    returns empty results and continues (doesn't halt daemon).
+    """
+    from .execute import execute_signals
+
+    for attempt in range(max_retries):
+        try:
+            return execute_signals(
+                ticker_list, data_dir, portfolio, limit_tracker, broker,
+                daily_buy_limit, daily_sell_limit
+            )
+        except (ConnectionError, OSError, TimeoutError) as e:
+            if attempt < max_retries - 1:
+                wait_secs = 2 ** attempt
+                logger.warning(
+                    f"[{market_name}] Connection error (attempt {attempt + 1}/{max_retries}): {e}. "
+                    f"Reconnecting in {wait_secs}s..."
+                )
+                time.sleep(wait_secs)
+                try:
+                    broker.disconnect()
+                    time.sleep(0.5)
+                    broker.connect()
+                    logger.info(f"[{market_name}] Broker reconnected successfully")
+                except Exception as reconnect_err:
+                    logger.warning(
+                        f"[{market_name}] Reconnect attempt failed: {reconnect_err} "
+                        f"(will retry execute)"
+                    )
+            else:
+                logger.error(
+                    f"[{market_name}] Connection error persists after {max_retries} attempts. "
+                    f"Skipping signals for this cycle. Error: {e}"
+                )
+                return [], [], ticker_list
+        except Exception as e:
+            error_msg = str(e).lower()
+            is_socket_error = (
+                "socket" in error_msg or
+                "disconnect" in error_msg or
+                "ib_insync" in error_msg
+            )
+
+            if is_socket_error:
+                if attempt < max_retries - 1:
+                    wait_secs = 2 ** attempt
+                    logger.warning(
+                        f"[{market_name}] Socket error (attempt {attempt + 1}/{max_retries}): {e}. "
+                        f"Reconnecting in {wait_secs}s..."
+                    )
+                    time.sleep(wait_secs)
+                    try:
+                        broker.disconnect()
+                        time.sleep(0.5)
+                        broker.connect()
+                        logger.info(f"[{market_name}] Broker reconnected successfully")
+                    except Exception as reconnect_err:
+                        logger.warning(
+                            f"[{market_name}] Reconnect attempt failed: {reconnect_err}"
+                        )
+                else:
+                    logger.error(
+                        f"[{market_name}] Socket error persists after {max_retries} attempts. "
+                        f"Skipping signals for this cycle. Error: {e}"
+                    )
+                    return [], [], ticker_list
+            else:
+                raise
+
+    return [], [], ticker_list
+
+
 def process_cycle(
     market_name: str,
     market_cfg: dict,
@@ -263,9 +353,9 @@ def process_cycle(
                     logger.warning(f"[{market_name}] Reconciliation mismatch "
                                    f"unresolved — new entries blocked")
                     daily_buy_limit = 0
-                buys, sells, skipped = execute_signals(
-                    ticker_list, DATA_DIR, portfolio, limit_tracker, broker,
-                    daily_buy_limit, daily_sell_limit
+                buys, sells, skipped = execute_signals_with_retry(
+                    market_name, ticker_list, DATA_DIR, portfolio, limit_tracker, broker,
+                    daily_buy_limit, daily_sell_limit, logger
                 )
                 logger.info(f"  BUY:  {len(buys)}, SELL: {len(sells)}, Skipped: {len(skipped)}")
                 for b in buys:
@@ -274,7 +364,7 @@ def process_cycle(
                     logger.info(f"    SELL: {s}")
                 portfolio.save()
             except Exception as e:
-                logger.error(f"  Error executing signals: {e}")
+                logger.error(f"  Error executing signals (unrecoverable): {e}")
 
     elapsed = time.time() - cycle_start
     logger.info(f"[{market_name}] Cycle done: {len(processed)} tickers processed, "

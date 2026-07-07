@@ -59,8 +59,20 @@ class IBKRAdapter:
     def disconnect(self) -> None:
         """Disconnect cleanly (safe to call even if not connected)."""
         if self._ib is not None:
-            self._ib.disconnect()
+            try:
+                self._ib.disconnect()
+            except Exception:
+                pass
             self._ib = None
+
+    def is_connected(self) -> bool:
+        """Check if broker is currently connected."""
+        if self._ib is None:
+            return False
+        try:
+            return self._ib.isConnected()
+        except Exception:
+            return False
 
     def get_last_price(self, ticker: str) -> float:
         """Return last traded / midpoint price (pence for LSE tickers)."""
@@ -77,21 +89,36 @@ class IBKRAdapter:
         return float(tdata.close or 0.0)
 
     def place_order(self, req: OrderRequest) -> FillResult:
-        """Submit a market order and wait for fill (up to self._timeout seconds)."""
-        from ib_insync import Stock, MarketOrder
-        contract = Stock(*ibkr_contract_params(req.ticker))
-        self._ib.qualifyContracts(contract)
-        order = MarketOrder(req.action, req.quantity)
-        trade = self._ib.placeOrder(contract, order)
-        self._ib.waitOnUpdate(timeout=self._timeout)
-        fill_price = float(trade.orderStatus.avgFillPrice or 0.0)
-        return FillResult(
-            ticker=req.ticker,
-            action=req.action,
-            fill_price=fill_price,
-            quantity=req.quantity,
-            timestamp=datetime.now(timezone.utc).isoformat(),
-        )
+        """Submit a market order and wait for fill (up to self._timeout seconds).
+
+        Raises ConnectionError if socket is disconnected, other exceptions for order failures.
+        """
+        if not self.is_connected():
+            raise ConnectionError(
+                f"Socket disconnect: not connected to {self._host}:{self._port}"
+            )
+
+        try:
+            from ib_insync import Stock, MarketOrder
+            contract = Stock(*ibkr_contract_params(req.ticker))
+            self._ib.qualifyContracts(contract)
+            order = MarketOrder(req.action, req.quantity)
+            trade = self._ib.placeOrder(contract, order)
+            self._ib.waitOnUpdate(timeout=self._timeout)
+            fill_price = float(trade.orderStatus.avgFillPrice or 0.0)
+            return FillResult(
+                ticker=req.ticker,
+                action=req.action,
+                fill_price=fill_price,
+                quantity=req.quantity,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception as e:
+            if not self.is_connected():
+                raise ConnectionError(
+                    f"Socket disconnect during order placement: {e}"
+                ) from e
+            raise
 
     def get_open_positions(self) -> dict[str, int]:
         """Return {ticker: quantity} for all open positions in the account."""

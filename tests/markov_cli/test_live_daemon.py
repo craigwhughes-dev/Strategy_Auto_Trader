@@ -435,5 +435,214 @@ def test_main_self_check_requires_broker_only_when_not_dry_run(monkeypatch, conf
     assert captured["require_broker"] is True
 
 
+class TestExecuteSignalsWithRetry:
+    """Auto-reconnect and retry on socket errors."""
+
+    def test_success_first_attempt(self, monkeypatch):
+        """Successful execution on first attempt returns immediately."""
+        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
+
+        monkeypatch.setattr(execute_mod, "execute_signals",
+                            lambda *a, **k: (["BUY"], ["SELL"], []))
+
+        result = live_daemon.execute_signals_with_retry(
+            "ftse", ["AAPL"], None, None, None, mock.Mock(),
+            2, None, mock.Mock()
+        )
+        assert result == (["BUY"], ["SELL"], [])
+
+    def test_socket_error_triggers_reconnect(self, monkeypatch):
+        """Socket error triggers broker disconnect/reconnect and retry."""
+        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
+
+        call_count = [0]
+        broker = mock.Mock()
+        logger = mock.Mock()
+
+        def fake_execute(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise ConnectionError("Socket disconnect: not connected to 127.0.0.1:7497")
+            return (["BUY"], ["SELL"], [])
+
+        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
+
+        result = live_daemon.execute_signals_with_retry(
+            "ftse", ["AAPL"], None, None, None, broker,
+            2, None, logger, max_retries=3
+        )
+
+        assert result == (["BUY"], ["SELL"], [])
+        assert broker.disconnect.called
+        assert broker.connect.called
+
+    def test_socket_error_with_reconnect_failure(self, monkeypatch):
+        """Socket error retries even if reconnect fails."""
+        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
+
+        call_count = [0]
+        broker = mock.Mock()
+        broker.connect.side_effect = RuntimeError("TWS not responding")
+        logger = mock.Mock()
+
+        def fake_execute(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] <= 2:
+                raise ConnectionError("Socket error")
+            return (["BUY"], [], [])
+
+        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
+
+        result = live_daemon.execute_signals_with_retry(
+            "ftse", ["AAPL"], None, None, None, broker,
+            2, None, logger, max_retries=3
+        )
+
+        assert result == (["BUY"], [], [])
+        assert call_count[0] == 3  # Called on attempts 1, 2, 3
+
+    def test_socket_error_max_retries_exhausted(self, monkeypatch):
+        """Socket error after max retries returns empty results, doesn't raise."""
+        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
+
+        broker = mock.Mock()
+        logger = mock.Mock()
+
+        def fake_execute(*args, **kwargs):
+            raise ConnectionError("Socket disconnect")
+
+        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
+
+        result = live_daemon.execute_signals_with_retry(
+            "ftse", ["AAPL", "MSFT"], None, None, None, broker,
+            2, None, logger, max_retries=2
+        )
+
+        assert result == ([], [], ["AAPL", "MSFT"])  # Tickers listed as skipped
+        assert logger.error.called
+
+    def test_timeout_error_triggers_retry(self, monkeypatch):
+        """TimeoutError (socket-level) triggers reconnect."""
+        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
+
+        call_count = [0]
+        broker = mock.Mock()
+        logger = mock.Mock()
+
+        def fake_execute(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise TimeoutError("Socket timeout")
+            return ([], ["SELL"], [])
+
+        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
+
+        result = live_daemon.execute_signals_with_retry(
+            "ftse", ["AAPL"], None, None, None, broker,
+            2, None, logger
+        )
+
+        assert result == ([], ["SELL"], [])
+        assert broker.disconnect.called
+
+    def test_os_error_triggers_retry(self, monkeypatch):
+        """OSError (socket-level) triggers reconnect."""
+        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
+
+        call_count = [0]
+        broker = mock.Mock()
+        logger = mock.Mock()
+
+        def fake_execute(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise OSError("[Errno 10054] Connection reset by peer")
+            return (["BUY"], [], [])
+
+        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
+
+        result = live_daemon.execute_signals_with_retry(
+            "ftse", ["AAPL"], None, None, None, broker,
+            2, None, logger
+        )
+
+        assert result == (["BUY"], [], [])
+
+    def test_non_socket_error_raises_immediately(self, monkeypatch):
+        """Non-connection errors are raised immediately without retry."""
+        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
+
+        broker = mock.Mock()
+        logger = mock.Mock()
+
+        def fake_execute(*args, **kwargs):
+            raise ValueError("Invalid ticker symbol")
+
+        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
+
+        with pytest.raises(ValueError, match="Invalid ticker symbol"):
+            live_daemon.execute_signals_with_retry(
+                "ftse", ["AAPL"], None, None, None, broker,
+                2, None, logger
+            )
+
+        assert not broker.disconnect.called
+
+    def test_string_pattern_socket_error_triggers_retry(self, monkeypatch):
+        """Exception with 'socket' or 'disconnect' in message triggers retry."""
+        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
+
+        call_count = [0]
+        broker = mock.Mock()
+        logger = mock.Mock()
+
+        def fake_execute(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("Socket error: connection lost")
+            return (["BUY"], ["SELL"], [])
+
+        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
+
+        result = live_daemon.execute_signals_with_retry(
+            "ftse", ["AAPL"], None, None, None, broker,
+            2, None, logger
+        )
+
+        assert result == (["BUY"], ["SELL"], [])
+        assert broker.disconnect.called
+
+    def test_exponential_backoff_sleep_times(self, monkeypatch):
+        """Retries use exponential backoff: 1s, 2s, 4s."""
+        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
+        import time
+
+        call_count = [0]
+        sleep_times = []
+        broker = mock.Mock()
+        logger = mock.Mock()
+
+        def fake_execute(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] < 4:
+                raise ConnectionError("Socket error")
+            return (["BUY"], [], [])
+
+        def fake_sleep(secs):
+            sleep_times.append(secs)
+
+        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
+        monkeypatch.setattr(time, "sleep", fake_sleep)
+
+        result = live_daemon.execute_signals_with_retry(
+            "ftse", ["AAPL"], None, None, None, broker,
+            2, None, logger, max_retries=4
+        )
+
+        assert result == (["BUY"], [], [])
+        # Expected: exponential backoff [1, 2, 4] + intermediate 0.5s pauses between disconnect/reconnect
+        assert sleep_times == [1, 0.5, 2, 0.5, 4, 0.5]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
