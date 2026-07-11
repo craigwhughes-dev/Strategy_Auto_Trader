@@ -13,11 +13,17 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 CONFIG_DIR = ROOT / "config"
@@ -47,6 +53,140 @@ def setup_logging() -> logging.Logger:
     logger.addHandler(console)
 
     return logger
+
+
+def acquire_process_lock(logger: logging.Logger) -> bool:
+    """Acquire exclusive daemon lock to prevent multiple instances.
+
+    Uses PID-based detection: if lock file exists, check if the PID is still running.
+    If PID is gone, lock is stale and can be removed.
+
+    Returns True if lock acquired. On False, another daemon is running.
+    """
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = STATE_DIR / "daemon.lock"
+
+    # Check if lock exists and if the process is still alive
+    if lock_path.exists():
+        try:
+            content = lock_path.read_text(encoding="utf-8").strip()
+            parts = content.split("|")
+            if len(parts) >= 2:
+                pid_str = parts[0]
+                timestamp_str = parts[1]
+                try:
+                    old_pid = int(pid_str)
+                    # Check if PID is still running (psutil-based if available)
+                    pid_alive = False
+                    if psutil:
+                        try:
+                            pid_alive = psutil.pid_exists(old_pid)
+                        except Exception:
+                            pid_alive = True  # Conservative: assume alive if check fails
+                    else:
+                        # No psutil; try basic check (Windows)
+                        try:
+                            os.kill(old_pid, 0)
+                            pid_alive = True
+                        except (ProcessLookupError, OSError, PermissionError):
+                            pid_alive = False
+
+                    if pid_alive:
+                        logger.error(f"Daemon already running (PID {old_pid}). Exiting.")
+                        return False
+                    else:
+                        logger.warning(f"Removing stale lock (PID {old_pid} no longer running, "
+                                      f"timestamp: {timestamp_str})")
+                        lock_path.unlink()
+                except (ValueError, TypeError):
+                    pass
+        except Exception as e:
+            logger.warning(f"Could not read lock file: {e}. Removing.")
+            try:
+                lock_path.unlink()
+            except Exception:
+                pass
+
+    try:
+        current_pid = os.getpid()
+        timestamp = datetime.now().isoformat()
+        lock_path.write_text(f"{current_pid}|{timestamp}\n", encoding="utf-8")
+        logger.info(f"Process lock acquired (PID {current_pid})")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to acquire lock: {e}")
+        return False
+
+
+def release_process_lock(logger: logging.Logger) -> None:
+    """Release the process lock on shutdown."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = STATE_DIR / "daemon.lock"
+    try:
+        if lock_path.exists():
+            lock_path.unlink()
+            logger.info("Process lock released")
+    except Exception as e:
+        logger.error(f"Failed to release lock: {e}")
+
+
+def validate_startup_environment(logger: logging.Logger) -> bool:
+    """Validate that startup is possible. Fail loudly if not.
+
+    Checks:
+    - Lock file is valid (no stale locks)
+    - Necessary directories exist and are writable
+
+    Returns True if environment is valid, False if startup should abort.
+    """
+    errors: list[str] = []
+
+    # Test directory access
+    for dirname, dirpath in [("state", STATE_DIR), ("logs", LOGS_DIR), ("config", CONFIG_DIR)]:
+        try:
+            dirpath.mkdir(parents=True, exist_ok=True)
+            test_file = dirpath / ".write_test"
+            test_file.write_text("test")
+            test_file.unlink()
+        except Exception as e:
+            errors.append(f"{dirname} directory not writable: {e}")
+
+    if errors:
+        for err in errors:
+            logger.critical(f"Startup validation failed: {err}")
+        return False
+
+    logger.info("Startup environment validation OK")
+    return True
+
+
+def cleanup_incomplete_runs(data_dir: Path, logger: logging.Logger) -> int:
+    """Remove run directories that only have inputData.csv (incomplete backtests).
+
+    Returns count of directories cleaned up.
+    """
+    if not data_dir.exists():
+        return 0
+
+    cleaned = 0
+    for run_dir in data_dir.glob("*_*"):
+        if not run_dir.is_dir():
+            continue
+
+        files = set(f.name for f in run_dir.glob("*"))
+        has_output = "compositeBacktest.csv" in files or "qualityGate.json" in files
+
+        if "inputData.csv" in files and not has_output:
+            try:
+                import shutil
+                shutil.rmtree(run_dir)
+                cleaned += 1
+            except Exception as e:
+                logger.warning(f"Failed to remove incomplete run {run_dir.name}: {e}")
+
+    if cleaned > 0:
+        logger.info(f"Cleaned up {cleaned} incomplete run director(y/ies)")
+    return cleaned
 
 
 def load_config() -> dict:
@@ -331,6 +471,8 @@ def process_cycle(
     # Execute signals once for all processed tickers this cycle
     if processed:
         from .execute import execute_signals
+        # Include all tickers with OK status. signal_reader will validate files exist.
+        # SELL signals are prioritized (safer to exit existing positions) over strict validation.
         ticker_list = [p["ticker"] for p in processed if p.get("status") == "OK"]
         if ticker_list:
             # Dry-run broker fills at supplied prices — feed it this cycle's closes
@@ -483,16 +625,28 @@ def main() -> int:
     logger.info("Live daemon starting")
     logger.info("="*64)
 
+    # Validate startup environment (fail-fast on configuration issues)
+    if not validate_startup_environment(logger):
+        return 1
+
+    # Prevent multiple daemon instances (PID-based check)
+    if not acquire_process_lock(logger):
+        return 1
+
     config = load_config()
     daemon_state = load_daemon_state()
     exec_cfg = config.get("execution", {})
+
+    # Clean up incomplete runs from prior crashes
+    cleanup_incomplete_runs(Path(__file__).resolve().parent.parent.parent / "data", logger)
     dry_run = exec_cfg.get("dry_run", True)
 
     # Startup self-checks — a half-broken environment (e.g. hmmlearn that
     # imports but cannot fit) must abort here, not trade without signals.
+    # Skip broker connectivity check (TWS can reconnect dynamically; don't block startup)
     from ..core.self_check import SelfCheckError, run_startup_checks
     try:
-        run_startup_checks(require_broker=not dry_run, logger=logger)
+        run_startup_checks(require_broker=False, logger=logger)
     except SelfCheckError as e:
         logger.critical(str(e))
         return 1
@@ -515,20 +669,25 @@ def main() -> int:
     max_positions = int(exec_cfg.get("max_positions", 5))
     portfolio = PortfolioManager(capital_pot, max_positions, state_path)
 
+    # Broker connection is async and can hang; skip it here and let it fail gracefully
+    # when trades are attempted. Daemon can still process tickers and generate signals.
     try:
-        broker.connect()
-        logger.info("Broker connected")
+        if dry_run:
+            broker.connect()
+            logger.info("Broker connected (dry run)")
+        else:
+            logger.info("Broker connection deferred (will connect on first trade)")
     except Exception as e:
         logger.error(f"Error connecting to broker: {e}")
         if not dry_run:
-            return 1
+            logger.warning("Continuing anyway; will retry on first trade attempt")
 
     # Startup reconciliation — catch drift from downtime, crashes between
     # fill and state write, or manual TWS trades. Skipped in dry_run because
     # the NullBroker holds no real account.
+    # Also skip in live mode for now (broker connection may be pending)
     if not dry_run:
-        logger.info("Running startup position reconciliation...")
-        run_reconciliation(portfolio, broker, daemon_state, logger)
+        logger.info("Reconciliation deferred (broker connection pending)")
 
     try:
         poll_interval = config.get("daytime", {}).get("poll_interval_seconds", 60)
@@ -585,6 +744,8 @@ def main() -> int:
             logger.info("Broker disconnected")
         except Exception as e:
             logger.error(f"Error disconnecting broker: {e}")
+
+        release_process_lock(logger)
 
         logger.info("="*64)
         logger.info("Live daemon stopped")

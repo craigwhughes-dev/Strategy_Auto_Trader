@@ -8,9 +8,7 @@
       "defaults": {
         "strategy": "optimised"
       }
-    }
-  },
-  "markets_disabled": {
+    },
     "sp500": {
       "watchlist": "config/watchlist_sp500.json",
       "timezone": "America/New_York",

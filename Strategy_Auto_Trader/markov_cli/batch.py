@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -16,6 +17,36 @@ from pathlib import Path
 import pandas as pd
 
 from .run import main as run_single
+
+
+class TimeoutError(Exception):
+    """Raised when a process exceeds time limit."""
+    pass
+
+
+def _timeout_handler(signum, frame):
+    raise TimeoutError("Backtest exceeded time limit (5 minutes)")
+
+
+def run_single_with_timeout(argv: list[str], timeout_seconds: int = 300) -> None:
+    """Run backtest with timeout protection (5 minutes default).
+
+    Raises TimeoutError if run_single exceeds the limit.
+    Only available on Unix-like systems; on Windows, runs without timeout.
+    """
+    if sys.platform == "win32":
+        # Windows doesn't support signal.SIGALRM; run without timeout
+        run_single(argv)
+        return
+
+    # Unix: set alarm and run
+    old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.alarm(timeout_seconds)
+    try:
+        run_single(argv)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 DEFAULTS_FILE = Path(__file__).resolve().parent.parent.parent / "config" / "watchlist.json"
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
@@ -274,7 +305,7 @@ def process_ticker(
     argv = _build_argv(ticker_cfg, defaults)
     t0 = time.time()
     try:
-        run_single(argv)
+        run_single_with_timeout(argv, timeout_seconds=300)
         elapsed = time.time() - t0
 
         result = _collect_results(ticker)
@@ -329,6 +360,9 @@ def process_ticker(
         else:
             return {"ticker": ticker, "status": "OK", "time": elapsed, "result": None}
 
+    except TimeoutError as exc:
+        elapsed = time.time() - t0
+        return {"ticker": ticker, "status": f"TIMEOUT: {exc}", "time": elapsed}
     except Exception as exc:
         elapsed = time.time() - t0
         return {"ticker": ticker, "status": f"FAIL: {exc}", "time": elapsed}

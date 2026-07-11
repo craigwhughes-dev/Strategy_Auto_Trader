@@ -13,8 +13,20 @@ entry points can refuse to start instead of degrading silently.
 from __future__ import annotations
 
 import logging
+import signal
+import sys
+import threading
 
 import numpy as np
+
+
+class _BrokerTimeout(Exception):
+    """Raised when broker connectivity check exceeds timeout."""
+    pass
+
+
+def _broker_timeout_handler(signum, frame):
+    raise _BrokerTimeout("broker connectivity check timed out (30s)")
 
 
 class SelfCheckError(RuntimeError):
@@ -67,39 +79,77 @@ def check_broker_connectivity(
     port: int = 7497,
     client_id: int = 97,
     retries: int = 1,
+    timeout_seconds: int = 20,
 ) -> str:
     """Connect to TWS / IB Gateway and query the session's accounts.
 
     Uses its own client id so it never collides with the trading
     connection. Retries once because the ib_insync handshake is known to
     time out transiently even when TWS is healthy.
+    Times out after 20 seconds to prevent daemon from hanging at startup.
     """
     from ..broker.ibkr_adapter import IBKRAdapter
 
-    adapter = IBKRAdapter(host=host, port=port, client_id=client_id)
-    last_exc: Exception | None = None
-    for _ in range(retries + 1):
-        try:
-            adapter.connect()
-            last_exc = None
-            break
-        except Exception as exc:
-            last_exc = exc
-            adapter.disconnect()
-    if last_exc is not None:
-        raise SelfCheckError(
-            f"cannot connect to TWS/Gateway at {host}:{port} ({last_exc}) — "
-            "is it running, logged in, with API enabled on this port?"
-        ) from last_exc
+    result_holder: dict[str, str | Exception | None] = {"result": None}
 
-    try:
-        accounts = adapter.managed_accounts()
-    finally:
-        adapter.disconnect()
-    if not accounts:
+    def do_check():
+        try:
+            adapter = IBKRAdapter(host=host, port=port, client_id=client_id)
+            last_exc: Exception | None = None
+            for _ in range(retries + 1):
+                try:
+                    adapter.connect()
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    try:
+                        adapter.disconnect()
+                    except Exception:
+                        pass
+
+            if last_exc is not None:
+                result_holder["result"] = SelfCheckError(
+                    f"cannot connect to TWS/Gateway at {host}:{port} ({last_exc}) — "
+                    "is it running, logged in, with API enabled on this port?"
+                )
+                return
+
+            try:
+                accounts = adapter.managed_accounts()
+            finally:
+                try:
+                    adapter.disconnect()
+                except Exception:
+                    pass
+
+            if not accounts:
+                result_holder["result"] = SelfCheckError(
+                    f"connected to {host}:{port} but session reports no accounts")
+                return
+
+            result_holder["result"] = f"connected to {host}:{port}, accounts: {', '.join(accounts)}"
+        except Exception as exc:
+            result_holder["result"] = exc
+
+    thread = threading.Thread(target=do_check, daemon=False)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+
+    if thread.is_alive():
         raise SelfCheckError(
-            f"connected to {host}:{port} but session reports no accounts")
-    return f"connected to {host}:{port}, accounts: {', '.join(accounts)}"
+            f"broker connectivity check timed out after {timeout_seconds}s "
+            f"(TWS at {host}:{port} not responding)"
+        )
+
+    result = result_holder.get("result")
+    if isinstance(result, Exception):
+        if isinstance(result, SelfCheckError):
+            raise result
+        raise SelfCheckError(f"broker check failed: {result}") from result
+    if result is None:
+        raise SelfCheckError("broker connectivity check returned no result")
+    return result
 
 
 def run_startup_checks(
