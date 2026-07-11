@@ -1,6 +1,6 @@
 # Strategy Auto-Trader
 
-An hourly-bar algorithmic trading system built as a [Claude Code skill](https://code.claude.com/docs/en/skills). It combines a Gaussian Hidden Markov Model regime filter with a weighted momentum vote system, a quality gate, and a layered exit stack — then backtests, live-simulates, emails trade alerts, and (optionally) executes on Interactive Brokers paper trading.
+An hourly-bar algorithmic trading system built as a [Claude Code skill](https://code.claude.com/docs/en/skills). It combines a Gaussian Hidden Markov Model regime filter with a weighted momentum vote system, a quality gate, and a layered exit stack — then backtests, live-simulates, emails trade alerts, and (optionally) executes on Interactive Brokers paper trading. Easy to design, code and backtest a new trading strategy using claude code.
 
 > ⚠️ **Not financial advice.** This is a research and paper-trading project. Backtests use walk-forward, no-lookahead signals, but past performance predicts nothing. Use the backtests to understand *when* the system would be in or out of the market, not to forecast returns.
 
