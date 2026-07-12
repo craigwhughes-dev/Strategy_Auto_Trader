@@ -1,0 +1,121 @@
+{
+  "defaults": {
+    "strategy": "conservative",
+    "initial_cash": 20000,
+    "transaction_cost": 10,
+    "capital_pot": 10000,
+    "max_positions": 40,
+    "daily_buy_limit": null,
+    "daily_sell_limit": null
+  },
+  "tickers": [
+    {
+      "ticker": "T"
+    },
+    {
+      "ticker": "KR"
+    },
+    {
+      "ticker": "CAT"
+    },
+    {
+      "ticker": "JNJ"
+    },
+    {
+      "ticker": "GS"
+    },
+    {
+      "ticker": "HUM"
+    },
+    {
+      "ticker": "LMT"
+    },
+    {
+      "ticker": "WELL"
+    },
+    {
+      "ticker": "VTR"
+    },
+    {
+      "ticker": "AEP"
+    },
+    {
+      "ticker": "EQIX"
+    },
+    {
+      "ticker": "FFIV"
+    },
+    {
+      "ticker": "RTX"
+    },
+    {
+      "ticker": "PSX"
+    },
+    {
+      "ticker": "CVS"
+    },
+    {
+      "ticker": "XOM"
+    },
+    {
+      "ticker": "MO"
+    },
+    {
+      "ticker": "BAC"
+    },
+    {
+      "ticker": "FOXA"
+    },
+    {
+      "ticker": "WMB"
+    },
+    {
+      "ticker": "CBOE"
+    },
+    {
+      "ticker": "MLM"
+    },
+    {
+      "ticker": "L"
+    },
+    {
+      "ticker": "EA"
+    },
+    {
+      "ticker": "CTVA"
+    },
+    {
+      "ticker": "PM"
+    },
+    {
+      "ticker": "VMC"
+    },
+    {
+      "ticker": "O"
+    },
+    {
+      "ticker": "CINF"
+    },
+    {
+      "ticker": "XEL"
+    },
+    {
+      "ticker": "JKHY"
+    },
+    {
+      "ticker": "WM"
+    },
+    {
+      "ticker": "IBM"
+    },
+    {
+      "ticker": "CAG"
+    },
+    {
+      "ticker": "ZTS"
+    },
+    {
+      "ticker": "MKC"
+    }
+  ]
+}

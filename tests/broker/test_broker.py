@@ -892,6 +892,61 @@ class TestBroker:
         buys, _ = tracker.get_today_counts()
         assert buys == 2
 
+    # -- Phase 0: market / currency / cost_value -----
+
+    def test_portfolio_record_entry_with_market_currency(self, tmp_path):
+        """record_entry stores market and currency fields."""
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.types import FillResult
+        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        fill = FillResult("LLOY.L", "BUY", 450.0, 10, "2026-07-01T00:00:00+00:00")
+        pm.record_entry("LLOY.L", fill, 0.12, 425.0, 515.0, market="ftse", currency="GBP")
+        assert "LLOY.L" in pm.positions
+        pos = pm.positions["LLOY.L"]
+        assert pos["market"] == "ftse"
+        assert pos["currency"] == "GBP"
+        assert pos["cost_value"] == pytest.approx(4500.0)  # 450 * 10
+
+    def test_portfolio_record_entry_cost_value_computed(self, tmp_path):
+        """record_entry computes cost_value from fill_price and quantity."""
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.types import FillResult
+        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        fill = FillResult("AAPL", "BUY", 123.45, 17, "2026-07-01T00:00:00+00:00")
+        pm.record_entry("AAPL", fill, 0.10, 100.0, 150.0, market="sp500", currency="USD")
+        pos = pm.positions["AAPL"]
+        assert pos["cost_value"] == pytest.approx(123.45 * 17)
+
+    def test_portfolio_record_entry_empty_market_currency_allowed(self, tmp_path):
+        """record_entry works with empty market/currency (for backward compat)."""
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.types import FillResult
+        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        fill = FillResult("SPY", "BUY", 500.0, 4, "2026-07-01T00:00:00+00:00")
+        pm.record_entry("SPY", fill, 0.10, 475.0, 575.0)  # No market/currency
+        assert "SPY" in pm.positions
+        pos = pm.positions["SPY"]
+        assert pos.get("market") == ""
+        assert pos.get("currency") == ""
+        assert pos["cost_value"] == pytest.approx(2000.0)
+
+    def test_portfolio_save_and_reload_preserves_market_currency(self, tmp_path):
+        """Positions with market/currency round-trip through save/load."""
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.types import FillResult
+        path = tmp_path / "state.json"
+        pm = PortfolioManager(20_000, 5, path)
+        fill = FillResult("BP.L", "BUY", 350.0, 15, "2026-07-01T00:00:00+00:00")
+        pm.record_entry("BP.L", fill, 0.15, 325.0, 400.0, market="ftse", currency="GBP")
+        pm.save()
+
+        pm2 = PortfolioManager(20_000, 5, path)
+        assert "BP.L" in pm2.positions
+        pos = pm2.positions["BP.L"]
+        assert pos["market"] == "ftse"
+        assert pos["currency"] == "GBP"
+        assert pos["cost_value"] == pytest.approx(5250.0)
+
 
 class TestSlippageBps:
 

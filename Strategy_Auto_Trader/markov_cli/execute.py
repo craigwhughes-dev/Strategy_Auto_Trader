@@ -63,6 +63,8 @@ def execute_signals(
     broker: object,
     daily_buy_limit: int | None = 2,
     daily_sell_limit: int | None = None,
+    market_name: str = "",
+    market_currency: str = "",
 ) -> tuple[list[str], list[str], list[str]]:
     """Execute BUY/SELL signals for the given tickers.
 
@@ -112,6 +114,8 @@ def execute_signals(
             signal["stop_level"],
             signal["target_level"],
             signal_price=signal["close"],
+            market=market_name,
+            currency=market_currency,
         )
         limit_tracker.record_buy()
         buys.append(f"{ticker} x{qty} @ {fill.fill_price:.2f}"

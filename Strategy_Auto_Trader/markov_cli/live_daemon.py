@@ -213,10 +213,90 @@ def load_daemon_state() -> dict:
 
 
 def save_daemon_state(state: dict) -> None:
-    """Save daemon_state.json."""
+    """Save daemon_state.json (atomically)."""
+    from ..core.atomic_io import atomic_write_json
     state_path = STATE_DIR / "daemon_state.json"
-    with open(state_path, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
+    atomic_write_json(state_path, state)
+
+
+def get_market_currency(market_name: str, config: dict) -> str:
+    """Get currency code for a market (FTSE=GBP, SP500=USD, etc.)."""
+    # Map market names to currencies. Can be extended per config later.
+    market_currencies = {
+        "ftse": "GBP",
+        "ftse100": "GBP",
+        "sp500": "USD",
+        "usa": "USD",
+    }
+    return market_currencies.get(market_name.lower(), "")
+
+
+def write_app_status_snapshot(
+    portfolio: object,
+    daemon_state: dict,
+    config: dict,
+    last_cycle_hour: dict,
+    logger: logging.Logger,
+) -> None:
+    """Write app_status.json snapshot atomically every poll loop (~60s).
+
+    This is the app's only window into daemon state. Includes heartbeat,
+    positions with market/currency/cost_value, daemon health flags, and
+    trading hours status per market.
+    """
+    from ..core.atomic_io import atomic_write_json
+
+    now_utc = datetime.now(timezone.utc).isoformat()
+    pid = os.getpid()
+
+    trades_today = portfolio._state.get("trades_today", {
+        "date": datetime.now(timezone.utc).date().isoformat(),
+        "buys": 0,
+        "sells": 0,
+    })
+
+    # Snapshot positions with all needed fields
+    positions_snapshot = {}
+    for ticker, pos in portfolio.positions.items():
+        positions_snapshot[ticker] = {
+            "entry_date": pos.get("entry_date", ""),
+            "fill_price": pos.get("fill_price", 0.0),
+            "quantity": pos.get("quantity", 0),
+            "cost_value": pos.get("cost_value", 0.0),
+            "market": pos.get("market", ""),
+            "currency": pos.get("currency", ""),
+            "stop_level": pos.get("stop_level", 0.0),
+            "target_level": pos.get("target_level", 0.0),
+            "kelly_fraction": pos.get("kelly_fraction", 0.0),
+        }
+
+    # Market trading hours status
+    markets_status = {}
+    now = datetime.now(timezone.utc)
+    for market_name, market_cfg in config.get("markets", {}).items():
+        in_trading = is_trading_hours(market_cfg, logger)
+        last_hour = last_cycle_hour.get(market_name, -1)
+        markets_status[market_name] = {
+            "in_trading_hours": in_trading,
+            "last_cycle_hour": last_hour,
+        }
+
+    snapshot = {
+        "schema_version": 1,
+        "heartbeat_utc": now_utc,
+        "daemon_pid": pid,
+        "dry_run": config.get("execution", {}).get("dry_run", True),
+        "halt_new_entries": daemon_state.get("halt_new_entries", False),
+        "reconciliation_discrepancies": daemon_state.get("reconciliation_discrepancies", []),
+        "last_reconcile_date": daemon_state.get("last_reconcile_date", ""),
+        "trades_today": trades_today,
+        "markets": markets_status,
+        "positions": positions_snapshot,
+    }
+
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    status_path = STATE_DIR / "app_status.json"
+    atomic_write_json(status_path, snapshot)
 
 
 def is_trading_hours(market_cfg: dict, logger: logging.Logger) -> bool:
@@ -315,6 +395,7 @@ def execute_signals_with_retry(
     daily_sell_limit: int | None,
     logger: logging.Logger,
     max_retries: int = 3,
+    market_currency: str = "",
 ) -> tuple[list[str], list[str], list[str]]:
     """Execute signals with automatic reconnect and retry on socket errors.
 
@@ -331,7 +412,9 @@ def execute_signals_with_retry(
         try:
             return execute_signals(
                 ticker_list, data_dir, portfolio, limit_tracker, broker,
-                daily_buy_limit, daily_sell_limit
+                daily_buy_limit, daily_sell_limit,
+                market_name=market_name,
+                market_currency=market_currency,
             )
         except (ConnectionError, OSError, TimeoutError) as e:
             if attempt < max_retries - 1:
@@ -495,9 +578,11 @@ def process_cycle(
                     logger.warning(f"[{market_name}] Reconciliation mismatch "
                                    f"unresolved — new entries blocked")
                     daily_buy_limit = 0
+                market_currency = get_market_currency(market_name, config)
                 buys, sells, skipped = execute_signals_with_retry(
                     market_name, ticker_list, DATA_DIR, portfolio, limit_tracker, broker,
-                    daily_buy_limit, daily_sell_limit, logger
+                    daily_buy_limit, daily_sell_limit, logger,
+                    market_currency=market_currency,
                 )
                 logger.info(f"  BUY:  {len(buys)}, SELL: {len(sells)}, Skipped: {len(skipped)}")
                 for b in buys:
@@ -726,6 +811,9 @@ def main() -> int:
 
                         last_cycle_hour[market_name] = current_hour
                         save_daemon_state(daemon_state)
+
+                # Write app_status.json snapshot (before sleep, so it's fresh on next poll)
+                write_app_status_snapshot(portfolio, daemon_state, config, last_cycle_hour, logger)
 
                 # Sleep
                 logger.debug(f"Sleeping {poll_interval}s...")

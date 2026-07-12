@@ -8,6 +8,7 @@ from math import floor
 from pathlib import Path
 
 from .types import FillResult
+from ..core.atomic_io import atomic_write_json
 
 
 def slippage_bps(signal_price: float, fill_price: float, action: str) -> float | None:
@@ -68,10 +69,8 @@ class PortfolioManager:
         }
 
     def save(self) -> None:
-        """Write current state to execution_state.json."""
-        self._path.write_text(
-            json.dumps(self._state, indent=2), encoding="utf-8"
-        )
+        """Write current state to execution_state.json (atomically)."""
+        atomic_write_json(self._path, self._state)
 
     # -- Read-only accessors ------------------------------------------------
 
@@ -114,13 +113,19 @@ class PortfolioManager:
         stop_level: float,
         target_level: float,
         signal_price: float = 0.0,
+        market: str = "",
+        currency: str = "",
     ) -> None:
         """Record a new open position after a BUY fill."""
         today = datetime.now(timezone.utc).date().isoformat()
+        cost_value = fill.fill_price * fill.quantity
         self._state["positions"][ticker] = {
             "entry_date": today,
             "fill_price": fill.fill_price,
             "quantity": fill.quantity,
+            "cost_value": cost_value,
+            "market": market,
+            "currency": currency,
             "kelly_fraction": kelly_fraction,
             "stop_level": stop_level,
             "target_level": target_level,

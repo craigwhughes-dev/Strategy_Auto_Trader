@@ -381,7 +381,7 @@ def test_process_cycle_halt_flag_blocks_new_entries(monkeypatch):
     captured = {}
 
     def fake_execute_signals(tickers, data_dir, portfolio, limit_tracker,
-                             broker, daily_buy_limit, daily_sell_limit):
+                             broker, daily_buy_limit, daily_sell_limit, **kwargs):
         captured["daily_buy_limit"] = daily_buy_limit
         return [], [], []
 
@@ -642,6 +642,103 @@ class TestExecuteSignalsWithRetry:
         assert result == (["BUY"], [], [])
         # Expected: exponential backoff [1, 2, 4] + intermediate 0.5s pauses between disconnect/reconnect
         assert sleep_times == [1, 0.5, 2, 0.5, 4, 0.5]
+
+
+class TestAppStatusSnapshot:
+    """Phase 0: app_status.json snapshot generation."""
+
+    def test_write_app_status_snapshot_creates_file(self, tmp_path, monkeypatch):
+        """write_app_status_snapshot writes app_status.json atomically."""
+        from Strategy_Auto_Trader.markov_cli import live_daemon
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.types import FillResult
+
+        monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+        monkeypatch.setattr("Strategy_Auto_Trader.markov_cli.live_daemon.os.getpid", lambda: 12345)
+
+        # Create a portfolio with one position
+        pm = PortfolioManager(20_000, 5, tmp_path / "execution_state.json")
+        fill = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-01T00:00:00+00:00")
+        pm.record_entry("AAPL", fill, 0.15, 185.0, 224.0, market="sp500", currency="USD")
+
+        daemon_state = {
+            "halt_new_entries": False,
+            "reconciliation_discrepancies": [],
+            "last_reconcile_date": "2026-07-01",
+        }
+        config = {
+            "execution": {"dry_run": True},
+            "markets": {
+                "sp500": {"timezone": "America/New_York", "trading_start": "09:30", "trading_end": "16:00"},
+            },
+        }
+        last_cycle_hour = {"sp500": 14}
+        logger = mock.Mock()
+
+        live_daemon.write_app_status_snapshot(pm, daemon_state, config, last_cycle_hour, logger)
+
+        status_path = tmp_path / "app_status.json"
+        assert status_path.exists()
+        snapshot = json.loads(status_path.read_text(encoding="utf-8"))
+        assert snapshot["schema_version"] == 1
+        assert snapshot["daemon_pid"] == 12345
+        assert snapshot["dry_run"] is True
+        assert snapshot["halt_new_entries"] is False
+        assert "AAPL" in snapshot["positions"]
+        assert snapshot["positions"]["AAPL"]["market"] == "sp500"
+        assert snapshot["positions"]["AAPL"]["currency"] == "USD"
+        assert snapshot["positions"]["AAPL"]["quantity"] == 10
+
+    def test_write_app_status_snapshot_includes_heartbeat(self, tmp_path, monkeypatch):
+        """Snapshot heartbeat_utc is set to current time (liveness)."""
+        from Strategy_Auto_Trader.markov_cli import live_daemon
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+
+        monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+        pm = PortfolioManager(20_000, 5, tmp_path / "execution_state.json")
+        daemon_state = {}
+        config = {"execution": {"dry_run": True}, "markets": {}}
+
+        live_daemon.write_app_status_snapshot(pm, daemon_state, config, {}, mock.Mock())
+
+        snapshot = json.loads((tmp_path / "app_status.json").read_text(encoding="utf-8"))
+        assert "heartbeat_utc" in snapshot
+        # Verify it's a valid ISO timestamp
+        heartbeat = snapshot["heartbeat_utc"]
+        assert "T" in heartbeat
+        assert "+" in heartbeat or "Z" in heartbeat
+
+    def test_write_app_status_snapshot_includes_halt_flag(self, tmp_path, monkeypatch):
+        """Snapshot includes halt_new_entries flag for reconciliation mismatch."""
+        from Strategy_Auto_Trader.markov_cli import live_daemon
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+
+        monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+        pm = PortfolioManager(20_000, 5, tmp_path / "execution_state.json")
+        daemon_state = {
+            "halt_new_entries": True,
+            "reconciliation_discrepancies": ["SPY: broker=10, internal=5"],
+        }
+        config = {"execution": {"dry_run": False}, "markets": {}}
+
+        live_daemon.write_app_status_snapshot(pm, daemon_state, config, {}, mock.Mock())
+
+        snapshot = json.loads((tmp_path / "app_status.json").read_text(encoding="utf-8"))
+        assert snapshot["halt_new_entries"] is True
+        assert len(snapshot["reconciliation_discrepancies"]) == 1
+        assert snapshot["reconciliation_discrepancies"][0] == "SPY: broker=10, internal=5"
+
+    def test_get_market_currency_ftse(self):
+        """get_market_currency maps FTSE markets to GBP."""
+        from Strategy_Auto_Trader.markov_cli import live_daemon
+        assert live_daemon.get_market_currency("ftse", {}) == "GBP"
+        assert live_daemon.get_market_currency("FTSE100", {}) == "GBP"
+
+    def test_get_market_currency_us(self):
+        """get_market_currency maps US markets to USD."""
+        from Strategy_Auto_Trader.markov_cli import live_daemon
+        assert live_daemon.get_market_currency("sp500", {}) == "USD"
+        assert live_daemon.get_market_currency("USA", {}) == "USD"
 
 
 if __name__ == "__main__":
