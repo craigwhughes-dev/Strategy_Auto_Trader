@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import signal
 import sys
@@ -17,6 +18,8 @@ from pathlib import Path
 import pandas as pd
 
 from .run import main as run_single
+
+logger = logging.getLogger(__name__)
 
 
 class TimeoutError(Exception):
@@ -340,7 +343,7 @@ def process_ticker(
                             "bh_return": result["bh_return"],
                         })
                     except Exception as exc:
-                        print(f"  Email error: {exc}")
+                        logger.warning(f"BUY alert email failed for {ticker}: {exc}")
                 elif _should_send_sell_alert(result, ticker):
                     try:
                         from ..output.emailer import send_trade_alert
@@ -352,7 +355,7 @@ def process_ticker(
                             "bh_return": result["bh_return"],
                         })
                     except Exception as exc:
-                        print(f"  Email error: {exc}")
+                        logger.warning(f"SELL alert email failed for {ticker}: {exc}")
                 elif result["trade_event"] == "SELL":
                     print(f"  SELL skipped (no prior BUY since reference date)")
 

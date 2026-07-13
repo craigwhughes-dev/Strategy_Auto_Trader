@@ -105,7 +105,7 @@ def _validate_command(cmd: dict) -> tuple[bool, str]:
         if key not in cmd:
             return False, f"Missing required key: {key}"
 
-    if cmd["Action"] not in ("SELL", "SELL_ALL"):
+    if cmd["Action"] not in ("SELL", "SELL_ALL", "PAUSE_BUYING", "RESUME_BUYING"):
         return False, f"Invalid Action: {cmd['Action']}"
 
     if cmd["Action"] == "SELL" and not cmd.get("Ticker"):
@@ -219,6 +219,34 @@ def _execute_sell_all(
     return success, fills, summary
 
 
+def _execute_pause_buying(daemon_state: dict, logger: logging.Logger) -> tuple[bool, str]:
+    """Pause buying by user.
+
+    Returns (success, message).
+    """
+    from .live_daemon import save_daemon_state
+    daemon_state["paused_by_user"] = True
+    try:
+        save_daemon_state(daemon_state)
+    except Exception as e:
+        return False, str(e)
+    return True, "Buying paused by user"
+
+
+def _execute_resume_buying(daemon_state: dict, logger: logging.Logger) -> tuple[bool, str]:
+    """Resume buying by user.
+
+    Returns (success, message).
+    """
+    from .live_daemon import save_daemon_state
+    daemon_state["paused_by_user"] = False
+    try:
+        save_daemon_state(daemon_state)
+    except Exception as e:
+        return False, str(e)
+    return True, "Buying resumed by user"
+
+
 def _move_to_done(processing_path: Path, subdir_name: str = "", logger: logging.Logger | None = None) -> None:
     """Move processing file to done directory, optionally with a suffix."""
     done_dir = processing_path.parent.parent / "done"
@@ -290,6 +318,7 @@ def process_manual_commands(
     broker: object,
     logger: logging.Logger,
     commands_dir: Path | None = None,
+    daemon_state: dict | None = None,
 ) -> int:
     """Process all pending sell commands from the mobile app.
 
@@ -305,6 +334,8 @@ def process_manual_commands(
 
     This function runs outside is_trading_hours and should not crash the daemon.
     """
+    if daemon_state is None:
+        daemon_state = {}
     if not commands_dir:
         root = Path(__file__).resolve().parent.parent.parent
         commands_dir = root / "state" / "commands"
@@ -436,6 +467,28 @@ def process_manual_commands(
                 )
                 processing_path = commands_dir / "processing" / pending_path.name
                 _move_to_done(processing_path, "", logger)
+
+        elif action == "PAUSE_BUYING":
+            success, msg = _execute_pause_buying(daemon_state, logger)
+            if success:
+                logger.info(f"  Command {cmd_id}: PAUSE_BUYING — buying paused")
+                _write_result(cmd, "filled", commands_dir / "results", summary=msg)
+            else:
+                logger.error(f"  Command {cmd_id}: PAUSE_BUYING failed: {msg}")
+                _write_result(cmd, "error", commands_dir / "results", error_msg=msg)
+            processing_path = commands_dir / "processing" / pending_path.name
+            _move_to_done(processing_path, "", logger)
+
+        elif action == "RESUME_BUYING":
+            success, msg = _execute_resume_buying(daemon_state, logger)
+            if success:
+                logger.info(f"  Command {cmd_id}: RESUME_BUYING — buying resumed")
+                _write_result(cmd, "filled", commands_dir / "results", summary=msg)
+            else:
+                logger.error(f"  Command {cmd_id}: RESUME_BUYING failed: {msg}")
+                _write_result(cmd, "error", commands_dir / "results", error_msg=msg)
+            processing_path = commands_dir / "processing" / pending_path.name
+            _move_to_done(processing_path, "", logger)
 
         processed += 1
 

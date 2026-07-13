@@ -13,6 +13,8 @@ from Strategy_Auto_Trader.broker.types import FillResult
 from Strategy_Auto_Trader.markov_cli.manual_commands import (
     _claim_pending_command,
     _ensure_command_dirs,
+    _execute_pause_buying,
+    _execute_resume_buying,
     _execute_sell,
     _execute_sell_all,
     _is_expired,
@@ -773,3 +775,197 @@ def test_process_manual_commands_multiple_commands(commands_dir, config, fake_po
     assert processed == 2
     assert (commands_dir / "results" / "cmd-010.json").exists()
     assert (commands_dir / "results" / "cmd-011.json").exists()
+
+
+# -- Pause/Resume Tests -------------------------------------------------------
+
+
+def test_validate_command_pause_buying():
+    """PAUSE_BUYING is valid action."""
+    cmd = {
+        "Id": "pause-001",
+        "Action": "PAUSE_BUYING",
+        "Ticker": None,
+        "Status": "pending",
+        "RequestedAtUtc": "2026-07-13T10:00:00Z",
+        "ExpiresAtUtc": "2026-07-13T14:00:00Z",
+        "Source": "android-app",
+    }
+    is_valid, err = _validate_command(cmd)
+    assert is_valid
+    assert err == ""
+
+
+def test_validate_command_resume_buying():
+    """RESUME_BUYING is valid action."""
+    cmd = {
+        "Id": "resume-001",
+        "Action": "RESUME_BUYING",
+        "Ticker": None,
+        "Status": "pending",
+        "RequestedAtUtc": "2026-07-13T10:00:00Z",
+        "ExpiresAtUtc": "2026-07-13T14:00:00Z",
+        "Source": "android-app",
+    }
+    is_valid, err = _validate_command(cmd)
+    assert is_valid
+    assert err == ""
+
+
+@mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.save_daemon_state")
+def test_execute_pause_buying(mock_save_state):
+    """Execute pause buying successfully."""
+    daemon_state = {}
+    logger = mock.Mock()
+    success, msg = _execute_pause_buying(daemon_state, logger)
+
+    assert success
+    assert msg == "Buying paused by user"
+    assert daemon_state["paused_by_user"] is True
+    mock_save_state.assert_called_once_with(daemon_state)
+
+
+@mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.save_daemon_state")
+def test_execute_pause_buying_save_failure(mock_save_state):
+    """Execute pause buying fails if save fails."""
+    mock_save_state.side_effect = Exception("Save failed")
+    daemon_state = {}
+    logger = mock.Mock()
+    success, msg = _execute_pause_buying(daemon_state, logger)
+
+    assert not success
+    assert "Save failed" in msg
+
+
+@mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.save_daemon_state")
+def test_execute_resume_buying(mock_save_state):
+    """Execute resume buying successfully."""
+    daemon_state = {"paused_by_user": True}
+    logger = mock.Mock()
+    success, msg = _execute_resume_buying(daemon_state, logger)
+
+    assert success
+    assert msg == "Buying resumed by user"
+    assert daemon_state["paused_by_user"] is False
+    mock_save_state.assert_called_once_with(daemon_state)
+
+
+@mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.save_daemon_state")
+def test_execute_resume_buying_save_failure(mock_save_state):
+    """Execute resume buying fails if save fails."""
+    mock_save_state.side_effect = Exception("Save failed")
+    daemon_state = {"paused_by_user": True}
+    logger = mock.Mock()
+    success, msg = _execute_resume_buying(daemon_state, logger)
+
+    assert not success
+    assert "Save failed" in msg
+
+
+def test_process_manual_commands_pause_buying(commands_dir, config, fake_portfolio, fake_broker):
+    """Process PAUSE_BUYING command successfully."""
+    cmd = {
+        "Id": "pause-001",
+        "Action": "PAUSE_BUYING",
+        "Ticker": None,
+        "Status": "pending",
+        "RequestedAtUtc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "ExpiresAtUtc": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+        "Source": "android-app",
+    }
+    pending_path = commands_dir / "pending" / "pause-001.json"
+    pending_path.write_text(json.dumps(cmd), encoding="utf-8")
+
+    logger = mock.Mock()
+    daemon_state = {}
+
+    with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.save_daemon_state"):
+        processed = process_manual_commands(
+            config, fake_portfolio, fake_broker, logger, commands_dir, daemon_state=daemon_state
+        )
+
+    assert processed == 1
+    assert daemon_state["paused_by_user"] is True
+    result = json.loads((commands_dir / "results" / "pause-001.json").read_text(encoding="utf-8"))
+    assert result["Status"] == "filled"
+    assert result["Summary"] == "Buying paused by user"
+
+
+def test_process_manual_commands_resume_buying(commands_dir, config, fake_portfolio, fake_broker):
+    """Process RESUME_BUYING command successfully."""
+    cmd = {
+        "Id": "resume-001",
+        "Action": "RESUME_BUYING",
+        "Ticker": None,
+        "Status": "pending",
+        "RequestedAtUtc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "ExpiresAtUtc": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace(
+            "+00:00", "Z"),
+        "Source": "android-app",
+    }
+    pending_path = commands_dir / "pending" / "resume-001.json"
+    pending_path.write_text(json.dumps(cmd), encoding="utf-8")
+
+    logger = mock.Mock()
+    daemon_state = {"paused_by_user": True}
+
+    with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.save_daemon_state"):
+        processed = process_manual_commands(
+            config, fake_portfolio, fake_broker, logger, commands_dir, daemon_state=daemon_state
+        )
+
+    assert processed == 1
+    assert daemon_state["paused_by_user"] is False
+    result = json.loads((commands_dir / "results" / "resume-001.json").read_text(encoding="utf-8"))
+    assert result["Status"] == "filled"
+    assert result["Summary"] == "Buying resumed by user"
+
+
+def test_process_manual_commands_pause_no_market_gate(commands_dir, config, fake_portfolio, fake_broker):
+    """PAUSE_BUYING is not gated by market hours."""
+    cmd = {
+        "Id": "pause-002",
+        "Action": "PAUSE_BUYING",
+        "Ticker": None,
+        "Status": "pending",
+        "RequestedAtUtc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "ExpiresAtUtc": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace(
+            "+00:00", "Z"),
+        "Source": "android-app",
+    }
+    pending_path = commands_dir / "pending" / "pause-002.json"
+    pending_path.write_text(json.dumps(cmd), encoding="utf-8")
+
+    logger = mock.Mock()
+    daemon_state = {}
+
+    # Even with market hours check mocked to False, pause should succeed
+    with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.is_trading_hours",
+                    return_value=False):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.save_daemon_state"):
+            processed = process_manual_commands(
+                config, fake_portfolio, fake_broker, logger, commands_dir, daemon_state=daemon_state
+            )
+
+    assert processed == 1
+    assert daemon_state["paused_by_user"] is True
+    result = json.loads((commands_dir / "results" / "pause-002.json").read_text(encoding="utf-8"))
+    assert result["Status"] == "filled"
+
+
+def test_process_manual_commands_daemon_state_default_empty():
+    """daemon_state defaults to empty dict if None."""
+    config = {"markets": {}}
+    fake_portfolio = mock.Mock()
+    fake_portfolio.positions = {}
+    fake_broker = mock.Mock()
+    logger = mock.Mock()
+    commands_dir = Path(__file__).resolve().parent / "tmp_commands"
+    commands_dir.mkdir(exist_ok=True)
+    try:
+        # Call without daemon_state (should default to {})
+        processed = process_manual_commands(config, fake_portfolio, fake_broker, logger, commands_dir)
+        assert processed == 0
+    finally:
+        import shutil
+        shutil.rmtree(commands_dir, ignore_errors=True)

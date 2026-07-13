@@ -247,8 +247,8 @@ def validate_startup_environment(logger: logging.Logger) -> bool:
     """Validate that startup is possible. Fail loudly if not.
 
     Checks:
-    - Lock file is valid (no stale locks)
     - Necessary directories exist and are writable
+    - SMTP credentials are set (needed for email alerts)
 
     Returns True if environment is valid, False if startup should abort.
     """
@@ -263,6 +263,14 @@ def validate_startup_environment(logger: logging.Logger) -> bool:
             test_file.unlink()
         except Exception as e:
             errors.append(f"{dirname} directory not writable: {e}")
+
+    # Check SMTP credentials
+    smtp_user = os.environ.get("SMTP_USER", "").strip()
+    smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
+    if not smtp_user:
+        errors.append("SMTP_USER environment variable not set — email alerts will fail")
+    if not smtp_password:
+        errors.append("SMTP_PASSWORD environment variable not set — email alerts will fail")
 
     if errors:
         for err in errors:
@@ -400,6 +408,7 @@ def write_app_status_snapshot(
         "daemon_pid": pid,
         "dry_run": config.get("execution", {}).get("dry_run", True),
         "halt_new_entries": daemon_state.get("halt_new_entries", False),
+        "paused_by_user": daemon_state.get("paused_by_user", False),
         "reconciliation_discrepancies": daemon_state.get("reconciliation_discrepancies", []),
         "last_reconcile_date": daemon_state.get("last_reconcile_date", ""),
         "trades_today": trades_today,
@@ -686,10 +695,10 @@ def process_cycle(
                 daily_buy_limit = exec_cfg.get("daily_buy_limit", 2)
                 daily_sell_limit = exec_cfg.get("daily_sell_limit")
                 if daemon_state.get("halt_new_entries"):
-                    # Reconciliation mismatch: block new entries (buy limit 0)
-                    # but still allow exits of existing positions.
-                    logger.warning(f"[{market_name}] Reconciliation mismatch "
-                                   f"unresolved — new entries blocked")
+                    logger.warning(f"[{market_name}] Reconciliation mismatch unresolved — new entries blocked")
+                    daily_buy_limit = 0
+                elif daemon_state.get("paused_by_user"):
+                    logger.info(f"[{market_name}] Buying paused by user — new entries blocked")
                     daily_buy_limit = 0
                 market_currency = get_market_currency(market_name, config)
                 buys, sells, skipped = execute_signals_with_retry(
@@ -816,11 +825,11 @@ def check_nightly_reconciliation(
             save_daemon_state(daemon_state)
 
 
-def process_manual_commands_wrapper(config: dict, portfolio: object, broker: object, logger: logging.Logger) -> None:
+def process_manual_commands_wrapper(config: dict, portfolio: object, broker: object, logger: logging.Logger, daemon_state: dict) -> None:
     """Wrapper for manual command processing (catch exceptions so daemon survives)."""
     from .manual_commands import process_manual_commands
     try:
-        process_manual_commands(config, portfolio, broker, logger)
+        process_manual_commands(config, portfolio, broker, logger, daemon_state=daemon_state)
     except Exception as e:
         logger.error(f"Error processing manual commands: {e}", exc_info=True)
 
@@ -917,6 +926,7 @@ def main(argv: list[str] | None = None) -> int:
 
         logger.info("Entering main loop")
         while True:
+            had_error = False
             try:
                 # Check overnight screening
                 check_overnight_screening(config, daemon_state, logger)
@@ -928,7 +938,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
 
                 # Process manual sell commands from mobile app
-                process_manual_commands_wrapper(config, portfolio, broker, logger)
+                process_manual_commands_wrapper(config, portfolio, broker, logger, daemon_state)
 
                 # Check each market
                 now = datetime.now(timezone.utc)
@@ -952,19 +962,23 @@ def main(argv: list[str] | None = None) -> int:
                         last_cycle_hour[market_name] = current_hour
                         save_daemon_state(daemon_state)
 
-                # Write app_status.json snapshot (before sleep, so it's fresh on next poll)
-                write_app_status_snapshot(portfolio, daemon_state, config, last_cycle_hour, logger)
-
-                # Sleep
-                logger.debug(f"Sleeping {poll_interval}s...")
-                time.sleep(poll_interval)
-
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt, shutting down")
                 break
             except Exception as e:
                 logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
-                time.sleep(5)
+                had_error = True
+            finally:
+                # Write app_status.json snapshot ALWAYS, even on error — app needs fresh heartbeat
+                try:
+                    write_app_status_snapshot(portfolio, daemon_state, config, last_cycle_hour, logger)
+                except Exception as e:
+                    logger.error(f"Failed to write app_status.json: {e}", exc_info=True)
+
+                # Sleep before next iteration (5s on error, normal interval on success)
+                sleep_duration = 5 if had_error else poll_interval
+                logger.debug(f"Sleeping {sleep_duration}s...")
+                time.sleep(sleep_duration)
 
     finally:
         try:

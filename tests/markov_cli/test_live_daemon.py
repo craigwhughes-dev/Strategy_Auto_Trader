@@ -879,5 +879,114 @@ class TestKillStrayDaemons:
         assert logger.warning.called
 
 
+def test_process_cycle_paused_by_user_blocks_new_entries(monkeypatch):
+    """paused_by_user forces daily_buy_limit=0 into execute_signals."""
+    from Strategy_Auto_Trader.markov_cli import batch, execute
+
+    def fake_process_ticker(ticker_cfg, defaults, send_email):
+        return {"ticker": "AAPL", "status": "OK", "time": 0.0,
+                "result": {"ticker": "AAPL", "close": 100.0}}
+
+    captured = {}
+
+    def fake_execute_signals(tickers, data_dir, portfolio, limit_tracker,
+                             broker, daily_buy_limit, daily_sell_limit, **kwargs):
+        captured["daily_buy_limit"] = daily_buy_limit
+        return [], [], []
+
+    monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
+    monkeypatch.setattr(execute, "execute_signals", fake_execute_signals)
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+
+    config = {
+        "daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0},
+        "execution": {"daily_buy_limit": 5},
+    }
+    daemon_state = {"cursors": {}, "paused_by_user": True}
+    live_daemon.process_cycle(
+        "test_market", {}, config, daemon_state,
+        portfolio=mock.Mock(), broker=mock.Mock(spec=[]), logger=mock.Mock(),
+    )
+    assert captured["daily_buy_limit"] == 0
+
+
+def test_process_cycle_halt_and_paused_independent(monkeypatch):
+    """halt_new_entries and paused_by_user flags are independent."""
+    from Strategy_Auto_Trader.markov_cli import batch, execute
+
+    def fake_process_ticker(ticker_cfg, defaults, send_email):
+        return {"ticker": "AAPL", "status": "OK", "time": 0.0,
+                "result": {"ticker": "AAPL", "close": 100.0}}
+
+    captured = []
+
+    def fake_execute_signals(tickers, data_dir, portfolio, limit_tracker,
+                             broker, daily_buy_limit, daily_sell_limit, **kwargs):
+        captured.append(daily_buy_limit)
+        return [], [], []
+
+    monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
+    monkeypatch.setattr(execute, "execute_signals", fake_execute_signals)
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+
+    config = {
+        "daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0},
+        "execution": {"daily_buy_limit": 5},
+    }
+
+    # Test 1: halt_new_entries alone
+    daemon_state1 = {"cursors": {}, "halt_new_entries": True}
+    live_daemon.process_cycle(
+        "test_market", {}, config, daemon_state1,
+        portfolio=mock.Mock(), broker=mock.Mock(spec=[]), logger=mock.Mock(),
+    )
+
+    # Test 2: paused_by_user alone
+    daemon_state2 = {"cursors": {}, "paused_by_user": True}
+    live_daemon.process_cycle(
+        "test_market", {}, config, daemon_state2,
+        portfolio=mock.Mock(), broker=mock.Mock(spec=[]), logger=mock.Mock(),
+    )
+
+    # Both should have resulted in daily_buy_limit=0
+    assert captured == [0, 0]
+
+
+def test_write_app_status_snapshot_includes_paused_by_user(tmp_path, monkeypatch):
+    """Snapshot includes paused_by_user flag."""
+    from Strategy_Auto_Trader.markov_cli import live_daemon
+    from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    pm = PortfolioManager(20_000, 5, tmp_path / "execution_state.json")
+    daemon_state = {
+        "paused_by_user": True,
+    }
+    config = {"execution": {"dry_run": True}, "markets": {}}
+
+    live_daemon.write_app_status_snapshot(pm, daemon_state, config, {}, mock.Mock())
+
+    snapshot = json.loads((tmp_path / "app_status.json").read_text(encoding="utf-8"))
+    assert snapshot["paused_by_user"] is True
+
+
+def test_write_app_status_snapshot_paused_by_user_defaults_false(tmp_path, monkeypatch):
+    """Snapshot includes paused_by_user, defaults to False if not in daemon_state."""
+    from Strategy_Auto_Trader.markov_cli import live_daemon
+    from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    pm = PortfolioManager(20_000, 5, tmp_path / "execution_state.json")
+    daemon_state = {}  # No paused_by_user key
+    config = {"execution": {"dry_run": True}, "markets": {}}
+
+    live_daemon.write_app_status_snapshot(pm, daemon_state, config, {}, mock.Mock())
+
+    snapshot = json.loads((tmp_path / "app_status.json").read_text(encoding="utf-8"))
+    assert snapshot["paused_by_user"] is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
