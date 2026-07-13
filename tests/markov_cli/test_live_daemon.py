@@ -428,6 +428,7 @@ def test_main_self_check_skips_broker_even_when_live(monkeypatch, config):
     config["execution"]["dry_run"] = False
     monkeypatch.setattr(live_daemon, "setup_logging", lambda: mock.Mock())
     monkeypatch.setattr(live_daemon, "load_config", lambda: config)
+    monkeypatch.setattr(live_daemon, "validate_startup_environment", lambda logger: True)
     monkeypatch.setattr(live_daemon, "acquire_process_lock",
                         lambda logger, takeover=False: True)
     monkeypatch.setattr(live_daemon, "release_process_lock", lambda logger: None)
@@ -442,6 +443,35 @@ def test_main_self_check_skips_broker_even_when_live(monkeypatch, config):
     monkeypatch.setattr(self_check, "run_startup_checks", fake_checks)
     assert live_daemon.main([]) == 1
     assert captured["require_broker"] is False
+
+
+def test_main_keyboard_interrupt_skips_sleep(monkeypatch, config, tmp_path):
+    """Ctrl+C shutdown must exit promptly — no poll-interval sleep in finally."""
+    from Strategy_Auto_Trader.core import self_check
+
+    monkeypatch.setattr(live_daemon, "setup_logging", lambda: mock.Mock())
+    monkeypatch.setattr(live_daemon, "load_config", lambda: config)
+    monkeypatch.setattr(live_daemon, "validate_startup_environment", lambda logger: True)
+    monkeypatch.setattr(live_daemon, "acquire_process_lock",
+                        lambda logger, takeover=False: True)
+    monkeypatch.setattr(live_daemon, "release_process_lock", lambda logger: None)
+    monkeypatch.setattr(live_daemon, "kill_stray_daemons", lambda logger: 0)
+    monkeypatch.setattr(live_daemon, "cleanup_incomplete_runs", lambda d, l: 0)
+    monkeypatch.setattr(self_check, "run_startup_checks", lambda **kwargs: None)
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+
+    snapshot_written = []
+    monkeypatch.setattr(live_daemon, "write_app_status_snapshot",
+                        lambda *a, **k: snapshot_written.append(True))
+    monkeypatch.setattr(live_daemon, "check_overnight_screening",
+                        mock.Mock(side_effect=KeyboardInterrupt))
+
+    sleeps = []
+    monkeypatch.setattr(live_daemon.time, "sleep", lambda s: sleeps.append(s))
+
+    assert live_daemon.main([]) == 0
+    assert sleeps == []  # No sleep on shutdown
+    assert snapshot_written  # Snapshot still written on the final iteration
 
 
 class TestExecuteSignalsWithRetry:

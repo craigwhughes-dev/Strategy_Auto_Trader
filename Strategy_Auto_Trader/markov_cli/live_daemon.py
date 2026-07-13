@@ -925,6 +925,7 @@ def main(argv: list[str] | None = None) -> int:
         last_cycle_hour = {}
 
         logger.info("Entering main loop")
+        shutting_down = False
         while True:
             had_error = False
             try:
@@ -964,6 +965,7 @@ def main(argv: list[str] | None = None) -> int:
 
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt, shutting down")
+                shutting_down = True
                 break
             except Exception as e:
                 logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
@@ -975,10 +977,12 @@ def main(argv: list[str] | None = None) -> int:
                 except Exception as e:
                     logger.error(f"Failed to write app_status.json: {e}", exc_info=True)
 
-                # Sleep before next iteration (5s on error, normal interval on success)
-                sleep_duration = 5 if had_error else poll_interval
-                logger.debug(f"Sleeping {sleep_duration}s...")
-                time.sleep(sleep_duration)
+                # Sleep before next iteration (5s on error, normal interval on
+                # success); skip entirely on shutdown so Ctrl+C exits promptly
+                if not shutting_down:
+                    sleep_duration = 5 if had_error else poll_interval
+                    logger.debug(f"Sleeping {sleep_duration}s...")
+                    time.sleep(sleep_duration)
 
     finally:
         try:

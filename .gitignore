@@ -24,8 +24,10 @@ logs/
 reports/
 state/
 *.log
+*.err
 tmp_*
 analysis_output.txt
+daemon_output*.txt
 .hmm_available
 
 # Session / work-tracking files
