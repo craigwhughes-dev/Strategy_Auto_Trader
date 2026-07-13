@@ -269,21 +269,27 @@ def test_is_market_open_no_position():
 
 
 def test_is_market_open_no_market_field():
-    """Position with no market field: market open (legacy)."""
+    """Position with no market field: market closed (fail-closed for safety)."""
     logger = mock.Mock()
     config = {"markets": {}}
     portfolio_positions = {"AZN.L": {"quantity": 10, "fill_price": 100.0}}
     result = _is_market_open("AZN.L", portfolio_positions, config, logger)
-    assert result is True
+    assert result is False
+    # Should log a warning about missing market field
+    logger.warning.assert_called_once()
+    assert "missing market field" in logger.warning.call_args[0][0]
 
 
 def test_is_market_open_market_not_in_config():
-    """Position's market not in config: market open (safe)."""
+    """Position's market not in config: market closed (fail-closed for safety)."""
     logger = mock.Mock()
     config = {"markets": {}}
     portfolio_positions = {"AZN.L": {"quantity": 10, "market": "ftse"}}
     result = _is_market_open("AZN.L", portfolio_positions, config, logger)
-    assert result is True
+    assert result is False
+    # Should log a warning about unrecognized market
+    logger.warning.assert_called_once()
+    assert "Unrecognized or missing market" in logger.warning.call_args[0][0]
 
 
 @mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.is_trading_hours")
@@ -296,6 +302,36 @@ def test_is_market_open_trading_hours_check(mock_is_trading):
     result = _is_market_open("AZN.L", portfolio_positions, config, logger)
     assert result is True
     mock_is_trading.assert_called_once()
+
+
+def test_is_market_open_unrecognized_market_field():
+    """Position with unrecognized market name (e.g., 'UK' instead of 'ftse'): market closed (fail-closed for safety).
+
+    This is the bug scenario: HSBA.L had market='UK', but config only has 'ftse' and 'sp500'.
+    The market-closed queuing should engage, preventing out-of-hours misfires.
+    """
+    logger = mock.Mock()
+    config = {
+        "markets": {
+            "ftse": {"timezone": "Europe/London"},
+            "sp500": {"timezone": "America/New_York"}
+        }
+    }
+    # Position with unrecognized market name 'UK' (should be 'ftse' for FTSE-listed stocks)
+    portfolio_positions = {
+        "HSBA.L": {
+            "quantity": 100,
+            "fill_price": 1462.0,
+            "market": "UK"  # Unrecognized! Not in config["markets"]
+        }
+    }
+    result = _is_market_open("HSBA.L", portfolio_positions, config, logger)
+    assert result is False, "Unrecognized market should be treated as closed for safety"
+    # Should log a warning about unrecognized market
+    logger.warning.assert_called_once()
+    assert "Unrecognized or missing market" in logger.warning.call_args[0][0]
+    assert "UK" in logger.warning.call_args[0][0]
+    assert "HSBA.L" in logger.warning.call_args[0][0]
 
 
 # -- Claim and Move Tests -------------------------------------------------------

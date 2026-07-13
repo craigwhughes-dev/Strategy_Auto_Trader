@@ -133,7 +133,7 @@ def _is_market_open(ticker: str, positions: dict, config: dict, logger: logging.
     """Check if the market for a ticker's position is open.
 
     For SELL: check the position's market field.
-    Returns True if market is open or market info unavailable (safe default).
+    Returns True if market is open, False if closed or market info is missing/unrecognized (fail-closed for safety).
     """
     from .live_daemon import is_trading_hours
 
@@ -144,13 +144,15 @@ def _is_market_open(ticker: str, positions: dict, config: dict, logger: logging.
     market_name = pos.get("market")
 
     if not market_name:
-        # No market field set; assume open (legacy behavior)
-        return True
+        # No market field set; treat as closed for safety (prevents out-of-hours misfires)
+        logger.warning(f"Position {ticker} missing market field — treating as closed for safety")
+        return False
 
     markets = config.get("markets", {})
     if market_name not in markets:
-        # Market not in config; assume open (shouldn't happen but safe)
-        return True
+        # Unrecognized market name; treat as closed for safety to prevent out-of-hours misfires
+        logger.warning(f"Unrecognized or missing market '{market_name}' for {ticker} — treating as closed for safety")
+        return False
 
     market_cfg = markets[market_name]
     return is_trading_hours(market_cfg, logger)
