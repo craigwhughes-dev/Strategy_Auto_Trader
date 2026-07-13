@@ -703,6 +703,15 @@ def check_nightly_reconciliation(
             save_daemon_state(daemon_state)
 
 
+def process_manual_commands_wrapper(config: dict, portfolio: object, broker: object, logger: logging.Logger) -> None:
+    """Wrapper for manual command processing (catch exceptions so daemon survives)."""
+    from .manual_commands import process_manual_commands
+    try:
+        process_manual_commands(config, portfolio, broker, logger)
+    except Exception as e:
+        logger.error(f"Error processing manual commands: {e}", exc_info=True)
+
+
 def main() -> int:
     """Main daemon loop."""
     logger = setup_logging()
@@ -789,6 +798,9 @@ def main() -> int:
                     check_nightly_reconciliation(
                         config, daemon_state, portfolio, broker, logger
                     )
+
+                # Process manual sell commands from mobile app
+                process_manual_commands_wrapper(config, portfolio, broker, logger)
 
                 # Check each market
                 now = datetime.now(timezone.utc)
