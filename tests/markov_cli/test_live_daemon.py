@@ -409,20 +409,29 @@ def test_main_refuses_to_start_when_self_check_fails(monkeypatch, config):
 
     monkeypatch.setattr(live_daemon, "setup_logging", lambda: mock.Mock())
     monkeypatch.setattr(live_daemon, "load_config", lambda: config)
+    monkeypatch.setattr(live_daemon, "acquire_process_lock",
+                        lambda logger, takeover=False: True)
+    monkeypatch.setattr(live_daemon, "release_process_lock", lambda logger: None)
+    monkeypatch.setattr(live_daemon, "kill_stray_daemons", lambda logger: 0)
     monkeypatch.setattr(
         self_check, "run_startup_checks",
         mock.Mock(side_effect=self_check.SelfCheckError("hmm broken")))
 
-    assert live_daemon.main() == 1
+    assert live_daemon.main([]) == 1
 
 
-def test_main_self_check_requires_broker_only_when_not_dry_run(monkeypatch, config):
-    """dry_run=False must make the startup checks include the broker module."""
+def test_main_self_check_skips_broker_even_when_live(monkeypatch, config):
+    """Startup checks never require the broker — the connection is deferred
+    so the daemon can start (and generate signals) while TWS is down."""
     from Strategy_Auto_Trader.core import self_check
 
     config["execution"]["dry_run"] = False
     monkeypatch.setattr(live_daemon, "setup_logging", lambda: mock.Mock())
     monkeypatch.setattr(live_daemon, "load_config", lambda: config)
+    monkeypatch.setattr(live_daemon, "acquire_process_lock",
+                        lambda logger, takeover=False: True)
+    monkeypatch.setattr(live_daemon, "release_process_lock", lambda logger: None)
+    monkeypatch.setattr(live_daemon, "kill_stray_daemons", lambda logger: 0)
 
     captured = {}
 
@@ -431,8 +440,8 @@ def test_main_self_check_requires_broker_only_when_not_dry_run(monkeypatch, conf
         raise self_check.SelfCheckError("stop here")
 
     monkeypatch.setattr(self_check, "run_startup_checks", fake_checks)
-    assert live_daemon.main() == 1
-    assert captured["require_broker"] is True
+    assert live_daemon.main([]) == 1
+    assert captured["require_broker"] is False
 
 
 class TestExecuteSignalsWithRetry:
@@ -739,6 +748,135 @@ class TestAppStatusSnapshot:
         from Strategy_Auto_Trader.markov_cli import live_daemon
         assert live_daemon.get_market_currency("sp500", {}) == "USD"
         assert live_daemon.get_market_currency("USA", {}) == "USD"
+
+
+class TestProcessLock:
+    """Held OS-lock single-instance enforcement."""
+
+    @pytest.fixture(autouse=True)
+    def isolated_state_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+        yield tmp_path
+        live_daemon.release_process_lock(mock.Mock())
+
+    def test_acquire_records_own_pid(self, isolated_state_dir):
+        import os
+        assert live_daemon.acquire_process_lock(mock.Mock()) is True
+        pid_file = isolated_state_dir / "daemon.pid"
+        assert pid_file.exists()
+        assert int(pid_file.read_text().split("|")[0]) == os.getpid()
+
+    def test_second_acquire_fails_while_lock_held(self):
+        logger = mock.Mock()
+        assert live_daemon.acquire_process_lock(logger) is True
+        assert live_daemon.acquire_process_lock(logger) is False
+        assert logger.error.called
+
+    def test_reacquire_succeeds_after_release(self):
+        logger = mock.Mock()
+        assert live_daemon.acquire_process_lock(logger) is True
+        live_daemon.release_process_lock(logger)
+        assert live_daemon.acquire_process_lock(logger) is True
+
+    def test_release_removes_pid_file(self, isolated_state_dir):
+        logger = mock.Mock()
+        assert live_daemon.acquire_process_lock(logger) is True
+        live_daemon.release_process_lock(logger)
+        assert not (isolated_state_dir / "daemon.pid").exists()
+
+    def test_takeover_refuses_non_daemon_holder(self):
+        """PID-reuse guard: takeover must not kill a process whose cmdline
+        is not a live_daemon (here: the pytest process holding the lock)."""
+        logger = mock.Mock()
+        assert live_daemon.acquire_process_lock(logger) is True
+        assert live_daemon.acquire_process_lock(logger, takeover=True) is False
+        assert logger.critical.called
+
+
+class TestDaemonCmdlineMatch:
+    def test_matches_module_invocation(self):
+        assert live_daemon._is_daemon_cmdline(
+            ["python", "-m", "Strategy_Auto_Trader.markov_cli.live_daemon"])
+
+    def test_matches_script_path(self):
+        assert live_daemon._is_daemon_cmdline(
+            [r"C:\x\python.exe", r"Strategy_Auto_Trader\markov_cli\live_daemon.py"])
+
+    def test_does_not_match_test_file(self):
+        assert not live_daemon._is_daemon_cmdline(
+            ["python", "-m", "pytest", "tests/markov_cli/test_live_daemon.py"])
+
+    def test_does_not_match_empty(self):
+        assert not live_daemon._is_daemon_cmdline(None)
+        assert not live_daemon._is_daemon_cmdline([])
+
+
+class TestKillStrayDaemons:
+    """Orphan sweep kills only true stray daemon processes."""
+
+    def _fake_psutil(self, monkeypatch, procs, me_pid=100, ancestor_pids=(50,)):
+        import types
+
+        me = mock.Mock(pid=me_pid)
+        me.parents.return_value = [mock.Mock(pid=p) for p in ancestor_pids]
+        me.children.return_value = []
+
+        class NoSuchProcess(Exception):
+            pass
+
+        class AccessDenied(Exception):
+            pass
+
+        fake = types.SimpleNamespace(
+            Process=lambda pid=None: me,
+            process_iter=lambda attrs: procs,
+            NoSuchProcess=NoSuchProcess,
+            AccessDenied=AccessDenied,
+        )
+        monkeypatch.setattr(live_daemon, "psutil", fake)
+        return fake
+
+    @staticmethod
+    def _proc(pid, name, cmdline):
+        p = mock.Mock(pid=pid)
+        p.info = {"pid": pid, "name": name, "cmdline": cmdline}
+        return p
+
+    def test_kills_stray_and_spares_self_ancestors_and_others(self, monkeypatch):
+        daemon_cmd = ["python", "-m", "Strategy_Auto_Trader.markov_cli.live_daemon"]
+        procs = [
+            self._proc(200, "python.exe", daemon_cmd),          # stray -> kill
+            self._proc(100, "python.exe", daemon_cmd),          # self
+            self._proc(50, "python.exe", daemon_cmd),           # ancestor shim
+            self._proc(300, "python.exe",
+                       ["python", "-m", "pytest", "tests/x.py"]),  # unrelated python
+            self._proc(400, "notepad.exe", ["notepad"]),        # not python
+        ]
+        self._fake_psutil(monkeypatch, procs)
+
+        killed = []
+        monkeypatch.setattr(live_daemon, "_kill_daemon_process",
+                            lambda pid, logger: killed.append(pid) or True)
+
+        assert live_daemon.kill_stray_daemons(mock.Mock()) == 1
+        assert killed == [200]
+
+    def test_no_strays_kills_nothing(self, monkeypatch):
+        self._fake_psutil(monkeypatch, [
+            self._proc(100, "python.exe",
+                       ["python", "-m", "Strategy_Auto_Trader.markov_cli.live_daemon"]),
+        ])
+        killed = []
+        monkeypatch.setattr(live_daemon, "_kill_daemon_process",
+                            lambda pid, logger: killed.append(pid) or True)
+        assert live_daemon.kill_stray_daemons(mock.Mock()) == 0
+        assert killed == []
+
+    def test_psutil_missing_skips_sweep(self, monkeypatch):
+        monkeypatch.setattr(live_daemon, "psutil", None)
+        logger = mock.Mock()
+        assert live_daemon.kill_stray_daemons(logger) == 0
+        assert logger.warning.called
 
 
 if __name__ == "__main__":

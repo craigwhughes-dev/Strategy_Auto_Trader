@@ -55,77 +55,190 @@ def setup_logging() -> logging.Logger:
     return logger
 
 
-def acquire_process_lock(logger: logging.Logger) -> bool:
-    """Acquire exclusive daemon lock to prevent multiple instances.
+# Handle to the held lock file. Must stay open for the daemon's lifetime:
+# the OS releases the lock the instant this process dies, so a held lock
+# always means a live daemon — no PID-liveness guessing.
+_lock_handle = None
 
-    Uses PID-based detection: if lock file exists, check if the PID is still running.
-    If PID is gone, lock is stale and can be removed.
+_DAEMON_CMDLINE_MARKERS = ("markov_cli.live_daemon",
+                           "markov_cli\\live_daemon.py",
+                           "markov_cli/live_daemon.py")
+
+
+def _is_daemon_cmdline(cmdline: list[str] | None) -> bool:
+    joined = " ".join(cmdline or [])
+    return any(m in joined for m in _DAEMON_CMDLINE_MARKERS)
+
+
+def _try_lock(handle) -> bool:
+    """Take a non-blocking exclusive OS lock on *handle*. True on success."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def _read_holder_pid() -> int | None:
+    """PID recorded by the current/most recent lock holder, if readable."""
+    pid_path = STATE_DIR / "daemon.pid"
+    try:
+        return int(pid_path.read_text(encoding="utf-8").split("|")[0])
+    except Exception:
+        return None
+
+
+def _kill_daemon_process(pid: int, logger: logging.Logger) -> bool:
+    """Kill *pid* and its subtree, but only if its cmdline is a live_daemon.
+
+    The cmdline check guards against PID reuse — never kill an unrelated
+    process that happens to have inherited a recorded PID.
+    """
+    if psutil is None:
+        logger.error("psutil unavailable — cannot kill other daemon instances")
+        return False
+    try:
+        proc = psutil.Process(pid)
+        if not _is_daemon_cmdline(proc.cmdline()):
+            logger.warning(f"PID {pid} is not a live_daemon process "
+                           f"({proc.name()}); refusing to kill")
+            return False
+        victims = [proc] + proc.children(recursive=True)
+        for p in victims:
+            try:
+                p.terminate()
+            except psutil.NoSuchProcess:
+                pass
+        gone, alive = psutil.wait_procs(victims, timeout=5)
+        for p in alive:
+            try:
+                p.kill()
+            except psutil.NoSuchProcess:
+                pass
+        psutil.wait_procs(alive, timeout=5)
+        logger.warning(f"Killed daemon instance PID {pid} "
+                       f"(+{len(victims) - 1} child processes)")
+        return True
+    except psutil.NoSuchProcess:
+        return True
+    except psutil.AccessDenied:
+        logger.error(f"Access denied killing PID {pid} — it may be running "
+                     f"elevated; kill it from an elevated shell")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to kill PID {pid}: {e}")
+        return False
+
+
+def kill_stray_daemons(logger: logging.Logger) -> int:
+    """Kill orphan live_daemon processes that aren't part of this instance.
+
+    An orphan is any python process with a live_daemon cmdline that is not
+    this process, an ancestor (the uv/venv shim chain), or a descendant.
+    Call only while holding the process lock — the lock holder is the single
+    authority allowed to kill others.
+    """
+    if psutil is None:
+        logger.warning("psutil unavailable — skipping orphan daemon sweep")
+        return 0
+
+    me = psutil.Process()
+    keep = {me.pid}
+    keep.update(p.pid for p in me.parents())
+    keep.update(p.pid for p in me.children(recursive=True))
+
+    killed = 0
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            if proc.pid in keep:
+                continue
+            if not (proc.info["name"] or "").lower().startswith("python"):
+                continue
+            if not _is_daemon_cmdline(proc.info["cmdline"]):
+                continue
+            logger.warning(f"Found stray daemon process PID {proc.pid}")
+            if _kill_daemon_process(proc.pid, logger):
+                killed += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    if killed:
+        logger.warning(f"Orphan sweep killed {killed} stray daemon instance(s)")
+    return killed
+
+
+def acquire_process_lock(logger: logging.Logger, takeover: bool = False) -> bool:
+    """Acquire the exclusive daemon lock to prevent multiple instances.
+
+    Holds an OS-level file lock for the process lifetime; it cannot go stale
+    (the OS drops it on process death) and cannot be stolen by a second
+    instance while the holder is alive.
+
+    With takeover=True (used by the Task Scheduler start command), a live
+    holder is killed and the lock taken over — the supervisor-started
+    instance always wins. Without it, this instance backs off.
 
     Returns True if lock acquired. On False, another daemon is running.
     """
+    global _lock_handle
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     lock_path = STATE_DIR / "daemon.lock"
 
-    # Check if lock exists and if the process is still alive
-    if lock_path.exists():
-        try:
-            content = lock_path.read_text(encoding="utf-8").strip()
-            parts = content.split("|")
-            if len(parts) >= 2:
-                pid_str = parts[0]
-                timestamp_str = parts[1]
-                try:
-                    old_pid = int(pid_str)
-                    # Check if PID is still running (psutil-based if available)
-                    pid_alive = False
-                    if psutil:
-                        try:
-                            pid_alive = psutil.pid_exists(old_pid)
-                        except Exception:
-                            pid_alive = True  # Conservative: assume alive if check fails
-                    else:
-                        # No psutil; try basic check (Windows)
-                        try:
-                            os.kill(old_pid, 0)
-                            pid_alive = True
-                        except (ProcessLookupError, OSError, PermissionError):
-                            pid_alive = False
+    tried_takeover = False
+    deadline = time.time() + 15
+    while True:
+        handle = open(lock_path, "a+", encoding="utf-8")
+        if _try_lock(handle):
+            break
+        handle.close()
 
-                    if pid_alive:
-                        logger.error(f"Daemon already running (PID {old_pid}). Exiting.")
-                        return False
-                    else:
-                        logger.warning(f"Removing stale lock (PID {old_pid} no longer running, "
-                                      f"timestamp: {timestamp_str})")
-                        lock_path.unlink()
-                except (ValueError, TypeError):
-                    pass
-        except Exception as e:
-            logger.warning(f"Could not read lock file: {e}. Removing.")
-            try:
-                lock_path.unlink()
-            except Exception:
-                pass
+        holder = _read_holder_pid()
+        if not takeover:
+            logger.error(f"Daemon already running (PID {holder or 'unknown'}). "
+                         f"Exiting; rerun with --takeover to replace it.")
+            return False
+        if not tried_takeover:
+            tried_takeover = True
+            logger.warning(f"Lock held by PID {holder or 'unknown'} — taking over")
+            if holder is not None and not _kill_daemon_process(holder, logger):
+                logger.critical("Takeover failed: could not kill lock holder")
+                return False
+        if time.time() > deadline:
+            logger.critical("Takeover failed: lock still held after kill")
+            return False
+        # OS may take a moment to release the dead holder's lock
+        time.sleep(0.5)
 
     try:
-        current_pid = os.getpid()
-        timestamp = datetime.now().isoformat()
-        lock_path.write_text(f"{current_pid}|{timestamp}\n", encoding="utf-8")
-        logger.info(f"Process lock acquired (PID {current_pid})")
-        return True
+        pid_path = STATE_DIR / "daemon.pid"
+        pid_path.write_text(f"{os.getpid()}|{datetime.now().isoformat()}\n",
+                            encoding="utf-8")
     except Exception as e:
-        logger.error(f"Failed to acquire lock: {e}")
-        return False
+        logger.warning(f"Could not write daemon.pid: {e}")
+
+    _lock_handle = handle
+    logger.info(f"Process lock acquired (PID {os.getpid()})")
+    return True
 
 
 def release_process_lock(logger: logging.Logger) -> None:
     """Release the process lock on shutdown."""
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    lock_path = STATE_DIR / "daemon.lock"
+    global _lock_handle
     try:
-        if lock_path.exists():
-            lock_path.unlink()
-            logger.info("Process lock released")
+        if _lock_handle is not None:
+            if os.name == "nt":
+                import msvcrt
+                _lock_handle.seek(0)
+                msvcrt.locking(_lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+            _lock_handle.close()
+            _lock_handle = None
+        (STATE_DIR / "daemon.pid").unlink(missing_ok=True)
+        logger.info("Process lock released")
     except Exception as e:
         logger.error(f"Failed to release lock: {e}")
 
@@ -712,8 +825,16 @@ def process_manual_commands_wrapper(config: dict, portfolio: object, broker: obj
         logger.error(f"Error processing manual commands: {e}", exc_info=True)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Main daemon loop."""
+    import argparse
+    parser = argparse.ArgumentParser(description="Live trading daemon")
+    parser.add_argument(
+        "--takeover", action="store_true",
+        help="Kill any running daemon instance and take over the lock "
+             "(used by the Task Scheduler start command)")
+    args = parser.parse_args(argv)
+
     logger = setup_logging()
     logger.info("="*64)
     logger.info("Live daemon starting")
@@ -723,9 +844,15 @@ def main() -> int:
     if not validate_startup_environment(logger):
         return 1
 
-    # Prevent multiple daemon instances (PID-based check)
-    if not acquire_process_lock(logger):
-        return 1
+    # Prevent multiple daemon instances (held OS file lock)
+    # Exit 0 when yielding to a live instance: a single daemon is the desired
+    # state, and a nonzero exit would make Task Scheduler restart-loop us.
+    if not acquire_process_lock(logger, takeover=args.takeover):
+        return 0
+
+    # Lock held — we are the authority; remove any orphan instances that
+    # survived a partial kill (e.g. Task Scheduler "End" only kills cmd.exe)
+    kill_stray_daemons(logger)
 
     config = load_config()
     daemon_state = load_daemon_state()
@@ -743,6 +870,7 @@ def main() -> int:
         run_startup_checks(require_broker=False, logger=logger)
     except SelfCheckError as e:
         logger.critical(str(e))
+        release_process_lock(logger)
         return 1
 
     # Set up broker
