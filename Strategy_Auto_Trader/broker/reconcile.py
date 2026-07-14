@@ -1,13 +1,11 @@
 """Position reconciliation — compare internal execution state against the broker.
 
-Internal positions are keyed by yfinance ticker ("HSBA.L"); IBKR reports bare
-contract symbols ("HSBA", "BT.A"), so internal tickers are mapped through
-ibkr_contract_params before comparing.
+Both internal and broker positions are keyed by yfinance ticker ("HSBA.L", "SPY").
+get_open_positions() returns broker positions already keyed by yfinance ticker,
+matching the internal positions dict key space directly.
 """
 
 from __future__ import annotations
-
-from .symbols import ibkr_contract_params
 
 
 def reconcile_positions(
@@ -16,36 +14,34 @@ def reconcile_positions(
 ) -> list[str]:
     """Compare internal positions against broker positions.
 
-    Returns a list of human-readable discrepancy strings; empty means the two
-    states agree. Never mutates either side — surfacing is the caller's job.
+    Both dicts are keyed by yfinance ticker. Returns a list of human-readable
+    discrepancy strings; empty means the two states agree. Never mutates either
+    side — surfacing is the caller's job.
     """
     expected: dict[str, dict] = {}
     for ticker, pos in internal_positions.items():
-        symbol = ibkr_contract_params(ticker)[0]
-        entry = expected.setdefault(symbol, {"tickers": [], "quantity": 0})
-        entry["tickers"].append(ticker)
+        entry = expected.setdefault(ticker, {"quantity": 0})
         entry["quantity"] += int(pos.get("quantity", 0))
 
     discrepancies: list[str] = []
-    for symbol in sorted(expected):
-        exp = expected[symbol]
-        label = "/".join(sorted(exp["tickers"]))
-        held = broker_positions.get(symbol)
+    for ticker in sorted(expected):
+        exp = expected[ticker]
+        held = broker_positions.get(ticker)
         if held is None:
             discrepancies.append(
-                f"{label}: internal state shows {exp['quantity']} shares, "
+                f"{ticker}: internal state shows {exp['quantity']} shares, "
                 f"broker shows no position"
             )
         elif held != exp["quantity"]:
             discrepancies.append(
-                f"{label}: internal state shows {exp['quantity']} shares, "
+                f"{ticker}: internal state shows {exp['quantity']} shares, "
                 f"broker shows {held}"
             )
 
-    for symbol in sorted(broker_positions):
-        if symbol not in expected:
+    for ticker in sorted(broker_positions):
+        if ticker not in expected:
             discrepancies.append(
-                f"{symbol}: broker shows {broker_positions[symbol]} shares, "
+                f"{ticker}: broker shows {broker_positions[ticker]} shares, "
                 f"no internal position"
             )
 

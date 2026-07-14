@@ -13,6 +13,28 @@ import pytest
 from Strategy_Auto_Trader.markov_cli import live_daemon
 
 
+@pytest.fixture(autouse=True)
+def _stub_manual_commands_wrapper(monkeypatch):
+    """process_cycle now calls process_manual_commands_wrapper() between tickers
+    (item 8: interleaved manual-command polling). That wrapper defaults to the
+    real repo's state/commands/ directory (no commands_dir override), so without
+    this stub every process_cycle test would read/claim real pending command
+    files on disk. Tests that specifically exercise the interleave behavior
+    override this with their own monkeypatch.setattr call."""
+    monkeypatch.setattr(live_daemon, "process_manual_commands_wrapper", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def _stub_app_status_snapshot(monkeypatch):
+    """process_cycle also calls _write_app_status_snapshot_safe() between tickers
+    now (heartbeat staleness fix), which writes to the real repo's
+    state/app_status.json (STATE_DIR has no override). Without this stub, every
+    process_cycle test would overwrite the live daemon's real heartbeat file
+    with test fixture data. Tests exercising the snapshot interleave itself
+    override this with their own monkeypatch.setattr call."""
+    monkeypatch.setattr(live_daemon, "_write_app_status_snapshot_safe", lambda *a, **k: None)
+
+
 @pytest.fixture
 def config():
     """Sample overnight_strategy.json."""
@@ -258,6 +280,128 @@ def test_process_cycle_market_config_can_override_reports_default(monkeypatch):
     assert captured["defaults"]["signal_reports_only"] is False
 
 
+# -- item 8: interleaved manual-command polling -----------------------------
+
+def test_process_cycle_checks_manual_commands_between_must_run_tickers(monkeypatch):
+    """A pending manual sell must be picked up between must-run tickers, not
+    only once per full market pass (that pass can run ~20+ min)."""
+    from Strategy_Auto_Trader.markov_cli import batch
+
+    calls = []
+    monkeypatch.setattr(live_daemon, "process_manual_commands_wrapper",
+                         lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(batch, "process_ticker",
+                         lambda ticker_cfg, defaults, send_email: {
+                             "ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0})
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL", "MSFT"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: ["AAPL", "MSFT"])
+
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    live_daemon.process_cycle(
+        "test_market", {}, config, {"cursors": {}},
+        portfolio=None, broker=None, logger=mock.Mock(),
+    )
+    assert len(calls) == 2  # once before each must-run ticker
+
+
+def test_process_cycle_checks_manual_commands_between_round_robin_tickers(monkeypatch):
+    """Same interleave, for the round-robin candidate stage."""
+    from Strategy_Auto_Trader.markov_cli import batch
+
+    calls = []
+    monkeypatch.setattr(live_daemon, "process_manual_commands_wrapper",
+                         lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(batch, "process_ticker",
+                         lambda ticker_cfg, defaults, send_email: {
+                             "ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0})
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL", "MSFT", "GOOGL"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+    monkeypatch.setattr(live_daemon, "next_round_robin_slice",
+                         lambda market_name, candidates, total, daemon_state, logger: candidates)
+
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    live_daemon.process_cycle(
+        "test_market", {}, config, {"cursors": {}},
+        portfolio=None, broker=None, logger=mock.Mock(),
+    )
+    assert len(calls) == 3  # once before each round-robin candidate
+
+
+# -- heartbeat fix: interleaved app_status.json snapshots -------------------
+
+def test_process_cycle_writes_status_snapshot_between_must_run_tickers(monkeypatch):
+    """app_status.json is the phone app's only heartbeat signal. It must be
+    refreshed between tickers, not only after the full market pass — a
+    must-run/round-robin scan can block for 20+ minutes, during which the old
+    behavior left a stale/dead-PID heartbeat the whole time."""
+    from Strategy_Auto_Trader.markov_cli import batch
+
+    calls = []
+    monkeypatch.setattr(live_daemon, "_write_app_status_snapshot_safe",
+                         lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(batch, "process_ticker",
+                         lambda ticker_cfg, defaults, send_email: {
+                             "ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0})
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL", "MSFT"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: ["AAPL", "MSFT"])
+
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    live_daemon.process_cycle(
+        "test_market", {}, config, {"cursors": {}},
+        portfolio=None, broker=None, logger=mock.Mock(),
+    )
+    assert len(calls) == 2  # once before each must-run ticker
+
+
+def test_process_cycle_writes_status_snapshot_between_round_robin_tickers(monkeypatch):
+    """Same interleave, for the round-robin candidate stage."""
+    from Strategy_Auto_Trader.markov_cli import batch
+
+    calls = []
+    monkeypatch.setattr(live_daemon, "_write_app_status_snapshot_safe",
+                         lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(batch, "process_ticker",
+                         lambda ticker_cfg, defaults, send_email: {
+                             "ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0})
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL", "MSFT", "GOOGL"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+    monkeypatch.setattr(live_daemon, "next_round_robin_slice",
+                         lambda market_name, candidates, total, daemon_state, logger: candidates)
+
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    live_daemon.process_cycle(
+        "test_market", {}, config, {"cursors": {}},
+        portfolio=None, broker=None, logger=mock.Mock(),
+    )
+    assert len(calls) == 3  # once before each round-robin candidate
+
+
+def test_process_cycle_passes_last_cycle_hour_through_to_snapshot(monkeypatch):
+    """last_cycle_hour must thread from process_cycle's caller into the
+    snapshot writer so markets_status reflects the real cycle state, not an
+    always-empty dict."""
+    from Strategy_Auto_Trader.markov_cli import batch
+
+    captured = []
+    monkeypatch.setattr(live_daemon, "_write_app_status_snapshot_safe",
+                         lambda portfolio, daemon_state, config, last_cycle_hour, logger:
+                             captured.append(last_cycle_hour))
+    monkeypatch.setattr(batch, "process_ticker",
+                         lambda ticker_cfg, defaults, send_email: {
+                             "ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0})
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: ["AAPL"])
+
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    sentinel = {"test_market": 13}
+    live_daemon.process_cycle(
+        "test_market", {}, config, {"cursors": {}},
+        portfolio=None, broker=None, logger=mock.Mock(),
+        last_cycle_hour=sentinel,
+    )
+    assert captured == [sentinel]
+
+
 class TestReconciliation:
     """run_reconciliation / check_nightly_reconciliation / halt enforcement."""
 
@@ -270,6 +414,43 @@ class TestReconciliation:
         b = mock.Mock()
         b.get_open_positions.return_value = positions
         return b
+
+    def test_reconciliation_connects_broker_when_not_connected(self, monkeypatch):
+        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
+        broker = self._broker({"SPY": 10})
+        broker.is_connected.return_value = False
+        daemon_state = {}
+
+        outcome = live_daemon.run_reconciliation(
+            self._portfolio({"SPY": {"quantity": 10}}), broker, daemon_state, mock.Mock(),
+        )
+        assert outcome == "clean"
+        broker.connect.assert_called_once()
+        broker.get_open_positions.assert_called_once()
+
+    def test_reconciliation_skips_connect_when_already_connected(self, monkeypatch):
+        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
+        broker = self._broker({})
+        daemon_state = {}
+
+        live_daemon.run_reconciliation(
+            self._portfolio({}), broker, daemon_state, mock.Mock(),
+        )
+        # Bare Mock().is_connected() is truthy, matching an already-connected broker.
+        broker.connect.assert_not_called()
+
+    def test_reconciliation_connect_failure_returns_error(self, monkeypatch):
+        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
+        broker = mock.Mock()
+        broker.is_connected.return_value = False
+        broker.connect.side_effect = ConnectionError("TWS not running")
+        daemon_state = {}
+
+        outcome = live_daemon.run_reconciliation(
+            self._portfolio({}), broker, daemon_state, mock.Mock(),
+        )
+        assert outcome == "error"
+        broker.get_open_positions.assert_not_called()
 
     def test_clean_pass_clears_halt(self, monkeypatch):
         monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
@@ -329,7 +510,7 @@ class TestReconciliation:
         assert outcome == "error"
         assert daemon_state["halt_new_entries"] is True
 
-    def _nightly(self, monkeypatch, daemon_state, outcome, at_hour=21, at_minute=30):
+    def _nightly(self, monkeypatch, daemon_state, outcome, at_hour=21, at_minute=30, day=6):
         config = {"overnight_timezone": "Europe/London",
                   "reconciliation_run_time": "21:30"}
         monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
@@ -337,7 +518,7 @@ class TestReconciliation:
         monkeypatch.setattr(live_daemon, "run_reconciliation", run_mock)
         with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(
-                2026, 7, 6, at_hour, at_minute, tzinfo=ZoneInfo("Europe/London"))
+                2026, 7, day, at_hour, at_minute, tzinfo=ZoneInfo("Europe/London"))
             live_daemon.check_nightly_reconciliation(
                 config, daemon_state, mock.Mock(), mock.Mock(), mock.Mock())
         return run_mock
@@ -368,6 +549,45 @@ class TestReconciliation:
         daemon_state = {}
         self._nightly(monkeypatch, daemon_state, "error")
         assert "last_reconcile_date" not in daemon_state
+
+    def test_nightly_error_retry_storm_same_day_counts_once(self, monkeypatch):
+        """30 failed attempts in one evening's window must count as 1 error-day."""
+        daemon_state = {}
+        for _ in range(30):
+            self._nightly(monkeypatch, daemon_state, "error", day=6)
+        assert daemon_state["reconciliation_consecutive_error_days"] == 1
+
+    def test_nightly_error_two_consecutive_days_sends_alert(self, monkeypatch):
+        from Strategy_Auto_Trader.output import emailer
+        sent = []
+        monkeypatch.setattr(emailer, "send_reconciliation_alert", lambda d: sent.append(d))
+        daemon_state = {}
+
+        self._nightly(monkeypatch, daemon_state, "error", day=6)
+        assert sent == []
+        assert daemon_state["reconciliation_consecutive_error_days"] == 1
+
+        self._nightly(monkeypatch, daemon_state, "error", day=7)
+        assert len(sent) == 1
+        assert daemon_state["reconciliation_consecutive_error_days"] == 2
+        assert daemon_state["reconciliation_alert_sent"] is True
+
+        # A third bad day doesn't resend the alert.
+        self._nightly(monkeypatch, daemon_state, "error", day=8)
+        assert len(sent) == 1
+
+    def test_nightly_clean_pass_resets_error_streak(self, monkeypatch):
+        from Strategy_Auto_Trader.output import emailer
+        monkeypatch.setattr(emailer, "send_reconciliation_alert", lambda d: None)
+        daemon_state = {}
+
+        self._nightly(monkeypatch, daemon_state, "error", day=6)
+        self._nightly(monkeypatch, daemon_state, "error", day=7)
+        assert daemon_state["reconciliation_consecutive_error_days"] == 2
+
+        self._nightly(monkeypatch, daemon_state, "clean", day=8)
+        assert daemon_state["reconciliation_consecutive_error_days"] == 0
+        assert daemon_state["reconciliation_alert_sent"] is False
 
 
 def test_process_cycle_halt_flag_blocks_new_entries(monkeypatch):
@@ -461,7 +681,7 @@ def test_main_keyboard_interrupt_skips_sleep(monkeypatch, config, tmp_path):
     monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
 
     snapshot_written = []
-    monkeypatch.setattr(live_daemon, "write_app_status_snapshot",
+    monkeypatch.setattr(live_daemon, "_write_app_status_snapshot_safe",
                         lambda *a, **k: snapshot_written.append(True))
     monkeypatch.setattr(live_daemon, "check_overnight_screening",
                         mock.Mock(side_effect=KeyboardInterrupt))
@@ -681,6 +901,151 @@ class TestExecuteSignalsWithRetry:
         assert result == (["BUY"], [], [])
         # Expected: exponential backoff [1, 2, 4] + intermediate 0.5s pauses between disconnect/reconnect
         assert sleep_times == [1, 0.5, 2, 0.5, 4, 0.5]
+
+    def test_execution_interrupted_with_orders_placed_halts_and_alerts(self, monkeypatch):
+        """ExecutionInterrupted with non-empty buys/sells halts new entries and sends alert."""
+        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
+
+        broker = mock.Mock()
+        logger = mock.Mock()
+        daemon_state = {"halt_new_entries": False}
+
+        def fake_execute(*args, **kwargs):
+            exc = execute_mod.ExecutionInterrupted(
+                RuntimeError("Socket lost mid-batch"),
+                buys=["AAPL x100 @ 150.0"],
+                sells=[],
+                skipped=[],
+                unresolved=["MSFT", "GOOG"],
+            )
+            raise exc
+
+        def mock_send_alert(*args, **kwargs):
+            pass
+
+        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.output.emailer.send_execution_interrupted_alert",
+            mock_send_alert
+        )
+
+        result = live_daemon.execute_signals_with_retry(
+            "ftse", ["AAPL", "MSFT", "GOOG"], None, None, None, broker,
+            2, None, logger, daemon_state=daemon_state
+        )
+
+        assert daemon_state["halt_new_entries"] is True
+        assert result == (["AAPL x100 @ 150.0"], [], ["MSFT", "GOOG"])
+        assert logger.critical.called
+        assert not broker.disconnect.called  # Should not retry
+
+    def test_execution_interrupted_with_sells_also_halts(self, monkeypatch):
+        """ExecutionInterrupted with non-empty sells halts new entries."""
+        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
+
+        broker = mock.Mock()
+        logger = mock.Mock()
+        daemon_state = {"halt_new_entries": False}
+
+        def fake_execute(*args, **kwargs):
+            exc = execute_mod.ExecutionInterrupted(
+                RuntimeError("Connection lost"),
+                buys=[],
+                sells=["AAPL x100 @ 145.0"],
+                skipped=[],
+                unresolved=["MSFT"],
+            )
+            raise exc
+
+        def mock_send_alert(*args, **kwargs):
+            pass
+
+        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.output.emailer.send_execution_interrupted_alert",
+            mock_send_alert
+        )
+
+        result = live_daemon.execute_signals_with_retry(
+            "ftse", ["AAPL", "MSFT"], None, None, None, broker,
+            2, None, logger, daemon_state=daemon_state
+        )
+
+        assert daemon_state["halt_new_entries"] is True
+        assert result == ([], ["AAPL x100 @ 145.0"], ["MSFT"])
+
+    def test_execution_interrupted_no_orders_retries(self, monkeypatch):
+        """ExecutionInterrupted with empty buys/sells triggers safe retry path."""
+        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
+        import time
+
+        call_count = [0]
+        broker = mock.Mock()
+        logger = mock.Mock()
+        daemon_state = {"halt_new_entries": False}
+
+        def fake_execute(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                exc = execute_mod.ExecutionInterrupted(
+                    RuntimeError("Early interrupt"),
+                    buys=[],
+                    sells=[],
+                    skipped=[],
+                    unresolved=["AAPL", "MSFT"],
+                )
+                raise exc
+            return ([], [], ["AAPL", "MSFT"])
+
+        def fake_sleep(secs):
+            pass
+
+        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
+        monkeypatch.setattr(time, "sleep", fake_sleep)
+
+        result = live_daemon.execute_signals_with_retry(
+            "ftse", ["AAPL", "MSFT"], None, None, None, broker,
+            2, None, logger, daemon_state=daemon_state, max_retries=2
+        )
+
+        assert daemon_state.get("halt_new_entries") is False  # Not halted
+        assert result == ([], [], ["AAPL", "MSFT"])
+        assert broker.disconnect.called  # Should have retried
+        assert call_count[0] == 2  # Called twice (first failed, retry succeeded)
+
+    def test_execution_interrupted_no_daemon_state_doesnt_crash(self, monkeypatch):
+        """ExecutionInterrupted works without daemon_state parameter."""
+        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
+
+        broker = mock.Mock()
+        logger = mock.Mock()
+
+        def fake_execute(*args, **kwargs):
+            exc = execute_mod.ExecutionInterrupted(
+                RuntimeError("Socket lost"),
+                buys=["AAPL x100 @ 150.0"],
+                sells=[],
+                skipped=[],
+                unresolved=["MSFT"],
+            )
+            raise exc
+
+        def mock_send_alert(*args, **kwargs):
+            pass
+
+        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.output.emailer.send_execution_interrupted_alert",
+            mock_send_alert
+        )
+
+        result = live_daemon.execute_signals_with_retry(
+            "ftse", ["AAPL", "MSFT"], None, None, None, broker,
+            2, None, logger  # No daemon_state passed
+        )
+
+        assert result == (["AAPL x100 @ 150.0"], [], ["MSFT"])
+        assert logger.critical.called
 
 
 class TestAppStatusSnapshot:

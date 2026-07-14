@@ -10,10 +10,13 @@ set Trusted IP to 127.0.0.1, port 7497 for paper.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
-from .symbols import ibkr_contract_params
+from .symbols import ibkr_contract_params, yfinance_ticker
 from .types import FillResult, OrderRequest
+
+logger = logging.getLogger(__name__)
 
 
 class IBKRAdapter:
@@ -88,9 +91,10 @@ class IBKRAdapter:
             return float(tdata.last)
         return float(tdata.close or 0.0)
 
-    def place_order(self, req: OrderRequest) -> FillResult:
+    def place_order(self, req: OrderRequest) -> FillResult | None:
         """Submit a market order and wait for fill (up to self._timeout seconds).
 
+        Returns FillResult if order is fully filled, None if cancelled/partially filled/inactive.
         Raises ConnectionError if socket is disconnected, other exceptions for order failures.
         """
         if not self.is_connected():
@@ -105,7 +109,31 @@ class IBKRAdapter:
             order = MarketOrder(req.action, req.quantity)
             trade = self._ib.placeOrder(contract, order)
             self._ib.waitOnUpdate(timeout=self._timeout)
+
+            # Check order status — only return FillResult if fully filled
+            order_status = trade.orderStatus.status
+            if order_status != "Filled":
+                logger.warning(
+                    f"Order not filled for {req.ticker}: status={order_status}, "
+                    f"requested_qty={req.quantity}"
+                )
+                return None
+
             fill_price = float(trade.orderStatus.avgFillPrice or 0.0)
+            if fill_price <= 0:
+                # orderStatus.status can flip to "Filled" on an earlier event
+                # tick than avgFillPrice/fills populate — poll a few more
+                # ticks before giving up.
+                for _ in range(5):
+                    if trade.fills:
+                        exec_price = (trade.fills[-1].execution.avgPrice
+                                       or trade.fills[-1].execution.price)
+                        if exec_price:
+                            fill_price = float(exec_price)
+                            break
+                    self._ib.waitOnUpdate(timeout=1.0)
+                    fill_price = float(trade.orderStatus.avgFillPrice or fill_price)
+
             return FillResult(
                 ticker=req.ticker,
                 action=req.action,
@@ -121,9 +149,9 @@ class IBKRAdapter:
             raise
 
     def get_open_positions(self) -> dict[str, int]:
-        """Return {ticker: quantity} for all open positions in the account."""
+        """Return {ticker: quantity} for all open positions, keyed by yfinance ticker."""
         return {
-            pos.contract.symbol: int(pos.position)
+            yfinance_ticker(pos.contract.symbol, pos.contract.currency): int(pos.position)
             for pos in self._ib.positions()
             if hasattr(pos.contract, "symbol") and pos.position != 0
         }

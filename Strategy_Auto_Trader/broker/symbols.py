@@ -21,6 +21,17 @@ def ibkr_contract_params(ticker: str) -> tuple[str, str, str]:
     return ticker, "SMART", "USD"
 
 
+def yfinance_ticker(symbol: str, currency: str) -> str:
+    """Map an IBKR contract's (symbol, currency) back to a yfinance ticker.
+
+    Inverse of ibkr_contract_params: GBP contracts are LSE-listed, so append
+    ".L" and turn share-class dots back into yfinance's hyphen.
+    """
+    if currency.upper() == "GBP":
+        return symbol.replace(".", "-") + ".L"
+    return symbol
+
+
 def sizing_price(ticker: str, price: float) -> float:
     """Convert a quoted price into pot-currency units for position sizing.
 

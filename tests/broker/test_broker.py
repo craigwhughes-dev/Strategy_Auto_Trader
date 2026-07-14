@@ -161,6 +161,294 @@ class TestBroker:
         adapter._ib.managedAccounts.return_value = ("DU123456",)
         assert adapter.managed_accounts() == ["DU123456"]
 
+    def test_ibkr_adapter_place_order_returns_fill_when_filled(self):
+        pytest.importorskip("ib_insync")
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        from Strategy_Auto_Trader.broker.types import OrderRequest
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+        adapter._ib.isConnected.return_value = True
+
+        # Mock trade object with status "Filled"
+        mock_trade = MagicMock()
+        mock_trade.orderStatus.status = "Filled"
+        mock_trade.orderStatus.avgFillPrice = 195.5
+        adapter._ib.placeOrder.return_value = mock_trade
+        adapter._ib.qualifyContracts = MagicMock()
+        adapter._ib.waitOnUpdate = MagicMock()
+
+        fill = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
+        assert fill is not None
+        assert fill.fill_price == pytest.approx(195.5)
+        assert fill.quantity == 10
+        assert fill.action == "BUY"
+        assert fill.ticker == "AAPL"
+
+    def test_ibkr_adapter_place_order_returns_none_when_cancelled(self):
+        pytest.importorskip("ib_insync")
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        from Strategy_Auto_Trader.broker.types import OrderRequest
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+        adapter._ib.isConnected.return_value = True
+
+        # Mock trade object with status "Cancelled"
+        mock_trade = MagicMock()
+        mock_trade.orderStatus.status = "Cancelled"
+        mock_trade.orderStatus.avgFillPrice = 0.0
+        adapter._ib.placeOrder.return_value = mock_trade
+        adapter._ib.qualifyContracts = MagicMock()
+        adapter._ib.waitOnUpdate = MagicMock()
+
+        fill = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
+        assert fill is None
+
+    def test_ibkr_adapter_place_order_returns_none_when_partially_filled(self):
+        pytest.importorskip("ib_insync")
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        from Strategy_Auto_Trader.broker.types import OrderRequest
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+        adapter._ib.isConnected.return_value = True
+
+        # Mock trade object with status "PartiallyFilled"
+        mock_trade = MagicMock()
+        mock_trade.orderStatus.status = "PartiallyFilled"
+        mock_trade.orderStatus.avgFillPrice = 195.0
+        adapter._ib.placeOrder.return_value = mock_trade
+        adapter._ib.qualifyContracts = MagicMock()
+        adapter._ib.waitOnUpdate = MagicMock()
+
+        fill = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
+        assert fill is None
+
+    def test_ibkr_adapter_place_order_avgfillprice_populated_skips_retry_loop(self):
+        pytest.importorskip("ib_insync")
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        from Strategy_Auto_Trader.broker.types import OrderRequest
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+        adapter._ib.isConnected.return_value = True
+
+        mock_trade = MagicMock()
+        mock_trade.orderStatus.status = "Filled"
+        mock_trade.orderStatus.avgFillPrice = 195.5
+        adapter._ib.placeOrder.return_value = mock_trade
+        adapter._ib.qualifyContracts = MagicMock()
+        adapter._ib.waitOnUpdate = MagicMock()
+
+        fill = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
+        assert fill.fill_price == pytest.approx(195.5)
+        # Only the initial wait — avgFillPrice was already populated, no retries.
+        assert adapter._ib.waitOnUpdate.call_count == 1
+
+    def test_ibkr_adapter_place_order_falls_back_to_fills_execution_price(self):
+        pytest.importorskip("ib_insync")
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        from Strategy_Auto_Trader.broker.types import OrderRequest
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+        adapter._ib.isConnected.return_value = True
+
+        mock_fill = MagicMock()
+        mock_fill.execution.avgPrice = 123.45
+        mock_fill.execution.price = 123.45
+        mock_trade = MagicMock()
+        mock_trade.orderStatus.status = "Filled"
+        mock_trade.orderStatus.avgFillPrice = 0.0
+        mock_trade.fills = [mock_fill]
+        adapter._ib.placeOrder.return_value = mock_trade
+        adapter._ib.qualifyContracts = MagicMock()
+        adapter._ib.waitOnUpdate = MagicMock()
+
+        fill = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
+        assert fill.fill_price == pytest.approx(123.45)
+        # fills was already populated on the first check — no extra polling.
+        assert adapter._ib.waitOnUpdate.call_count == 1
+
+    def test_ibkr_adapter_place_order_recovers_price_after_late_fill_event(self):
+        pytest.importorskip("ib_insync")
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        from Strategy_Auto_Trader.broker.types import OrderRequest
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+        adapter._ib.isConnected.return_value = True
+
+        mock_trade = MagicMock()
+        mock_trade.orderStatus.status = "Filled"
+        mock_trade.orderStatus.avgFillPrice = 0.0
+        mock_trade.fills = []
+        adapter._ib.placeOrder.return_value = mock_trade
+        adapter._ib.qualifyContracts = MagicMock()
+
+        calls = {"n": 0}
+
+        def wait_side_effect(timeout=None):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                late_fill = MagicMock()
+                late_fill.execution.avgPrice = 88.0
+                late_fill.execution.price = 88.0
+                mock_trade.fills = [late_fill]
+
+        adapter._ib.waitOnUpdate = MagicMock(side_effect=wait_side_effect)
+
+        fill = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
+        assert fill.fill_price == pytest.approx(88.0)
+        assert adapter._ib.waitOnUpdate.call_count == 2
+
+    def test_ibkr_adapter_place_order_gives_up_after_bounded_retries(self):
+        pytest.importorskip("ib_insync")
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        from Strategy_Auto_Trader.broker.types import OrderRequest
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+        adapter._ib.isConnected.return_value = True
+
+        mock_trade = MagicMock()
+        mock_trade.orderStatus.status = "Filled"
+        mock_trade.orderStatus.avgFillPrice = 0.0
+        mock_trade.fills = []
+        adapter._ib.placeOrder.return_value = mock_trade
+        adapter._ib.qualifyContracts = MagicMock()
+        adapter._ib.waitOnUpdate = MagicMock()
+
+        fill = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
+        # Never resolves a real price — returns what it has instead of hanging.
+        assert fill.fill_price == 0.0
+        # 1 initial wait + 5 bounded retries, no more.
+        assert adapter._ib.waitOnUpdate.call_count == 6
+
+    def test_ibkr_adapter_get_open_positions_single_us_position(self):
+        pytest.importorskip("ib_insync")
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+
+        mock_pos = MagicMock()
+        mock_pos.contract.symbol = "AAPL"
+        mock_pos.contract.currency = "USD"
+        mock_pos.position = 10
+        adapter._ib.positions.return_value = [mock_pos]
+
+        positions = adapter.get_open_positions()
+        assert positions == {"AAPL": 10}
+
+    def test_ibkr_adapter_get_open_positions_single_lse_position(self):
+        pytest.importorskip("ib_insync")
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+
+        mock_pos = MagicMock()
+        mock_pos.contract.symbol = "HSBA"
+        mock_pos.contract.currency = "GBP"
+        mock_pos.position = 200
+        adapter._ib.positions.return_value = [mock_pos]
+
+        positions = adapter.get_open_positions()
+        assert positions == {"HSBA.L": 200}
+
+    def test_ibkr_adapter_get_open_positions_cross_listed_collision_prevention(self):
+        pytest.importorskip("ib_insync")
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+
+        us_pos = MagicMock()
+        us_pos.contract.symbol = "BP"
+        us_pos.contract.currency = "USD"
+        us_pos.position = 100
+
+        uk_pos = MagicMock()
+        uk_pos.contract.symbol = "BP"
+        uk_pos.contract.currency = "GBP"
+        uk_pos.position = 50
+
+        adapter._ib.positions.return_value = [us_pos, uk_pos]
+
+        positions = adapter.get_open_positions()
+        assert positions == {"BP": 100, "BP.L": 50}
+        assert "BP" in positions
+        assert "BP.L" in positions
+        assert positions["BP"] != positions["BP.L"]
+
+    def test_ibkr_adapter_get_open_positions_lse_share_class(self):
+        pytest.importorskip("ib_insync")
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+
+        mock_pos = MagicMock()
+        mock_pos.contract.symbol = "BT.A"
+        mock_pos.contract.currency = "GBP"
+        mock_pos.position = 500
+        adapter._ib.positions.return_value = [mock_pos]
+
+        positions = adapter.get_open_positions()
+        assert positions == {"BT-A.L": 500}
+
+    def test_ibkr_adapter_get_open_positions_excludes_zero_quantity(self):
+        pytest.importorskip("ib_insync")
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+
+        pos1 = MagicMock()
+        pos1.contract.symbol = "AAPL"
+        pos1.contract.currency = "USD"
+        pos1.position = 10
+
+        pos2 = MagicMock()
+        pos2.contract.symbol = "MSFT"
+        pos2.contract.currency = "USD"
+        pos2.position = 0
+
+        adapter._ib.positions.return_value = [pos1, pos2]
+
+        positions = adapter.get_open_positions()
+        assert positions == {"AAPL": 10}
+        assert "MSFT" not in positions
+
+    def test_ibkr_adapter_get_open_positions_multiple_positions(self):
+        pytest.importorskip("ib_insync")
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+
+        pos1 = MagicMock()
+        pos1.contract.symbol = "SPY"
+        pos1.contract.currency = "USD"
+        pos1.position = 5
+
+        pos2 = MagicMock()
+        pos2.contract.symbol = "HSBA"
+        pos2.contract.currency = "GBP"
+        pos2.position = 200
+
+        pos3 = MagicMock()
+        pos3.contract.symbol = "TSLA"
+        pos3.contract.currency = "USD"
+        pos3.position = 3
+
+        adapter._ib.positions.return_value = [pos1, pos2, pos3]
+
+        positions = adapter.get_open_positions()
+        assert positions == {"SPY": 5, "HSBA.L": 200, "TSLA": 3}
+
     # -- execute.py integration -----------------------------------------------
 
     def _make_signal_dir(self, data_dir, ticker, flag, close=200.0, kelly=0.15):
@@ -947,6 +1235,146 @@ class TestBroker:
         assert pos["currency"] == "GBP"
         assert pos["cost_value"] == pytest.approx(5250.0)
 
+    # -- execute_signals: stop/target slippage adjustment (BUGFIX_PLAN) -----
+
+    def _patched_signal_reader(self, monkeypatch, signal):
+        """Patch signal_reader.read_latest_signal so execute_signals gets a
+        fixed signal dict regardless of ticker/data_dir (its local import
+        `from ..broker.signal_reader import read_latest_signal` re-reads the
+        module attribute on every call, so this patch is picked up live)."""
+        import Strategy_Auto_Trader.broker.signal_reader as signal_reader
+        monkeypatch.setattr(signal_reader, "read_latest_signal",
+                             lambda ticker, data_dir: signal)
+
+    def test_execute_signals_mild_slippage_recomputes_stop_target(self, tmp_path, monkeypatch):
+        """Normal fill close to signal price: stop/target recomputed off the
+        fill price, not left as the raw signal-time levels."""
+        from Strategy_Auto_Trader.markov_cli.execute import execute_signals
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.null_adapter import NullBroker
+        signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15,
+                  "stop_level": 95.0, "target_level": 115.0}
+        self._patched_signal_reader(monkeypatch, signal)
+        portfolio = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        broker = NullBroker(prices={"AAPL": 100.2})  # mild slippage above close
+        buys, sells, skipped = execute_signals(
+            ["AAPL"], tmp_path, portfolio, portfolio.get_limit_tracker(), broker,
+        )
+        pos = portfolio.positions["AAPL"]
+        assert pos["stop_level"] != pytest.approx(95.0)
+        assert pos["target_level"] != pytest.approx(115.0)
+        assert pos["stop_level"] == pytest.approx(100.2 * 0.95)
+        assert pos["target_level"] == pytest.approx(100.2 * 1.15)
+        assert not any("SEVERE SLIPPAGE" in b for b in buys)
+
+    def test_execute_signals_slippage_at_stop_boundary_triggers_immediate_stopout(self, tmp_path, monkeypatch):
+        """Fill price exactly equal to the ORIGINAL signal-time stop_level
+        (95.0) must trigger the same-bar stop-out path (<=), and the exit
+        must log a real nonzero negative P&L (regression test for the
+        zero-P&L bug: exit no longer reuses the entry fill object)."""
+        from Strategy_Auto_Trader.markov_cli.execute import execute_signals
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.null_adapter import NullBroker
+        signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15,
+                  "stop_level": 95.0, "target_level": 115.0}
+        self._patched_signal_reader(monkeypatch, signal)
+        portfolio = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        broker = NullBroker(prices={"AAPL": 95.0})  # fills exactly at signal stop
+        buys, sells, skipped = execute_signals(
+            ["AAPL"], tmp_path, portfolio, portfolio.get_limit_tracker(), broker,
+        )
+        assert "AAPL" not in portfolio.positions
+        assert any("SEVERE SLIPPAGE" in b for b in buys)
+        last = portfolio.trade_log[-1]
+        assert last["action"] == "SELL"
+        assert last["pl"] < 0.0
+        assert last["pl"] == pytest.approx((95.0 * 0.95 - 95.0) * last["quantity"])
+
+    def test_execute_signals_slippage_below_stop_triggers_immediate_stopout(self, tmp_path, monkeypatch):
+        """Fill price well below the original stop_level (severe slippage):
+        same-bar stop-out fires and the loss magnitude in the log message
+        roughly matches the actual price gap from the signal close."""
+        from Strategy_Auto_Trader.markov_cli.execute import execute_signals
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.null_adapter import NullBroker
+        signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15,
+                  "stop_level": 95.0, "target_level": 115.0}
+        self._patched_signal_reader(monkeypatch, signal)
+        portfolio = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        broker = NullBroker(prices={"AAPL": 90.0})  # well below the 95 stop
+        buys, sells, skipped = execute_signals(
+            ["AAPL"], tmp_path, portfolio, portfolio.get_limit_tracker(), broker,
+        )
+        assert "AAPL" not in portfolio.positions
+        matches = [b for b in buys if "SEVERE SLIPPAGE" in b]
+        assert matches
+        assert "-10.0%" in matches[0]  # (100 - 90) / 100 * 100
+        last = portfolio.trade_log[-1]
+        assert last["action"] == "SELL"
+        assert last["pl"] < 0.0
+        assert last["pl"] == pytest.approx((90.0 * 0.95 - 90.0) * last["quantity"])
+
+    def test_execute_signals_mild_slippage_above_stop_stays_open(self, tmp_path, monkeypatch):
+        """Fill price is below signal close (negative slippage) but still
+        above the original stop_level: normal path, position stays open."""
+        from Strategy_Auto_Trader.markov_cli.execute import execute_signals
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.null_adapter import NullBroker
+        signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15,
+                  "stop_level": 95.0, "target_level": 115.0}
+        self._patched_signal_reader(monkeypatch, signal)
+        portfolio = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        broker = NullBroker(prices={"AAPL": 97.0})  # below close, above stop
+        buys, sells, skipped = execute_signals(
+            ["AAPL"], tmp_path, portfolio, portfolio.get_limit_tracker(), broker,
+        )
+        assert "AAPL" in portfolio.positions
+        assert not any("SEVERE SLIPPAGE" in b for b in buys)
+
+    def test_execute_signals_buy_skipped_when_order_not_filled(self, tmp_path, monkeypatch):
+        """BUY signal with order not filled (broker returns None): position
+        not opened, ticker added to skipped, no entry recorded."""
+        from Strategy_Auto_Trader.markov_cli.execute import execute_signals
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from unittest.mock import MagicMock
+        signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15,
+                  "stop_level": 95.0, "target_level": 115.0}
+        self._patched_signal_reader(monkeypatch, signal)
+        portfolio = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        broker = MagicMock()
+        broker.place_order.return_value = None  # Order not filled
+        buys, sells, skipped = execute_signals(
+            ["AAPL"], tmp_path, portfolio, portfolio.get_limit_tracker(), broker,
+        )
+        assert "AAPL" not in portfolio.positions
+        assert any("AAPL" in s and "order not filled" in s for s in skipped)
+        assert len(buys) == 0
+
+    def test_execute_signals_sell_skipped_when_order_not_filled(self, tmp_path, monkeypatch):
+        """SELL signal with existing position, but order not filled: position
+        stays open, ticker added to skipped, no exit recorded."""
+        from Strategy_Auto_Trader.markov_cli.execute import execute_signals
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.types import FillResult
+        from unittest.mock import MagicMock
+        # Pre-seed portfolio with an open position
+        portfolio = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        entry_fill = FillResult("AAPL", "BUY", 100.0, 10, "2026-07-01T00:00:00+00:00")
+        portfolio.record_entry("AAPL", entry_fill, 0.15, 95.0, 115.0)
+
+        signal = {"flag": "SELL", "close": 105.0, "kelly_fraction": 0.15,
+                  "stop_level": 95.0, "target_level": 115.0}
+        self._patched_signal_reader(monkeypatch, signal)
+        broker = MagicMock()
+        broker.place_order.return_value = None  # Order not filled
+        buys, sells, skipped = execute_signals(
+            ["AAPL"], tmp_path, portfolio, portfolio.get_limit_tracker(), broker,
+        )
+        # Position should still be open since SELL order did not fill
+        assert "AAPL" in portfolio.positions
+        assert any("AAPL" in s and "order not filled" in s for s in skipped)
+        assert len(sells) == 0
+
 
 class TestSlippageBps:
 
@@ -1015,3 +1443,69 @@ class TestSlippageBps:
         fill = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-06T00:00:00+00:00")
         pm.record_entry("AAPL", fill, 0.10, 185.0, 224.0)
         assert pm.trade_log[-1]["slippage_bps"] is None
+
+    # -- manual_commands: order-not-filled handling --
+
+    def test_manual_commands_execute_sell_returns_false_when_order_not_filled(self, tmp_path):
+        """_execute_sell returns (False, None, error_msg) when broker.place_order
+        returns None, and does not call portfolio.record_exit."""
+        from Strategy_Auto_Trader.markov_cli.manual_commands import _execute_sell
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.types import FillResult
+        from unittest.mock import MagicMock
+        import logging
+
+        portfolio = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        entry_fill = FillResult("AAPL", "BUY", 100.0, 10, "2026-07-01T00:00:00+00:00")
+        portfolio.record_entry("AAPL", entry_fill, 0.15, 95.0, 115.0)
+
+        broker = MagicMock()
+        broker.place_order.return_value = None  # Order not filled
+        logger = logging.getLogger("test")
+
+        success, fill, error_msg = _execute_sell("AAPL", portfolio, broker, logger)
+
+        assert success is False
+        assert fill is None
+        assert "Order not filled" in error_msg
+        # Position should still be open (record_exit was not called)
+        assert "AAPL" in portfolio.positions
+
+    def test_manual_commands_execute_sell_all_skips_ticker_when_order_not_filled(self, tmp_path):
+        """_execute_sell_all continues to next ticker when broker.place_order
+        returns None for one ticker, and successfully processes another."""
+        from Strategy_Auto_Trader.markov_cli.manual_commands import _execute_sell_all
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.types import FillResult
+        from unittest.mock import MagicMock
+        import logging
+
+        portfolio = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        # Add two positions
+        fill_aapl = FillResult("AAPL", "BUY", 100.0, 10, "2026-07-01T00:00:00+00:00")
+        portfolio.record_entry("AAPL", fill_aapl, 0.15, 95.0, 115.0)
+        fill_msft = FillResult("MSFT", "BUY", 300.0, 5, "2026-07-01T00:00:00+00:00")
+        portfolio.record_entry("MSFT", fill_msft, 0.10, 285.0, 345.0)
+
+        broker = MagicMock()
+        # First call (AAPL) returns None, second call (MSFT) succeeds
+        def side_effect(req):
+            if req.ticker == "AAPL":
+                return None
+            else:
+                return FillResult(req.ticker, "SELL", 310.0, 5, "2026-07-02T00:00:00+00:00")
+        broker.place_order.side_effect = side_effect
+
+        logger = logging.getLogger("test")
+        success, fills, summary = _execute_sell_all(portfolio, broker, logger)
+
+        # Overall should show partial failure (not all succeeded)
+        assert success is False
+        # MSFT should be in fills
+        assert len(fills) == 1
+        assert fills[0].ticker == "MSFT"
+        # AAPL should be in errors in summary
+        assert "AAPL" in summary and "order not filled" in summary
+        # AAPL position should still be open, MSFT should be closed
+        assert "AAPL" in portfolio.positions
+        assert "MSFT" not in portfolio.positions

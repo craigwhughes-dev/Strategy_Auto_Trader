@@ -36,16 +36,16 @@ class TestReconcilePositions:
         assert len(result) == 1
         assert "no internal position" in result[0]
 
-    def test_lse_ticker_maps_to_bare_symbol(self):
+    def test_lse_ticker_matches_directly(self):
         internal = {"HSBA.L": _pos(200)}
-        assert reconcile_positions(internal, {"HSBA": 200}) == []
+        assert reconcile_positions(internal, {"HSBA.L": 200}) == []
 
-    def test_lse_share_class_maps_dash_to_dot(self):
+    def test_lse_share_class_ticker_matches_directly(self):
         internal = {"BT-A.L": _pos(500)}
-        assert reconcile_positions(internal, {"BT.A": 500}) == []
+        assert reconcile_positions(internal, {"BT-A.L": 500}) == []
 
-    def test_lse_ticker_mismatch_reports_yfinance_name(self):
-        result = reconcile_positions({"HSBA.L": _pos(200)}, {"HSBA": 150})
+    def test_lse_ticker_mismatch_reports_ticker_name(self):
+        result = reconcile_positions({"HSBA.L": _pos(200)}, {"HSBA.L": 150})
         assert len(result) == 1
         assert "HSBA.L" in result[0]
 

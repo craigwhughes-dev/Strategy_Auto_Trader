@@ -23,6 +23,31 @@ STATE_DIR = ROOT / "state"
 CONFIG_DIR = ROOT / "config"
 
 
+class ExecutionInterrupted(Exception):
+    """Raised when execute_signals() fails partway through a batch.
+
+    Carries whatever buys/sells/skipped were already recorded before the
+    failure, plus the tickers whose outcome is unknown, so the caller can
+    tell "nothing happened yet, safe to retry" from "something may have
+    already reached the broker, do not blindly resubmit."
+    """
+
+    def __init__(
+        self,
+        original: Exception,
+        buys: list[str],
+        sells: list[str],
+        skipped: list[str],
+        unresolved: list[str],
+    ) -> None:
+        super().__init__(str(original))
+        self.original = original
+        self.buys = buys
+        self.sells = sells
+        self.skipped = skipped
+        self.unresolved = unresolved
+
+
 def _load_watchlist(path: Path) -> dict:
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
@@ -73,11 +98,12 @@ def execute_signals(
     """
     from ..broker.signal_reader import read_latest_signal
     from ..broker.symbols import sizing_price
-    from ..broker.types import OrderRequest
+    from ..broker.types import FillResult, OrderRequest
 
     buys: list[str] = []
     sells: list[str] = []
     skipped: list[str] = []
+    resolved: set[str] = set()
 
     buy_signals: list[tuple[str, dict]] = []
     sell_signals: list[tuple[str, dict]] = []
@@ -86,6 +112,7 @@ def execute_signals(
         signal = read_latest_signal(ticker, data_dir)
         if signal is None or signal["flag"] == "HOLD":
             skipped.append(ticker)
+            resolved.add(ticker)
             continue
         if signal["flag"] == "BUY":
             buy_signals.append((ticker, signal))
@@ -95,45 +122,111 @@ def execute_signals(
     buy_signals.sort(key=lambda x: x[1]["kelly_fraction"], reverse=True)
 
     for ticker, signal in buy_signals:
-        if not limit_tracker.can_buy(daily_buy_limit):
-            skipped.append(f"{ticker}(daily limit reached)")
-            continue
-        if not portfolio.can_open(ticker):
-            skipped.append(f"{ticker}(at capacity)")
-            continue
-        qty = portfolio.compute_quantity(
-            signal["kelly_fraction"], sizing_price(ticker, signal["close"])
-        )
-        if qty < 1:
-            skipped.append(f"{ticker}(qty=0)")
-            continue
-        fill = broker.place_order(OrderRequest(ticker, "BUY", qty))
-        portfolio.record_entry(
-            ticker, fill,
-            signal["kelly_fraction"],
-            signal["stop_level"],
-            signal["target_level"],
-            signal_price=signal["close"],
-            market=market_name,
-            currency=market_currency,
-        )
-        limit_tracker.record_buy()
-        buys.append(f"{ticker} x{qty} @ {fill.fill_price:.2f}"
-                    f"{_slippage_tag(signal['close'], fill.fill_price, 'BUY')}")
+        try:
+            if not limit_tracker.can_buy(daily_buy_limit):
+                skipped.append(f"{ticker}(daily limit reached)")
+                resolved.add(ticker)
+                continue
+            if not portfolio.can_open(ticker):
+                skipped.append(f"{ticker}(at capacity)")
+                resolved.add(ticker)
+                continue
+            qty = portfolio.compute_quantity(
+                signal["kelly_fraction"], sizing_price(ticker, signal["close"])
+            )
+            if qty < 1:
+                skipped.append(f"{ticker}(qty=0)")
+                resolved.add(ticker)
+                continue
+            fill = broker.place_order(OrderRequest(ticker, "BUY", qty))
+
+            # Order not filled (cancelled, partially filled, etc.)
+            if fill is None:
+                skipped.append(f"{ticker}(order not filled)")
+                resolved.add(ticker)
+                continue
+
+            # Recompute stop/target based on fill price, not signal close.
+            # Derive the percentage distances used by the signal:
+            signal_close = signal["close"]
+            if signal_close > 0:
+                stop_pct = (signal["stop_level"] - signal_close) / signal_close
+                target_pct = (signal["target_level"] - signal_close) / signal_close
+            else:
+                stop_pct, target_pct = -0.05, 0.15  # fallback to defaults
+
+            adjusted_stop = fill.fill_price * (1 + stop_pct)
+            adjusted_target = fill.fill_price * (1 + target_pct)
+
+            # Check for severe slippage: if fill price breaches the recomputed stop,
+            # treat as same-bar stop-out instead of recording a broken stop level.
+            portfolio.record_entry(
+                ticker, fill,
+                signal["kelly_fraction"],
+                adjusted_stop,
+                adjusted_target,
+                signal_price=signal["close"],
+                market=market_name,
+                currency=market_currency,
+            )
+
+            limit_tracker.record_buy()
+
+            # Immediate stop-out: compare the fill against the ORIGINAL signal-time
+            # stop level, not the recomputed adjusted_stop (which is always below
+            # the fill price by construction and can never itself be breached).
+            if fill.fill_price <= signal["stop_level"]:
+                loss_pct = (signal_close - fill.fill_price) / signal_close * 100 if signal_close > 0 else 0.0
+                exit_fill = FillResult(
+                    ticker=ticker, action="SELL", fill_price=adjusted_stop,
+                    quantity=fill.quantity, timestamp=fill.timestamp,
+                )
+                portfolio.record_exit(
+                    ticker, exit_fill, signal_price=signal["close"]
+                )
+                # Log as entry but flag the severe slippage condition
+                slippage_note = (f" (SEVERE SLIPPAGE: stopped out on entry, "
+                               f"-{loss_pct:.1f}% from signal price)")
+                buys.append(f"{ticker} x{qty} @ {fill.fill_price:.2f}{slippage_note}")
+            else:
+                buys.append(f"{ticker} x{qty} @ {fill.fill_price:.2f}"
+                            f"{_slippage_tag(signal['close'], fill.fill_price, 'BUY')}")
+            resolved.add(ticker)
+        except Exception as e:
+            raise ExecutionInterrupted(
+                e, buys, sells, skipped,
+                [t for t in tickers if t not in resolved]
+            )
 
     for ticker, signal in sell_signals:
-        if not limit_tracker.can_sell(daily_sell_limit):
-            skipped.append(f"{ticker}(daily sell limit reached)")
-            continue
-        if ticker not in portfolio.positions:
-            skipped.append(f"{ticker}(no position)")
-            continue
-        qty = portfolio.positions[ticker]["quantity"]
-        fill = broker.place_order(OrderRequest(ticker, "SELL", qty))
-        portfolio.record_exit(ticker, fill, signal_price=signal["close"])
-        limit_tracker.record_sell()
-        sells.append(f"{ticker} x{qty} @ {fill.fill_price:.2f}"
-                     f"{_slippage_tag(signal['close'], fill.fill_price, 'SELL')}")
+        try:
+            if not limit_tracker.can_sell(daily_sell_limit):
+                skipped.append(f"{ticker}(daily sell limit reached)")
+                resolved.add(ticker)
+                continue
+            if ticker not in portfolio.positions:
+                skipped.append(f"{ticker}(no position)")
+                resolved.add(ticker)
+                continue
+            qty = portfolio.positions[ticker]["quantity"]
+            fill = broker.place_order(OrderRequest(ticker, "SELL", qty))
+
+            # Order not filled (cancelled, partially filled, etc.)
+            if fill is None:
+                skipped.append(f"{ticker}(order not filled)")
+                resolved.add(ticker)
+                continue
+
+            portfolio.record_exit(ticker, fill, signal_price=signal["close"])
+            limit_tracker.record_sell()
+            sells.append(f"{ticker} x{qty} @ {fill.fill_price:.2f}"
+                         f"{_slippage_tag(signal['close'], fill.fill_price, 'SELL')}")
+            resolved.add(ticker)
+        except Exception as e:
+            raise ExecutionInterrupted(
+                e, buys, sells, skipped,
+                [t for t in tickers if t not in resolved]
+            )
 
     return buys, sells, skipped
 

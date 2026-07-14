@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from Strategy_Auto_Trader.broker.symbols import ibkr_contract_params, sizing_price
+from Strategy_Auto_Trader.broker.symbols import (
+    ibkr_contract_params,
+    yfinance_ticker,
+    sizing_price,
+)
 
 
 class TestIbkrContractParams:
@@ -25,6 +29,46 @@ class TestIbkrContractParams:
 
     def test_single_letter_lse_symbol(self):
         assert ibkr_contract_params("R.L") == ("R", "LSE", "GBP")
+
+
+class TestYfinanceTicker:
+    def test_lse_gbp_contract_maps_back_to_lse_ticker(self):
+        assert yfinance_ticker("HSBA", "GBP") == "HSBA.L"
+
+    def test_lse_share_class_dot_becomes_hyphen(self):
+        assert yfinance_ticker("BT.A", "GBP") == "BT-A.L"
+
+    def test_us_usd_contract_unchanged(self):
+        assert yfinance_ticker("SPY", "USD") == "SPY"
+
+    def test_us_usd_with_dot_class_preserved(self):
+        assert yfinance_ticker("BRK.B", "USD") == "BRK.B"
+
+    def test_single_letter_lse_symbol(self):
+        assert yfinance_ticker("R", "GBP") == "R.L"
+
+    def test_round_trip_hsba(self):
+        symbol, exchange, currency = ibkr_contract_params("HSBA.L")
+        assert yfinance_ticker(symbol, currency) == "HSBA.L"
+
+    def test_round_trip_bt_a(self):
+        symbol, exchange, currency = ibkr_contract_params("BT-A.L")
+        assert yfinance_ticker(symbol, currency) == "BT-A.L"
+
+    def test_round_trip_spy(self):
+        symbol, exchange, currency = ibkr_contract_params("SPY")
+        assert yfinance_ticker(symbol, currency) == "SPY"
+
+    def test_round_trip_brk_b(self):
+        symbol, exchange, currency = ibkr_contract_params("BRK.B")
+        assert yfinance_ticker(symbol, currency) == "BRK.B"
+
+    def test_cross_listed_collision_prevention(self):
+        us_bp = yfinance_ticker("BP", "USD")
+        uk_bp = yfinance_ticker("BP", "GBP")
+        assert us_bp == "BP"
+        assert uk_bp == "BP.L"
+        assert us_bp != uk_bp
 
 
 class TestSizingPrice:

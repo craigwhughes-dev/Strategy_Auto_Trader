@@ -13,11 +13,46 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ..broker.types import FillResult, OrderRequest
 from ..core.atomic_io import atomic_write_json
+
+
+def _place_order_with_retry(
+    broker: object, req: OrderRequest, logger: logging.Logger, max_retries: int = 3
+) -> FillResult | None:
+    """place_order() with reconnect-and-retry on transient connection errors.
+
+    Manual sells hit the same lazy first-trade broker-connect race that
+    live_daemon.execute_signals_with_retry() already handles for the automated
+    signal path (the daemon defers broker.connect() until the first trade
+    attempt, so a manual command arriving right after startup/restart can hit
+    a not-yet-connected socket). Mirrors that reconnect pattern instead of
+    failing the command permanently on attempt 1.
+    """
+    for attempt in range(max_retries):
+        try:
+            return broker.place_order(req)
+        except (ConnectionError, OSError, TimeoutError) as e:
+            if attempt >= max_retries - 1:
+                raise
+            wait_secs = 2 ** attempt
+            logger.warning(
+                f"place_order connection error (attempt {attempt + 1}/{max_retries}): {e}. "
+                f"Reconnecting in {wait_secs}s..."
+            )
+            time.sleep(wait_secs)
+            try:
+                broker.disconnect()
+                time.sleep(0.5)
+                broker.connect()
+                logger.info("Broker reconnected successfully")
+            except Exception as reconnect_err:
+                logger.warning(f"Reconnect attempt failed: {reconnect_err}")
+    return None  # unreachable: loop always returns or raises
 
 
 def _ensure_command_dirs(commands_dir: Path) -> None:
@@ -173,7 +208,9 @@ def _execute_sell(
 
     try:
         qty = portfolio.positions[ticker]["quantity"]
-        fill = broker.place_order(OrderRequest(ticker, "SELL", qty))
+        fill = _place_order_with_retry(broker, OrderRequest(ticker, "SELL", qty), logger)
+        if fill is None:
+            return False, None, f"Order not filled for {ticker}"
         portfolio.record_exit(ticker, fill)
         return True, fill, ""
     except Exception as e:
@@ -198,7 +235,10 @@ def _execute_sell_all(
     for ticker in list(portfolio.positions.keys()):
         try:
             qty = portfolio.positions[ticker]["quantity"]
-            fill = broker.place_order(OrderRequest(ticker, "SELL", qty))
+            fill = _place_order_with_retry(broker, OrderRequest(ticker, "SELL", qty), logger)
+            if fill is None:
+                errors.append(f"{ticker}: order not filled")
+                continue
             portfolio.record_exit(ticker, fill)
             fills.append(fill)
         except Exception as e:

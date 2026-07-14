@@ -22,6 +22,7 @@ from Strategy_Auto_Trader.markov_cli.manual_commands import (
     _move_to_done,
     _move_to_pending,
     _parse_iso_timestamp,
+    _place_order_with_retry,
     _validate_command,
     _write_result,
     process_manual_commands,
@@ -444,6 +445,105 @@ def test_write_result_expired(commands_dir):
     assert result_path is not None
     result = json.loads((commands_dir / "results" / "test-789.json").read_text(encoding="utf-8"))
     assert result["Status"] == "expired"
+
+
+# -- _place_order_with_retry (item 10) ------------------------------------
+
+
+def test_place_order_with_retry_succeeds_first_try(fake_broker):
+    from Strategy_Auto_Trader.broker.types import OrderRequest
+    fill = _place_order_with_retry(fake_broker, OrderRequest("AZN.L", "SELL", 5), mock.Mock())
+    assert fill.ticker == "AZN.L"
+    assert fill.quantity == 5
+
+
+def test_place_order_with_retry_recovers_after_connection_error(monkeypatch):
+    from Strategy_Auto_Trader.broker.types import OrderRequest
+    from Strategy_Auto_Trader.markov_cli import manual_commands
+    monkeypatch.setattr(manual_commands.time, "sleep", lambda s: None)
+
+    class FlakyBroker:
+        def __init__(self):
+            self.attempts = 0
+            self.connect_calls = 0
+
+        def place_order(self, order):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise ConnectionError("not connected to 127.0.0.1:7497")
+            return FillResult("AZN.L", "SELL", 100.0, order.quantity,
+                               datetime.now(timezone.utc).isoformat())
+
+        def connect(self):
+            self.connect_calls += 1
+
+        def disconnect(self):
+            pass
+
+    broker = FlakyBroker()
+    fill = _place_order_with_retry(broker, OrderRequest("AZN.L", "SELL", 5), mock.Mock())
+    assert fill is not None
+    assert fill.ticker == "AZN.L"
+    assert broker.attempts == 2
+    assert broker.connect_calls == 1
+
+
+def test_place_order_with_retry_raises_after_max_retries(monkeypatch):
+    from Strategy_Auto_Trader.broker.types import OrderRequest
+    from Strategy_Auto_Trader.markov_cli import manual_commands
+    monkeypatch.setattr(manual_commands.time, "sleep", lambda s: None)
+
+    class AlwaysDownBroker:
+        def __init__(self):
+            self.attempts = 0
+
+        def place_order(self, order):
+            self.attempts += 1
+            raise ConnectionError("not connected to 127.0.0.1:7497")
+
+        def connect(self):
+            pass
+
+        def disconnect(self):
+            pass
+
+    broker = AlwaysDownBroker()
+    with pytest.raises(ConnectionError):
+        _place_order_with_retry(broker, OrderRequest("AZN.L", "SELL", 5), mock.Mock())
+    assert broker.attempts == 3
+
+
+def test_execute_sell_recovers_from_transient_connection_error(fake_portfolio, monkeypatch):
+    """_execute_sell must not permanently fail a manual sell on the exact
+    lazy-broker-connect race observed live: command arrives right after daemon
+    restart, before broker.connect() has been called for the first trade."""
+    from Strategy_Auto_Trader.markov_cli import manual_commands
+    monkeypatch.setattr(manual_commands.time, "sleep", lambda s: None)
+
+    fill_buy = FillResult("AZN.L", "BUY", 100.0, 10, datetime.now(timezone.utc).isoformat())
+    fake_portfolio.record_entry("AZN.L", fill_buy, 0.10, 95.0, 115.0, market="ftse")
+
+    class FlakyBroker:
+        def __init__(self):
+            self.attempts = 0
+
+        def place_order(self, order):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise ConnectionError("not connected to 127.0.0.1:7497")
+            return FillResult("AZN.L", "SELL", 110.0, order.quantity,
+                               datetime.now(timezone.utc).isoformat())
+
+        def connect(self):
+            pass
+
+        def disconnect(self):
+            pass
+
+    success, fill, error = _execute_sell("AZN.L", fake_portfolio, FlakyBroker(), mock.Mock())
+    assert success
+    assert fill.ticker == "AZN.L"
+    assert "AZN.L" not in fake_portfolio.positions
 
 
 # -- Execute Tests -------------------------------------------------------

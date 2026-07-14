@@ -421,6 +421,17 @@ def write_app_status_snapshot(
     atomic_write_json(status_path, snapshot)
 
 
+def _write_app_status_snapshot_safe(
+    portfolio: object, daemon_state: dict, config: dict, last_cycle_hour: dict, logger: logging.Logger
+) -> None:
+    """write_app_status_snapshot(), swallowing errors so a snapshot failure
+    can't interrupt the ticker-processing loop it's interleaved into."""
+    try:
+        write_app_status_snapshot(portfolio, daemon_state, config, last_cycle_hour, logger)
+    except Exception as e:
+        logger.error(f"Failed to write app_status.json: {e}", exc_info=True)
+
+
 def is_trading_hours(market_cfg: dict, logger: logging.Logger) -> bool:
     """Check if market is currently in trading hours."""
     tz = ZoneInfo(market_cfg["timezone"])
@@ -518,6 +529,7 @@ def execute_signals_with_retry(
     logger: logging.Logger,
     max_retries: int = 3,
     market_currency: str = "",
+    daemon_state: dict | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
     """Execute signals with automatic reconnect and retry on socket errors.
 
@@ -528,7 +540,7 @@ def execute_signals_with_retry(
     Returns (buys, sells, skipped) tuple. On connection failure after max_retries,
     returns empty results and continues (doesn't halt daemon).
     """
-    from .execute import execute_signals
+    from .execute import execute_signals, ExecutionInterrupted
 
     for attempt in range(max_retries):
         try:
@@ -538,6 +550,46 @@ def execute_signals_with_retry(
                 market_name=market_name,
                 market_currency=market_currency,
             )
+        except ExecutionInterrupted as exc:
+            if exc.buys or exc.sells:
+                logger.critical(
+                    f"[{market_name}] Execution interrupted mid-batch after "
+                    f"{len(exc.buys)} buy(s)/{len(exc.sells)} sell(s) already placed "
+                    f"— halting new entries, not retrying. Unresolved: {exc.unresolved}. "
+                    f"Error: {exc.original}"
+                )
+                if daemon_state is not None:
+                    daemon_state["halt_new_entries"] = True
+                    save_daemon_state(daemon_state)
+                try:
+                    from ..output.emailer import send_execution_interrupted_alert
+                    send_execution_interrupted_alert(
+                        market_name, exc.original, exc.buys, exc.sells, exc.unresolved
+                    )
+                except Exception as email_err:
+                    logger.error(f"[{market_name}] Execution-interrupted alert email failed: {email_err}")
+                return exc.buys, exc.sells, exc.skipped + exc.unresolved
+            else:
+                logger.warning(
+                    f"[{market_name}] Execution interrupted before any order placed "
+                    f"(attempt {attempt + 1}/{max_retries}): {exc.original}. Retrying..."
+                )
+                if attempt < max_retries - 1:
+                    wait_secs = 2 ** attempt
+                    time.sleep(wait_secs)
+                    try:
+                        broker.disconnect()
+                        time.sleep(0.5)
+                        broker.connect()
+                        logger.info(f"[{market_name}] Broker reconnected successfully")
+                    except Exception as reconnect_err:
+                        logger.warning(f"[{market_name}] Reconnect attempt failed: {reconnect_err}")
+                else:
+                    logger.error(
+                        f"[{market_name}] Execution interrupt persists after {max_retries} attempts. "
+                        f"Skipping signals for this cycle."
+                    )
+                    return [], [], ticker_list
         except (ConnectionError, OSError, TimeoutError) as e:
             if attempt < max_retries - 1:
                 wait_secs = 2 ** attempt
@@ -607,12 +659,16 @@ def process_cycle(
     portfolio: object,
     broker: object,
     logger: logging.Logger,
+    last_cycle_hour: dict | None = None,
 ) -> int:
     """Run one market cycle: prioritize open positions, then round-robin through candidates.
 
     Returns number of tickers processed.
     """
     from .batch import process_ticker
+
+    if last_cycle_hour is None:
+        last_cycle_hour = {}
 
     in_scope = load_in_scope_tickers(market_name, logger)
     if not in_scope:
@@ -642,6 +698,12 @@ def process_cycle(
             skipped_budget.append(ticker)
             break
 
+        # Check for manual sell/pause commands between tickers rather than only
+        # once per full market pass — a user-initiated sell shouldn't queue
+        # behind an entire round-robin scan (can run ~20+ min).
+        process_manual_commands_wrapper(config, portfolio, broker, logger, daemon_state)
+        _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
+
         logger.debug(f"  Processing {ticker}")
         ticker_cfg = {"ticker": ticker}
         result = process_ticker(ticker_cfg, defaults, send_email=True)
@@ -667,6 +729,9 @@ def process_cycle(
                 logger.debug(f"  {ticker}: budget near exhausted ({now_remaining:.0f}s left)")
                 skipped_budget.append(ticker)
                 break
+
+            process_manual_commands_wrapper(config, portfolio, broker, logger, daemon_state)
+            _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
 
             logger.debug(f"  Processing {ticker}")
             ticker_cfg = {"ticker": ticker}
@@ -705,6 +770,7 @@ def process_cycle(
                     market_name, ticker_list, DATA_DIR, portfolio, limit_tracker, broker,
                     daily_buy_limit, daily_sell_limit, logger,
                     market_currency=market_currency,
+                    daemon_state=daemon_state,
                 )
                 logger.info(f"  BUY:  {len(buys)}, SELL: {len(sells)}, Skipped: {len(skipped)}")
                 for b in buys:
@@ -764,6 +830,13 @@ def run_reconciliation(
     """
     from ..broker.reconcile import reconcile_positions
 
+    if not broker.is_connected():
+        try:
+            broker.connect()
+        except Exception as e:
+            logger.error(f"Reconciliation: broker connect failed: {e}")
+            return "error"
+
     try:
         broker_positions = broker.get_open_positions()
     except Exception as e:
@@ -822,7 +895,37 @@ def check_nightly_reconciliation(
         # it retries on the next poll within the run window.
         if outcome in ("clean", "mismatch"):
             daemon_state["last_reconcile_date"] = today
+            daemon_state["reconciliation_consecutive_error_days"] = 0
+            daemon_state["reconciliation_alert_sent"] = False
             save_daemon_state(daemon_state)
+        elif outcome == "error":
+            # Count at most one error per calendar day — the run window can
+            # retry every ~60s for 30+ minutes, and that retry storm must not
+            # itself look like an escalating multi-day outage.
+            if daemon_state.get("reconciliation_error_date") != today:
+                daemon_state["reconciliation_error_date"] = today
+                daemon_state["reconciliation_consecutive_error_days"] = (
+                    daemon_state.get("reconciliation_consecutive_error_days", 0) + 1
+                )
+                save_daemon_state(daemon_state)
+            if (daemon_state.get("reconciliation_consecutive_error_days", 0) >= 2
+                    and not daemon_state.get("reconciliation_alert_sent")):
+                logger.critical(
+                    "Reconciliation has failed to run for "
+                    f"{daemon_state['reconciliation_consecutive_error_days']} consecutive days "
+                    "— broker connection may be unreachable at the scheduled run time."
+                )
+                try:
+                    from ..output.emailer import send_reconciliation_alert
+                    send_reconciliation_alert(
+                        [f"Reconciliation has not completed successfully for "
+                         f"{daemon_state['reconciliation_consecutive_error_days']} consecutive days "
+                         "(broker unreachable at run time)"]
+                    )
+                except Exception as e:
+                    logger.error(f"Reconciliation: escalation alert email failed: {e}")
+                daemon_state["reconciliation_alert_sent"] = True
+                save_daemon_state(daemon_state)
 
 
 def process_manual_commands_wrapper(config: dict, portfolio: object, broker: object, logger: logging.Logger, daemon_state: dict) -> None:
@@ -957,7 +1060,8 @@ def main(argv: list[str] | None = None) -> int:
 
                         process_cycle(
                             market_name, market_cfg, config,
-                            daemon_state, portfolio, broker, logger
+                            daemon_state, portfolio, broker, logger,
+                            last_cycle_hour=last_cycle_hour,
                         )
 
                         last_cycle_hour[market_name] = current_hour
@@ -972,10 +1076,7 @@ def main(argv: list[str] | None = None) -> int:
                 had_error = True
             finally:
                 # Write app_status.json snapshot ALWAYS, even on error — app needs fresh heartbeat
-                try:
-                    write_app_status_snapshot(portfolio, daemon_state, config, last_cycle_hour, logger)
-                except Exception as e:
-                    logger.error(f"Failed to write app_status.json: {e}", exc_info=True)
+                _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
 
                 # Sleep before next iteration (5s on error, normal interval on
                 # success); skip entirely on shutdown so Ctrl+C exits promptly

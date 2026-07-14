@@ -54,8 +54,7 @@ class KellySizer:
         self._trade_results.append(trade_pl)
         if self._use_kelly and len(self._trade_results) >= self._lookback:
             new_k = self.size(self._trade_results[-self._lookback:])
-            if new_k > 0:
-                self._current = new_k
+            self._current = new_k
 
     @property
     def position(self) -> float:

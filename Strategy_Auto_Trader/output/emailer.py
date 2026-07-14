@@ -232,6 +232,41 @@ def send_reconciliation_alert(discrepancies: list[str]) -> None:
     print(f"  Reconciliation alert sent: {subject}")
 
 
+def send_execution_interrupted_alert(
+    market_name: str, error: Exception, buys: list[str], sells: list[str], unresolved: list[str]
+) -> None:
+    """Alert when execution is interrupted mid-batch with orders potentially placed."""
+    buys_html = "".join(f'<li style="color:#b9f6ca;padding:4px 0">{b}</li>' for b in buys)
+    sells_html = "".join(f'<li style="color:#ffcdd2;padding:4px 0">{s}</li>' for s in sells)
+    unresolved_html = "".join(f'<li style="color:#ffb74d;padding:4px 0">{u}</li>' for u in unresolved)
+
+    orders_section = ""
+    if buys:
+        orders_section += f"<h3 style=\"color:#b9f6ca;margin:12px 0 8px\">BUY orders placed:</h3><ul style=\"margin:0;padding-left:20px\">{buys_html}</ul>"
+    if sells:
+        orders_section += f"<h3 style=\"color:#ffcdd2;margin:12px 0 8px\">SELL orders placed:</h3><ul style=\"margin:0;padding-left:20px\">{sells_html}</ul>"
+
+    html = f"""<html><body style="margin:0;padding:20px;background:#0f1117;font-family:system-ui,sans-serif;color:#e0e0e0">
+<div style="max-width:700px;margin:0 auto">
+  <h1 style="color:#ef9a9a;margin:0 0 4px">Execution interrupted</h1>
+  <div style="color:#888;margin-bottom:16px">[{market_name}] Connection lost after orders were placed</div>
+  <div style="background:#2a1a1a;border:1px solid #4a2a2a;border-radius:8px;padding:12px 16px;margin:16px 0">
+    <p style="color:#ddd;margin:0 0 8px"><strong>Error:</strong> {error}</p>
+    {orders_section}
+    <h3 style="color:#ffb74d;margin:12px 0 8px">Outcome unknown (check broker):</h3>
+    <ul style="margin:0;padding-left:20px">{unresolved_html}</ul>
+  </div>
+  <p style="color:#ddd">New entries are halted. Check the broker account to verify filled orders,
+  then resolve any discrepancies manually. The next nightly reconciliation pass will confirm
+  broker state and re-enable buying if all positions match.</p>
+</div></body></html>"""
+
+    n_orders = len(buys) + len(sells)
+    subject = f"EXECUTION INTERRUPTED [{market_name}]: {n_orders} order(s) placed before failure — new entries halted"
+    _send(subject, html)
+    print(f"  Execution-interrupted alert sent: {subject}")
+
+
 def send_portfolio_status(positions: list[dict]) -> None:
     """Send a portfolio status email showing all active trades with P&L since entry."""
     if not positions:

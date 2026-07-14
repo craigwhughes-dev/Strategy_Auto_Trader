@@ -117,3 +117,75 @@ class TestEmailer:
             user, password = _get_smtp_creds()
             assert user == "user@example.com"
             assert password == "secret"
+
+    @mock.patch("Strategy_Auto_Trader.output.emailer._send")
+    def test_send_execution_interrupted_alert_with_orders(self, mock_send):
+        from Strategy_Auto_Trader.output.emailer import send_execution_interrupted_alert
+
+        error = RuntimeError("Socket lost after place_order")
+        send_execution_interrupted_alert(
+            "ftse",
+            error,
+            buys=["AAPL x100 @ 150.0", "MSFT x50 @ 350.0"],
+            sells=["GOOG x75 @ 2800.0"],
+            unresolved=["TSLA", "NVDA"],
+        )
+
+        mock_send.assert_called_once()
+        call_args = mock_send.call_args
+        subject = call_args[0][0]
+        html = call_args[0][1]
+
+        assert "EXECUTION INTERRUPTED" in subject
+        assert "ftse" in subject
+        assert "3 order(s) placed" in subject  # 2 buys + 1 sell
+        assert "AAPL" in html
+        assert "MSFT" in html
+        assert "GOOG" in html
+        assert "TSLA" in html
+        assert "NVDA" in html
+        assert "Socket lost" in html
+
+    @mock.patch("Strategy_Auto_Trader.output.emailer._send")
+    def test_send_execution_interrupted_alert_no_sells(self, mock_send):
+        from Strategy_Auto_Trader.output.emailer import send_execution_interrupted_alert
+
+        error = TimeoutError("Connection timeout")
+        send_execution_interrupted_alert(
+            "sp500",
+            error,
+            buys=["AAPL x100 @ 150.0"],
+            sells=[],
+            unresolved=["MSFT", "GOOG", "TSLA"],
+        )
+
+        mock_send.assert_called_once()
+        call_args = mock_send.call_args
+        subject = call_args[0][0]
+        html = call_args[0][1]
+
+        assert "sp500" in subject
+        assert "1 order(s) placed" in subject
+        assert "AAPL" in html
+        assert "MSFT" in html
+        assert "Connection timeout" in html
+
+    @mock.patch("Strategy_Auto_Trader.output.emailer._send")
+    def test_send_execution_interrupted_alert_only_sells(self, mock_send):
+        from Strategy_Auto_Trader.output.emailer import send_execution_interrupted_alert
+
+        error = OSError("[Errno 10054] Connection reset by peer")
+        send_execution_interrupted_alert(
+            "ftse",
+            error,
+            buys=[],
+            sells=["AAPL x100 @ 145.0", "MSFT x50 @ 340.0"],
+            unresolved=["GOOG"],
+        )
+
+        mock_send.assert_called_once()
+        call_args = mock_send.call_args
+        subject = call_args[0][0]
+
+        assert "2 order(s) placed" in subject
+        assert "ftse" in subject
