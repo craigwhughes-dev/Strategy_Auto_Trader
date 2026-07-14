@@ -32,12 +32,15 @@ class TestReport:
 
     def test_build_vote_rows_html_contains_labels(self):
         from Strategy_Auto_Trader.output.report import _build_vote_rows_html
-        votes = {"markov": 1, "rsi": -1, "sma20": 0}
+        votes = {"markov": 1, "rsi": -1, "trend": 0, "volume": 1, "hmm": -1}
         html = _build_vote_rows_html(votes, "Bull")
         assert "Markov (Bull)" in html
+        assert "Trend" in html
+        assert "Volume" in html
+        assert "HiddenMarkovModel" in html
         assert "&#x25B2; Bull" in html  # markov=1
         assert "&#x25BC; Bear" in html  # rsi=-1
-        assert "&#x25A0; Neutral" in html  # sma20=0
+        assert "&#x25A0; Neutral" in html  # trend=0
 
     def test_build_trade_history_rows_html_empty(self):
         from Strategy_Auto_Trader.output.report import _build_trade_history_rows_html

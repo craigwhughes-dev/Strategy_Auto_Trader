@@ -14,7 +14,13 @@ A secondary quality gate acts as a veto: even if the vote score reaches the buy
 threshold, the entry is blocked if the market context looks weak (e.g. RSI below
 50, below the SMA200, and thin volume — any two of five weak conditions blocks).
 While in a trade the same gate watches for adverse conditions and forces an early
-exit if at least two deterioration signals fire together.
+exit if at least two deterioration signals fire together — but only after
+min_hold_bars has elapsed (~2 trading days), same as a plain composite-signal
+SELL. consolidated_engine.py exposes an adverse_exit_cooldown_bars knob that
+can let this fire sooner, but backtesting it (all 4 strategies, 2 tickers) made
+things worse across the board — more than double the trade count and lower P&L
+in every case, the entry-noise whipsaw failure mode this was meant to avoid.
+Left at its default (== min_hold_bars) everywhere; not a live tuning knob.
 
 Risk management is simple: take profit at +15% or cut the loss at -5%. There is
 no trailing stop — the strategy relies on the signal gate to exit rather than on
@@ -30,7 +36,8 @@ Weighted vote: HMM (1.5) + RSI (1.5) + SMA200 (2.0) + trend SMA20/50 (1.0)
 + volume (1.0).  Markov slot zeroed (HMM carries that role).
 Buy threshold 3.0 (out of max ~7.5), sell -3.0.
 Quality gate vetoes BUY if >= 2 of 5 weak-context signals are true;
-forces SELL if >= 2 of 5 adverse-exit signals are true while in a position.
+forces SELL if >= 2 of 5 adverse-exit signals are true while in a position
+(after min_hold_bars — backtesting confirmed bypassing this hurts P&L).
 
 Exit
 ----
@@ -105,6 +112,7 @@ class DefaultEntry:
             raw_flag=raw["flag"],
             score=float(raw.get("score", 0.0)),
             reason=gated.get("reason", ""),
+            gate_fired=gated.get("gate_fired", False),
         )
 
 

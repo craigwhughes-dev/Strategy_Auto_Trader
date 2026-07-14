@@ -101,6 +101,7 @@ class TrendEntry:
             raw_flag=raw["flag"],
             score=float(raw.get("score", 0.0)),
             reason=gated.get("reason", ""),
+            gate_fired=gated.get("gate_fired", False),
         )
 
 

@@ -55,15 +55,21 @@ def _apply_quality_gate(sig: dict, mom: dict, markov_sig: float | None, currentl
     """
     gated = dict(sig)
     gated["reason"] = sig.get("reason", "")
+    gated["gate_fired"] = False
 
     if sig.get("flag") == "BUY" and not currently_in and _is_weak_buy_context(markov_sig, mom):
         gated["flag"] = "HOLD"
         gated["reason"] = "quality_gate: weak buy context"
+        gated["gate_fired"] = True
         return gated
 
+    # gate_fired distinguishes this SELL from a plain composite-signal SELL —
+    # callers use it to bypass min_hold_bars, since a genuinely adverse context
+    # shouldn't wait out the whipsaw-noise protection meant for fresh entries.
     if currently_in and _is_adverse_exit_context(markov_sig, mom):
         gated["flag"] = "SELL"
         gated["reason"] = "quality_gate: adverse exit context"
+        gated["gate_fired"] = True
         return gated
 
     return gated

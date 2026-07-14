@@ -97,3 +97,35 @@ class TestQualityGate:
         sig = {"flag": "BUY", "score": 4.0, "max_score": 4.0}
         gate = _apply_quality_gate(sig, self._mom(), None, False)
         assert gate["flag"] == "BUY"
+
+    # -- gate_fired field tests -------------------------------------------
+
+    def test_apply_quality_gate_sets_gate_fired_true_on_weak_buy_veto(self):
+        """gate_fired should be True when quality gate vetoes a weak BUY."""
+        from Strategy_Auto_Trader.core.quality_gate import _apply_quality_gate
+        sig = {"flag": "BUY", "score": 3.0, "max_score": 4.0}
+        mom = self._mom(above_sma50=False, above_sma200=False, volume_ratio=0.8)
+        gate = _apply_quality_gate(sig, mom, 0.25, False)
+        assert gate["flag"] == "HOLD"
+        assert "quality_gate" in gate["reason"]
+        assert gate["gate_fired"] is True
+
+    def test_apply_quality_gate_sets_gate_fired_true_on_adverse_exit(self):
+        """gate_fired should be True when quality gate forces an adverse-context SELL."""
+        from Strategy_Auto_Trader.core.quality_gate import _apply_quality_gate
+        sig = {"flag": "HOLD", "score": 0.0, "max_score": 4.0}
+        mom = self._mom(cur_rsi=35.0, recent_cross_below_40=True,
+                         above_sma20=False, above_sma50=False,
+                         above_sma200=False, volume_ratio=0.6)
+        gate = _apply_quality_gate(sig, mom, -0.25, True)
+        assert gate["flag"] == "SELL"
+        assert "quality_gate" in gate["reason"]
+        assert gate["gate_fired"] is True
+
+    def test_apply_quality_gate_gate_fired_false_when_not_overridden(self):
+        """gate_fired should be False when quality gate passes the signal through unchanged."""
+        from Strategy_Auto_Trader.core.quality_gate import _apply_quality_gate
+        sig = {"flag": "BUY", "score": 4.0, "max_score": 4.0}
+        gate = _apply_quality_gate(sig, self._mom(), 0.5, False)
+        assert gate["flag"] == "BUY"
+        assert gate["gate_fired"] is False

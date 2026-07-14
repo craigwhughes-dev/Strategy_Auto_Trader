@@ -67,7 +67,8 @@ def _table(*rows: str, width: str = "100%") -> str:
 
 def _build_vote_rows_html(votes: dict, current_state_name: str) -> str:
     vote_names = {"markov": f"Markov ({current_state_name})", "rsi": "RSI(14)",
-                  "sma20": "SMA 20", "sma50": "SMA 50", "sma200": "SMA 200"}
+                  "sma200": "SMA 200", "trend": "Trend", "volume": "Volume",
+                  "hmm": "HiddenMarkovModel"}
     vote_rows = ""
     for key, v in votes.items():
         bg = _VOTE_COLOUR[v]; fg = _VOTE_TEXT[v]

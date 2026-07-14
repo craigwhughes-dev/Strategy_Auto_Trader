@@ -59,3 +59,4 @@ class EntryDecision:
     raw_flag: str    # pre-gate composite signal (used by transition guard)
     score: float     # weighted vote score
     reason: str      # gate reason if overridden, else empty
+    gate_fired: bool = False  # True iff _apply_quality_gate overrode the raw signal

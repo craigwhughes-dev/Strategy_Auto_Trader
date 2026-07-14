@@ -441,3 +441,87 @@ class TestConsolidatedEngine:
         assert not result["detail"].empty
         assert np.isfinite(result["final_portfolio"])
         assert set(result["detail"]["trade_event"].unique()).issubset({"", "BUY", "SELL"})
+
+    # -- adverse_exit_cooldown_bars tests --------------------------------
+
+    def test_consolidated_adverse_exit_cooldown_bypasses_min_hold(self):
+        """With adverse_exit_cooldown_bars=0, an adverse-exit SELL should fire before min_hold_bars."""
+        # Construct: bear baseline (transition guard), bull rise (BUY entry), sharp drop (adverse exit).
+        # Adverse context triggered by steep price drop + regime flip.
+        n = 250
+        close = np.concatenate([
+            np.linspace(100, 98, 20),      # short bear baseline
+            np.linspace(98, 120, 30),      # rising → BUY transition around bar 20-35
+            np.linspace(120, 80, 35),      # sharp drop → triggers adverse (RSI<40, below SMA20/50)
+            np.full(165, 80),               # flat to avoid other exits
+        ])
+        p_bull_seq = [0.20] * 20 + [0.85] * 30 + [0.05] * 200
+
+        result = _run_consolidated_fake(
+            close, p_bull_seq,
+            min_train_bars=30, hmm_refit_bars=30,
+            regime_smooth=1, buy_threshold=1.0,
+            min_hold_bars=30, adverse_exit_cooldown_bars=0,
+            volume_min_ratio=0.0,
+            stop_loss_pct=0.35, take_profit_pct=0.60,
+            entry_prob=0.65, exit_prob=0.40,
+        )
+
+        detail = result["detail"]
+        buys = detail[detail["trade_event"] == "BUY"]
+        sells = detail[detail["trade_event"] == "SELL"]
+
+        # Should have at least one BUY from the bear->bull transition
+        assert len(buys) >= 1, f"expected at least one BUY entry, got {len(buys)}"
+        assert len(sells) >= 1, f"expected at least one SELL, got {len(sells)}"
+
+        # Verify the SELL fired before min_hold_bars with adverse_exit_cooldown_bars=0
+        entry_idx = detail.index.get_loc(buys.index[0])
+        exit_idx = detail.index.get_loc(sells.index[0])
+        bars_held = exit_idx - entry_idx
+        # With adverse_exit_cooldown_bars=0, should fire well before min_hold_bars=30
+        assert bars_held < 30, f"expected early exit before min_hold_bars=30, got bars_held={bars_held}"
+        # Verify it was a quality-gate adverse exit
+        assert "quality_gate" in str(sells.iloc[0]["sell_reason"]), \
+            f"expected quality_gate in reason, got: {sells.iloc[0]['sell_reason']}"
+
+    def test_consolidated_adverse_exit_cooldown_none_matches_old_behavior(self):
+        """With adverse_exit_cooldown_bars=None (default), adverse-exit SELL should wait min_hold_bars."""
+        # Same scenario as test 1, but WITHOUT adverse_exit_cooldown_bars (defaults to None).
+        # Default behavior: quality-gate adverse exits respect the full min_hold_bars.
+        n = 250
+        close = np.concatenate([
+            np.linspace(100, 98, 20),      # short bear baseline
+            np.linspace(98, 120, 30),      # rising → BUY transition
+            np.linspace(120, 80, 35),      # sharp drop → adverse context
+            np.full(165, 80),               # flat
+        ])
+        p_bull_seq = [0.20] * 20 + [0.85] * 30 + [0.05] * 200
+
+        result = _run_consolidated_fake(
+            close, p_bull_seq,
+            min_train_bars=30, hmm_refit_bars=30,
+            regime_smooth=1, buy_threshold=1.0,
+            min_hold_bars=30,  # adverse_exit_cooldown_bars NOT specified, defaults to None
+            volume_min_ratio=0.0,
+            stop_loss_pct=0.35, take_profit_pct=0.60,
+            entry_prob=0.65, exit_prob=0.40,
+        )
+
+        detail = result["detail"]
+        buys = detail[detail["trade_event"] == "BUY"]
+        sells = detail[detail["trade_event"] == "SELL"]
+
+        # Should have at least one BUY
+        assert len(buys) >= 1, f"expected at least one BUY entry, got {len(buys)}"
+
+        # With default behavior, any quality-gate adverse SELL must NOT fire before min_hold_bars
+        if len(sells) > 0:
+            entry_idx = detail.index.get_loc(buys.index[0])
+            exit_idx = detail.index.get_loc(sells.index[0])
+            bars_held = exit_idx - entry_idx
+            # If a SELL happened before min_hold_bars, it should NOT be quality-gate
+            if bars_held < 30:
+                assert "quality_gate" not in str(sells.iloc[0]["sell_reason"]), \
+                    f"with default adverse_exit_cooldown_bars=None, quality-gate SELL should not " \
+                    f"fire before min_hold_bars=30, but got {bars_held} bars with reason: {sells.iloc[0]['sell_reason']}"

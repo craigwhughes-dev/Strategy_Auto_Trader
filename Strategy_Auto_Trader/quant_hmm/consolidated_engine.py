@@ -228,6 +228,7 @@ class _PluginEntryAdapter:
             raw_flag=raw["flag"],
             score=float(raw.get("score", 0.0)),
             reason=gated.get("reason", ""),
+            gate_fired=gated.get("gate_fired", False),
         )
 
 
@@ -273,6 +274,7 @@ def consolidated_backtest(
     vix_signal: int = 0,
     regime_smooth: int = 24,
     min_hold_bars: int = 48,
+    adverse_exit_cooldown_bars: int | None = None,
     # vote + quality-gate parameters
     rsi_period: int = 14,
     ma_fast: int = 20,
@@ -327,7 +329,9 @@ def consolidated_backtest(
     4. Max-hold-bars
     5. Parabolic SAR stop (optional)
     6. MACD bearish cross / RSI reversal / consolidation (optional)
-    7. composite_signal SELL + quality-gate adverse-exit → SELL (after min_hold_bars)
+    7a. quality-gate adverse-exit SELL (after adverse_exit_cooldown_bars, default
+        == min_hold_bars — set lower/0 to let it fire sooner than a plain signal SELL)
+    7b. plain composite_signal SELL (after min_hold_bars)
 
     Position sizing
     ---------------
@@ -358,6 +362,7 @@ def consolidated_backtest(
     )
 
     effective_weights = {**_CONSOLIDATED_WEIGHTS, **(weights or {})}
+    _cooldown_bars = min_hold_bars if adverse_exit_cooldown_bars is None else adverse_exit_cooldown_bars
 
     # Skip whole-run setup for indicators the active strategy weights at zero
     # (opt out with skip_unused_indicators=False, e.g. for strategy development).
@@ -528,13 +533,18 @@ def consolidated_backtest(
 
             if exit_hit:
                 trade_event = "SELL"
-            elif bars_held >= min_hold_bars:
-                # After minimum hold, also allow entry-strategy SELL signal
+            else:
                 sig_in = _entry.evaluate(regime_state, mom_snap, cur_vol_ratio, currently_in=True)
                 if sig_in.flag == "SELL":
-                    trade_event = "SELL"
-                    sell_reason = sig_in.reason or "signal"
-                    exit_hit = True
+                    # A quality-gate adverse-exit is treated as a real deterioration
+                    # signal and only waits out adverse_exit_cooldown_bars; a plain
+                    # composite-signal SELL still waits the full min_hold_bars so
+                    # fresh-entry noise doesn't cause an immediate whipsaw exit.
+                    hold_req = _cooldown_bars if sig_in.gate_fired else min_hold_bars
+                    if bars_held >= hold_req:
+                        trade_event = "SELL"
+                        sell_reason = sig_in.reason or "signal"
+                        exit_hit = True
 
             if exit_hit:
                 trade_pl = (cur_close - entry_price) / entry_price
