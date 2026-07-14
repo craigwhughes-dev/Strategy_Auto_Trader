@@ -74,15 +74,9 @@ def test_is_trading_hours_during_trading():
     logger = mock.Mock()
 
     # Wednesday 10:30 in Europe/London
-    with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
-        mock_now = mock.Mock()
-        mock_now.weekday.return_value = 2  # Wednesday
-        mock_now.time.return_value = datetime(2026, 7, 1, 10, 30).time()
-        mock_dt.now.return_value = mock_now
-        mock_dt.strptime = datetime.strptime
-
-        result = live_daemon.is_trading_hours(market_cfg, logger)
-        assert result is True
+    now = datetime(2026, 7, 1, 10, 30, tzinfo=ZoneInfo("Europe/London"))
+    result = live_daemon.is_trading_hours(market_cfg, logger, now=now)
+    assert result is True
 
 
 def test_is_trading_hours_before_open():
@@ -95,15 +89,9 @@ def test_is_trading_hours_before_open():
     logger = mock.Mock()
 
     # Wednesday 08:30 (before 09:00)
-    with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
-        mock_now = mock.Mock()
-        mock_now.weekday.return_value = 2  # Wednesday
-        mock_now.time.return_value = datetime(2026, 7, 1, 8, 30).time()
-        mock_dt.now.return_value = mock_now
-        mock_dt.strptime = datetime.strptime
-
-        result = live_daemon.is_trading_hours(market_cfg, logger)
-        assert result is False
+    now = datetime(2026, 7, 1, 8, 30, tzinfo=ZoneInfo("Europe/London"))
+    result = live_daemon.is_trading_hours(market_cfg, logger, now=now)
+    assert result is False
 
 
 def test_is_trading_hours_weekend():
@@ -116,15 +104,9 @@ def test_is_trading_hours_weekend():
     logger = mock.Mock()
 
     # Saturday 10:30
-    with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
-        mock_now = mock.Mock()
-        mock_now.weekday.return_value = 5  # Saturday
-        mock_now.time.return_value = datetime(2026, 7, 4, 10, 30).time()
-        mock_dt.now.return_value = mock_now
-        mock_dt.strptime = datetime.strptime
-
-        result = live_daemon.is_trading_hours(market_cfg, logger)
-        assert result is False
+    now = datetime(2026, 7, 4, 10, 30, tzinfo=ZoneInfo("Europe/London"))
+    result = live_daemon.is_trading_hours(market_cfg, logger, now=now)
+    assert result is False
 
 
 def test_next_round_robin_slice_advances_cursor():
@@ -416,31 +398,30 @@ class TestReconciliation:
         return b
 
     def test_reconciliation_connects_broker_when_not_connected(self, monkeypatch):
-        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
         broker = self._broker({"SPY": 10})
         broker.is_connected.return_value = False
         daemon_state = {}
 
         outcome = live_daemon.run_reconciliation(
             self._portfolio({"SPY": {"quantity": 10}}), broker, daemon_state, mock.Mock(),
+            save_state=lambda s: None,
         )
         assert outcome == "clean"
         broker.connect.assert_called_once()
         broker.get_open_positions.assert_called_once()
 
     def test_reconciliation_skips_connect_when_already_connected(self, monkeypatch):
-        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
         broker = self._broker({})
         daemon_state = {}
 
         live_daemon.run_reconciliation(
             self._portfolio({}), broker, daemon_state, mock.Mock(),
+            save_state=lambda s: None,
         )
         # Bare Mock().is_connected() is truthy, matching an already-connected broker.
         broker.connect.assert_not_called()
 
     def test_reconciliation_connect_failure_returns_error(self, monkeypatch):
-        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
         broker = mock.Mock()
         broker.is_connected.return_value = False
         broker.connect.side_effect = ConnectionError("TWS not running")
@@ -448,35 +429,36 @@ class TestReconciliation:
 
         outcome = live_daemon.run_reconciliation(
             self._portfolio({}), broker, daemon_state, mock.Mock(),
+            save_state=lambda s: None,
         )
         assert outcome == "error"
         broker.get_open_positions.assert_not_called()
 
     def test_clean_pass_clears_halt(self, monkeypatch):
-        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
         daemon_state = {"halt_new_entries": True}
 
         outcome = live_daemon.run_reconciliation(
             self._portfolio({"SPY": {"quantity": 10}}),
             self._broker({"SPY": 10}),
             daemon_state, mock.Mock(),
+            save_state=lambda s: None,
         )
         assert outcome == "clean"
         assert daemon_state["halt_new_entries"] is False
         assert daemon_state["reconciliation_discrepancies"] == []
 
     def test_mismatch_sets_halt_and_emails(self, monkeypatch):
-        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
         sent = {}
-        from Strategy_Auto_Trader.output import emailer
-        monkeypatch.setattr(emailer, "send_reconciliation_alert",
-                            lambda d: sent.update(discrepancies=d))
+        def fake_alert(d):
+            sent.update(discrepancies=d)
         daemon_state = {}
 
         outcome = live_daemon.run_reconciliation(
             self._portfolio({"SPY": {"quantity": 10}}),
             self._broker({"SPY": 7}),
             daemon_state, mock.Mock(),
+            save_state=lambda s: None,
+            send_alert=fake_alert,
         )
         assert outcome == "mismatch"
         assert daemon_state["halt_new_entries"] is True
@@ -484,28 +466,28 @@ class TestReconciliation:
         assert len(sent["discrepancies"]) == 1
 
     def test_email_failure_does_not_mask_mismatch(self, monkeypatch):
-        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
-        from Strategy_Auto_Trader.output import emailer
-        monkeypatch.setattr(emailer, "send_reconciliation_alert",
-                            mock.Mock(side_effect=RuntimeError("smtp down")))
+        def fake_alert_fail(d):
+            raise RuntimeError("smtp down")
         daemon_state = {}
 
         outcome = live_daemon.run_reconciliation(
             self._portfolio({"SPY": {"quantity": 10}}),
             self._broker({}),
             daemon_state, mock.Mock(),
+            save_state=lambda s: None,
+            send_alert=fake_alert_fail,
         )
         assert outcome == "mismatch"
         assert daemon_state["halt_new_entries"] is True
 
     def test_broker_fetch_error_returns_error_and_keeps_halt(self, monkeypatch):
-        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
         broker = mock.Mock()
         broker.get_open_positions.side_effect = ConnectionError("TWS gone")
         daemon_state = {"halt_new_entries": True}
 
         outcome = live_daemon.run_reconciliation(
             self._portfolio({}), broker, daemon_state, mock.Mock(),
+            save_state=lambda s: None,
         )
         assert outcome == "error"
         assert daemon_state["halt_new_entries"] is True
@@ -513,14 +495,13 @@ class TestReconciliation:
     def _nightly(self, monkeypatch, daemon_state, outcome, at_hour=21, at_minute=30, day=6):
         config = {"overnight_timezone": "Europe/London",
                   "reconciliation_run_time": "21:30"}
-        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
         run_mock = mock.Mock(return_value=outcome)
-        monkeypatch.setattr(live_daemon, "run_reconciliation", run_mock)
         with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(
                 2026, 7, day, at_hour, at_minute, tzinfo=ZoneInfo("Europe/London"))
             live_daemon.check_nightly_reconciliation(
-                config, daemon_state, mock.Mock(), mock.Mock(), mock.Mock())
+                config, daemon_state, mock.Mock(), mock.Mock(), mock.Mock(),
+                run_recon=run_mock, save_state=lambda s: None)
         return run_mock
 
     def test_nightly_runs_at_configured_time(self, monkeypatch):
@@ -558,36 +539,92 @@ class TestReconciliation:
         assert daemon_state["reconciliation_consecutive_error_days"] == 1
 
     def test_nightly_error_two_consecutive_days_sends_alert(self, monkeypatch):
-        from Strategy_Auto_Trader.output import emailer
         sent = []
-        monkeypatch.setattr(emailer, "send_reconciliation_alert", lambda d: sent.append(d))
+        def fake_escalation_alert(d):
+            sent.append(d)
         daemon_state = {}
 
-        self._nightly(monkeypatch, daemon_state, "error", day=6)
+        config = {"overnight_timezone": "Europe/London",
+                  "reconciliation_run_time": "21:30"}
+        run_mock = mock.Mock(return_value="error")
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(
+                2026, 7, 6, 21, 30, tzinfo=ZoneInfo("Europe/London"))
+            live_daemon.check_nightly_reconciliation(
+                config, daemon_state, mock.Mock(), mock.Mock(), mock.Mock(),
+                run_recon=run_mock, save_state=lambda s: None, send_alert=fake_escalation_alert)
         assert sent == []
         assert daemon_state["reconciliation_consecutive_error_days"] == 1
 
-        self._nightly(monkeypatch, daemon_state, "error", day=7)
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(
+                2026, 7, 7, 21, 30, tzinfo=ZoneInfo("Europe/London"))
+            live_daemon.check_nightly_reconciliation(
+                config, daemon_state, mock.Mock(), mock.Mock(), mock.Mock(),
+                run_recon=run_mock, save_state=lambda s: None, send_alert=fake_escalation_alert)
         assert len(sent) == 1
         assert daemon_state["reconciliation_consecutive_error_days"] == 2
         assert daemon_state["reconciliation_alert_sent"] is True
 
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(
+                2026, 7, 8, 21, 30, tzinfo=ZoneInfo("Europe/London"))
+            live_daemon.check_nightly_reconciliation(
+                config, daemon_state, mock.Mock(), mock.Mock(), mock.Mock(),
+                run_recon=run_mock, save_state=lambda s: None, send_alert=fake_escalation_alert)
         # A third bad day doesn't resend the alert.
-        self._nightly(monkeypatch, daemon_state, "error", day=8)
         assert len(sent) == 1
 
     def test_nightly_clean_pass_resets_error_streak(self, monkeypatch):
-        from Strategy_Auto_Trader.output import emailer
-        monkeypatch.setattr(emailer, "send_reconciliation_alert", lambda d: None)
         daemon_state = {}
 
-        self._nightly(monkeypatch, daemon_state, "error", day=6)
-        self._nightly(monkeypatch, daemon_state, "error", day=7)
+        config = {"overnight_timezone": "Europe/London",
+                  "reconciliation_run_time": "21:30"}
+        run_mock_error = mock.Mock(return_value="error")
+        run_mock_clean = mock.Mock(return_value="clean")
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(
+                2026, 7, 6, 21, 30, tzinfo=ZoneInfo("Europe/London"))
+            live_daemon.check_nightly_reconciliation(
+                config, daemon_state, mock.Mock(), mock.Mock(), mock.Mock(),
+                run_recon=run_mock_error, save_state=lambda s: None, send_alert=lambda d: None)
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(
+                2026, 7, 7, 21, 30, tzinfo=ZoneInfo("Europe/London"))
+            live_daemon.check_nightly_reconciliation(
+                config, daemon_state, mock.Mock(), mock.Mock(), mock.Mock(),
+                run_recon=run_mock_error, save_state=lambda s: None, send_alert=lambda d: None)
         assert daemon_state["reconciliation_consecutive_error_days"] == 2
 
-        self._nightly(monkeypatch, daemon_state, "clean", day=8)
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(
+                2026, 7, 8, 21, 30, tzinfo=ZoneInfo("Europe/London"))
+            live_daemon.check_nightly_reconciliation(
+                config, daemon_state, mock.Mock(), mock.Mock(), mock.Mock(),
+                run_recon=run_mock_clean, save_state=lambda s: None, send_alert=lambda d: None)
         assert daemon_state["reconciliation_consecutive_error_days"] == 0
         assert daemon_state["reconciliation_alert_sent"] is False
+
+    def test_reconciliation_default_wiring_saves_state(self, monkeypatch, tmp_path):
+        """run_reconciliation with no injected params uses module-level save_daemon_state."""
+        monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+        broker = self._broker({})
+        broker.is_connected.return_value = True
+        daemon_state = {}
+
+        outcome = live_daemon.run_reconciliation(
+            self._portfolio({}), broker, daemon_state, mock.Mock()
+        )
+
+        assert outcome == "clean"
+        # Verify the daemon-state file was actually written via default save_state
+        state_path = tmp_path / "daemon_state.json"
+        assert state_path.exists()
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        assert saved["halt_new_entries"] is False
 
 
 def test_process_cycle_halt_flag_blocks_new_entries(monkeypatch):
@@ -699,21 +736,18 @@ class TestExecuteSignalsWithRetry:
 
     def test_success_first_attempt(self, monkeypatch):
         """Successful execution on first attempt returns immediately."""
-        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
-
-        monkeypatch.setattr(execute_mod, "execute_signals",
-                            lambda *a, **k: (["BUY"], ["SELL"], []))
+        def fake_execute(*a, **k):
+            return (["BUY"], ["SELL"], [])
 
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL"], None, None, None, mock.Mock(),
-            2, None, mock.Mock()
+            2, None, mock.Mock(),
+            execute_signals=fake_execute
         )
         assert result == (["BUY"], ["SELL"], [])
 
     def test_socket_error_triggers_reconnect(self, monkeypatch):
         """Socket error triggers broker disconnect/reconnect and retry."""
-        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
-
         call_count = [0]
         broker = mock.Mock()
         logger = mock.Mock()
@@ -724,11 +758,10 @@ class TestExecuteSignalsWithRetry:
                 raise ConnectionError("Socket disconnect: not connected to 127.0.0.1:7497")
             return (["BUY"], ["SELL"], [])
 
-        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
-
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL"], None, None, None, broker,
-            2, None, logger, max_retries=3
+            2, None, logger, max_retries=3,
+            execute_signals=fake_execute
         )
 
         assert result == (["BUY"], ["SELL"], [])
@@ -737,8 +770,6 @@ class TestExecuteSignalsWithRetry:
 
     def test_socket_error_with_reconnect_failure(self, monkeypatch):
         """Socket error retries even if reconnect fails."""
-        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
-
         call_count = [0]
         broker = mock.Mock()
         broker.connect.side_effect = RuntimeError("TWS not responding")
@@ -750,11 +781,10 @@ class TestExecuteSignalsWithRetry:
                 raise ConnectionError("Socket error")
             return (["BUY"], [], [])
 
-        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
-
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL"], None, None, None, broker,
-            2, None, logger, max_retries=3
+            2, None, logger, max_retries=3,
+            execute_signals=fake_execute
         )
 
         assert result == (["BUY"], [], [])
@@ -762,19 +792,16 @@ class TestExecuteSignalsWithRetry:
 
     def test_socket_error_max_retries_exhausted(self, monkeypatch):
         """Socket error after max retries returns empty results, doesn't raise."""
-        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
-
         broker = mock.Mock()
         logger = mock.Mock()
 
         def fake_execute(*args, **kwargs):
             raise ConnectionError("Socket disconnect")
 
-        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
-
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL", "MSFT"], None, None, None, broker,
-            2, None, logger, max_retries=2
+            2, None, logger, max_retries=2,
+            execute_signals=fake_execute
         )
 
         assert result == ([], [], ["AAPL", "MSFT"])  # Tickers listed as skipped
@@ -782,8 +809,6 @@ class TestExecuteSignalsWithRetry:
 
     def test_timeout_error_triggers_retry(self, monkeypatch):
         """TimeoutError (socket-level) triggers reconnect."""
-        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
-
         call_count = [0]
         broker = mock.Mock()
         logger = mock.Mock()
@@ -794,11 +819,10 @@ class TestExecuteSignalsWithRetry:
                 raise TimeoutError("Socket timeout")
             return ([], ["SELL"], [])
 
-        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
-
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL"], None, None, None, broker,
-            2, None, logger
+            2, None, logger,
+            execute_signals=fake_execute
         )
 
         assert result == ([], ["SELL"], [])
@@ -806,8 +830,6 @@ class TestExecuteSignalsWithRetry:
 
     def test_os_error_triggers_retry(self, monkeypatch):
         """OSError (socket-level) triggers reconnect."""
-        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
-
         call_count = [0]
         broker = mock.Mock()
         logger = mock.Mock()
@@ -818,39 +840,33 @@ class TestExecuteSignalsWithRetry:
                 raise OSError("[Errno 10054] Connection reset by peer")
             return (["BUY"], [], [])
 
-        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
-
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL"], None, None, None, broker,
-            2, None, logger
+            2, None, logger,
+            execute_signals=fake_execute
         )
 
         assert result == (["BUY"], [], [])
 
     def test_non_socket_error_raises_immediately(self, monkeypatch):
         """Non-connection errors are raised immediately without retry."""
-        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
-
         broker = mock.Mock()
         logger = mock.Mock()
 
         def fake_execute(*args, **kwargs):
             raise ValueError("Invalid ticker symbol")
 
-        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
-
         with pytest.raises(ValueError, match="Invalid ticker symbol"):
             live_daemon.execute_signals_with_retry(
                 "ftse", ["AAPL"], None, None, None, broker,
-                2, None, logger
+                2, None, logger,
+                execute_signals=fake_execute
             )
 
         assert not broker.disconnect.called
 
     def test_string_pattern_socket_error_triggers_retry(self, monkeypatch):
         """Exception with 'socket' or 'disconnect' in message triggers retry."""
-        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
-
         call_count = [0]
         broker = mock.Mock()
         logger = mock.Mock()
@@ -861,11 +877,10 @@ class TestExecuteSignalsWithRetry:
                 raise RuntimeError("Socket error: connection lost")
             return (["BUY"], ["SELL"], [])
 
-        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
-
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL"], None, None, None, broker,
-            2, None, logger
+            2, None, logger,
+            execute_signals=fake_execute
         )
 
         assert result == (["BUY"], ["SELL"], [])
@@ -873,7 +888,6 @@ class TestExecuteSignalsWithRetry:
 
     def test_exponential_backoff_sleep_times(self, monkeypatch):
         """Retries use exponential backoff: 1s, 2s, 4s."""
-        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
         import time
 
         call_count = [0]
@@ -890,12 +904,12 @@ class TestExecuteSignalsWithRetry:
         def fake_sleep(secs):
             sleep_times.append(secs)
 
-        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
         monkeypatch.setattr(time, "sleep", fake_sleep)
 
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL"], None, None, None, broker,
-            2, None, logger, max_retries=4
+            2, None, logger, max_retries=4,
+            execute_signals=fake_execute
         )
 
         assert result == (["BUY"], [], [])
@@ -909,6 +923,7 @@ class TestExecuteSignalsWithRetry:
         broker = mock.Mock()
         logger = mock.Mock()
         daemon_state = {"halt_new_entries": False}
+        saved_state = []
 
         def fake_execute(*args, **kwargs):
             exc = execute_mod.ExecutionInterrupted(
@@ -920,18 +935,18 @@ class TestExecuteSignalsWithRetry:
             )
             raise exc
 
+        def fake_save(*args, **kwargs):
+            saved_state.append(True)
+
         def mock_send_alert(*args, **kwargs):
             pass
 
-        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
-        monkeypatch.setattr(
-            "Strategy_Auto_Trader.output.emailer.send_execution_interrupted_alert",
-            mock_send_alert
-        )
-
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL", "MSFT", "GOOG"], None, None, None, broker,
-            2, None, logger, daemon_state=daemon_state
+            2, None, logger, daemon_state=daemon_state,
+            execute_signals=fake_execute,
+            save_state=fake_save,
+            send_interrupt_alert=mock_send_alert
         )
 
         assert daemon_state["halt_new_entries"] is True
@@ -946,6 +961,7 @@ class TestExecuteSignalsWithRetry:
         broker = mock.Mock()
         logger = mock.Mock()
         daemon_state = {"halt_new_entries": False}
+        saved_state = []
 
         def fake_execute(*args, **kwargs):
             exc = execute_mod.ExecutionInterrupted(
@@ -957,18 +973,18 @@ class TestExecuteSignalsWithRetry:
             )
             raise exc
 
+        def fake_save(*args, **kwargs):
+            saved_state.append(True)
+
         def mock_send_alert(*args, **kwargs):
             pass
 
-        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
-        monkeypatch.setattr(
-            "Strategy_Auto_Trader.output.emailer.send_execution_interrupted_alert",
-            mock_send_alert
-        )
-
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL", "MSFT"], None, None, None, broker,
-            2, None, logger, daemon_state=daemon_state
+            2, None, logger, daemon_state=daemon_state,
+            execute_signals=fake_execute,
+            save_state=fake_save,
+            send_interrupt_alert=mock_send_alert
         )
 
         assert daemon_state["halt_new_entries"] is True
@@ -1000,12 +1016,12 @@ class TestExecuteSignalsWithRetry:
         def fake_sleep(secs):
             pass
 
-        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
         monkeypatch.setattr(time, "sleep", fake_sleep)
 
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL", "MSFT"], None, None, None, broker,
-            2, None, logger, daemon_state=daemon_state, max_retries=2
+            2, None, logger, daemon_state=daemon_state, max_retries=2,
+            execute_signals=fake_execute
         )
 
         assert daemon_state.get("halt_new_entries") is False  # Not halted
@@ -1033,15 +1049,11 @@ class TestExecuteSignalsWithRetry:
         def mock_send_alert(*args, **kwargs):
             pass
 
-        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute)
-        monkeypatch.setattr(
-            "Strategy_Auto_Trader.output.emailer.send_execution_interrupted_alert",
-            mock_send_alert
-        )
-
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL", "MSFT"], None, None, None, broker,
-            2, None, logger  # No daemon_state passed
+            2, None, logger,  # No daemon_state passed
+            execute_signals=fake_execute,
+            send_interrupt_alert=mock_send_alert
         )
 
         assert result == (["AAPL x100 @ 150.0"], [], ["MSFT"])

@@ -18,6 +18,9 @@ from ..conservative import ConservativeEntry, ConservativeExit
 from ..default import DefaultEntry, DefaultExit
 from ..optimised import OptimisedEntry, OptimisedExit
 from ..trend_follow import TrendEntry, TrendExit
+from ..mean_reversion import MeanReversionEntry, MeanReversionExit
+from ..breakout_momentum import BreakoutMomentumEntry, BreakoutMomentumExit
+from ..ai_strategy import AiEntry, AiExit
 
 STRATEGY_REGISTRY: dict[str, dict[str, type]] = {
     "default": {
@@ -39,6 +42,18 @@ STRATEGY_REGISTRY: dict[str, dict[str, type]] = {
     "choppy_vol": {
         "entry": ChoppyVolEntry,
         "exit":  ChoppyVolExit,
+    },
+    "mean_reversion": {
+        "entry": MeanReversionEntry,
+        "exit":  MeanReversionExit,
+    },
+    "breakout": {
+        "entry": BreakoutMomentumEntry,
+        "exit":  BreakoutMomentumExit,
+    },
+    "ai": {
+        "entry": AiEntry,
+        "exit":  AiExit,
     },
 }
 

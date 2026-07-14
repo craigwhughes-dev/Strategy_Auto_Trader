@@ -16,6 +16,7 @@ import logging
 import os
 import sys
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -432,10 +433,11 @@ def _write_app_status_snapshot_safe(
         logger.error(f"Failed to write app_status.json: {e}", exc_info=True)
 
 
-def is_trading_hours(market_cfg: dict, logger: logging.Logger) -> bool:
+def is_trading_hours(market_cfg: dict, logger: logging.Logger, *, now: datetime | None = None) -> bool:
     """Check if market is currently in trading hours."""
     tz = ZoneInfo(market_cfg["timezone"])
-    now = datetime.now(tz)
+    if now is None:
+        now = datetime.now(tz)
 
     weekday = now.weekday()
     if weekday >= 5:
@@ -530,6 +532,10 @@ def execute_signals_with_retry(
     max_retries: int = 3,
     market_currency: str = "",
     daemon_state: dict | None = None,
+    *,
+    execute_signals: Callable | None = None,
+    save_state: Callable | None = None,
+    send_interrupt_alert: Callable | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
     """Execute signals with automatic reconnect and retry on socket errors.
 
@@ -540,7 +546,12 @@ def execute_signals_with_retry(
     Returns (buys, sells, skipped) tuple. On connection failure after max_retries,
     returns empty results and continues (doesn't halt daemon).
     """
-    from .execute import execute_signals, ExecutionInterrupted
+    from .execute import ExecutionInterrupted
+    if execute_signals is None:
+        from .execute import execute_signals as _execute_signals
+        execute_signals = _execute_signals
+    if save_state is None:
+        save_state = save_daemon_state
 
     for attempt in range(max_retries):
         try:
@@ -560,10 +571,12 @@ def execute_signals_with_retry(
                 )
                 if daemon_state is not None:
                     daemon_state["halt_new_entries"] = True
-                    save_daemon_state(daemon_state)
+                    save_state(daemon_state)
                 try:
-                    from ..output.emailer import send_execution_interrupted_alert
-                    send_execution_interrupted_alert(
+                    if send_interrupt_alert is None:
+                        from ..output.emailer import send_execution_interrupted_alert
+                        send_interrupt_alert = send_execution_interrupted_alert
+                    send_interrupt_alert(
                         market_name, exc.original, exc.buys, exc.sells, exc.unresolved
                     )
                 except Exception as email_err:
@@ -821,6 +834,9 @@ def run_reconciliation(
     broker: object,
     daemon_state: dict,
     logger: logging.Logger,
+    *,
+    save_state: Callable | None = None,
+    send_alert: Callable | None = None,
 ) -> bool:
     """Compare broker account positions against internal execution state.
 
@@ -829,6 +845,8 @@ def run_reconciliation(
     Returns "clean", "mismatch", or "error" (broker positions unavailable).
     """
     from ..broker.reconcile import reconcile_positions
+    if save_state is None:
+        save_state = save_daemon_state
 
     if not broker.is_connected():
         try:
@@ -852,10 +870,12 @@ def run_reconciliation(
             logger.error(f"  {d}")
         daemon_state["halt_new_entries"] = True
         daemon_state["reconciliation_discrepancies"] = discrepancies
-        save_daemon_state(daemon_state)
+        save_state(daemon_state)
         try:
-            from ..output.emailer import send_reconciliation_alert
-            send_reconciliation_alert(discrepancies)
+            if send_alert is None:
+                from ..output.emailer import send_reconciliation_alert
+                send_alert = send_reconciliation_alert
+            send_alert(discrepancies)
         except Exception as e:
             logger.error(f"Reconciliation: alert email failed: {e}")
         return "mismatch"
@@ -867,7 +887,7 @@ def run_reconciliation(
                     f"positions match broker")
     daemon_state["halt_new_entries"] = False
     daemon_state["reconciliation_discrepancies"] = []
-    save_daemon_state(daemon_state)
+    save_state(daemon_state)
     return "clean"
 
 
@@ -877,8 +897,16 @@ def check_nightly_reconciliation(
     portfolio: object,
     broker: object,
     logger: logging.Logger,
+    *,
+    run_recon: Callable | None = None,
+    save_state: Callable | None = None,
+    send_alert: Callable | None = None,
 ) -> None:
     """Run reconciliation once per day at the configured time (after close)."""
+    if run_recon is None:
+        run_recon = run_reconciliation
+    if save_state is None:
+        save_state = save_daemon_state
     tz = ZoneInfo(config.get("overnight_timezone", "Europe/London"))
     now = datetime.now(tz)
     run_time_str = config.get("reconciliation_run_time", "21:30")
@@ -890,14 +918,14 @@ def check_nightly_reconciliation(
 
     if now.hour == run_hour and now.minute >= run_minute:
         logger.info("Running nightly position reconciliation...")
-        outcome = run_reconciliation(portfolio, broker, daemon_state, logger)
+        outcome = run_recon(portfolio, broker, daemon_state, logger)
         # A broker fetch error is not a daily result — leave the date unset so
         # it retries on the next poll within the run window.
         if outcome in ("clean", "mismatch"):
             daemon_state["last_reconcile_date"] = today
             daemon_state["reconciliation_consecutive_error_days"] = 0
             daemon_state["reconciliation_alert_sent"] = False
-            save_daemon_state(daemon_state)
+            save_state(daemon_state)
         elif outcome == "error":
             # Count at most one error per calendar day — the run window can
             # retry every ~60s for 30+ minutes, and that retry storm must not
@@ -907,7 +935,7 @@ def check_nightly_reconciliation(
                 daemon_state["reconciliation_consecutive_error_days"] = (
                     daemon_state.get("reconciliation_consecutive_error_days", 0) + 1
                 )
-                save_daemon_state(daemon_state)
+                save_state(daemon_state)
             if (daemon_state.get("reconciliation_consecutive_error_days", 0) >= 2
                     and not daemon_state.get("reconciliation_alert_sent")):
                 logger.critical(
@@ -916,8 +944,10 @@ def check_nightly_reconciliation(
                     "— broker connection may be unreachable at the scheduled run time."
                 )
                 try:
-                    from ..output.emailer import send_reconciliation_alert
-                    send_reconciliation_alert(
+                    if send_alert is None:
+                        from ..output.emailer import send_reconciliation_alert
+                        send_alert = send_reconciliation_alert
+                    send_alert(
                         [f"Reconciliation has not completed successfully for "
                          f"{daemon_state['reconciliation_consecutive_error_days']} consecutive days "
                          "(broker unreachable at run time)"]
@@ -925,7 +955,7 @@ def check_nightly_reconciliation(
                 except Exception as e:
                     logger.error(f"Reconciliation: escalation alert email failed: {e}")
                 daemon_state["reconciliation_alert_sent"] = True
-                save_daemon_state(daemon_state)
+                save_state(daemon_state)
 
 
 def process_manual_commands_wrapper(config: dict, portfolio: object, broker: object, logger: logging.Logger, daemon_state: dict) -> None:

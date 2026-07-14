@@ -11,7 +11,7 @@ Hourly HMM + composite-signal trading strategy backtester and live simulator.
 - `Strategy_Auto_Trader/strategy/{default,conservative,trend_follow}.py` — individual strategies
 
 ## Tests
-`python -m pytest tests/test_all.py -q --tb=short`
+`python -m pytest tests/ -q --tb=short` (`tests/test_all.py` no longer exists)
 
 ## Work tracking
 - `HANDOFF.md` — state left by the last session, read this first when resuming work
