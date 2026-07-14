@@ -1,6 +1,16 @@
 # Strategy Auto-Trader
 
-An hourly-bar algorithmic trading system built as a [Claude Code skill](https://code.claude.com/docs/en/skills). It combines a Gaussian Hidden Markov Model regime filter with a weighted momentum vote system, a quality gate, and a layered exit stack — then backtests, live-simulates, emails trade alerts, and (optionally) executes on Interactive Brokers paper trading. Easy to design, code and backtest a new trading strategy using claude code.
+This project uses quantitative techniques to generate buy and sell signals for stock trading, focused on the S&P 500 and FTSE — currently trading in USD and GBP only.
+
+Originally inspired by watching this video https://www.youtube.com/watch?v=ZVMTeDBmSrI, I used claude code to write my own system.
+
+Originally built for daily signals, the system now runs on an hourly cycle. To suit my appetite for risk, the strategy is long-only - although should be trivial to remove this restriction if required.
+
+**Signal research:** A wide range of published quantitative measures were surveyed and implemented, then backtested to compute each measure's output for every trading day across the universe. Backtest results feed into pluggable strategies, each of which turns one or more measures into buy/sell signals.
+
+**Execution:** When a strategy fires, the system places the corresponding buy or sell order automatically on the IBKR exchange. Every order triggers an email notification, so trading activity can be tracked as it happens.
+
+**Monitoring/control:** A companion mobile app ([Strategy_Auto_Trader_Mobile_UI](../Strategy_Auto_Trader_Mobile_UI)) adds a remote control layer: view current positions, pause/resume trading, and sell individual positions or the entire portfolio from a phone.
 
 > ⚠️ **Not financial advice.** This is a research and paper-trading project. Backtests use walk-forward, no-lookahead signals, but past performance predicts nothing. Use the backtests to understand *when* the system would be in or out of the market, not to forecast returns.
 
@@ -254,3 +264,7 @@ Where each metric appears in the report outputs
 | Backtest chart legend | Sharpe, Sortino vs B&H |
 | Live journal analysis | A1–A12: everything above except risk/return ratios (only raw P&L) |
 | Execution log / state | Fill price, signal price, slippage bps per order |
+
+## Known Limitations
+
+- **Signal survivorship isn't guaranteed.** Not every implemented measure produces a profitable strategy — e.g. the `choppy_vol` strategy backtested negative (199/203 tickers) and is excluded from live use. Treat this as evidence the backtest gate works, but a reminder that "implemented" ≠ "validated."
