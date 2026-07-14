@@ -23,6 +23,7 @@ data/
 logs/
 reports/
 state/
+config/generated/
 *.log
 *.err
 tmp_*
