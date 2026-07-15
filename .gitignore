@@ -35,6 +35,16 @@ daemon_output*.txt
 HANDOFF.md
 todo.md
 
+# Local planning / temporary docs
+*PLAN.md
+*_SAFEGUARDS.md
+PROJECT_OVERVIEW.md
+RELIABILITY_SETUP.md
+
+# Local watchlist variants and generation scripts
+config/watchlist_*.json
+scripts/make_watchlist_variants.py
+
 # Local config / editor files
 .env
 .env.local
