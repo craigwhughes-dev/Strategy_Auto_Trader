@@ -237,12 +237,14 @@ class _PluginExitAdapter:
 
     Exposes the engine-level stop_loss_pct and take_profit_pct as properties
     so the loop can read them uniformly regardless of which API is in use.
+    Also stores min_hold_bars for per-strategy override of hold-bars logic.
     """
 
-    def __init__(self, exit_plugin: ExitRulesProtocol, stop_loss_pct: float, take_profit_pct: float) -> None:
+    def __init__(self, exit_plugin: ExitRulesProtocol, stop_loss_pct: float, take_profit_pct: float, min_hold_bars: int = 48) -> None:
         self._plugin = exit_plugin
         self._stop = stop_loss_pct
         self._target = take_profit_pct
+        self.min_hold_bars = min_hold_bars
 
     @property
     def stop_loss_pct(self) -> float:
@@ -274,7 +276,6 @@ def consolidated_backtest(
     vix_signal: int = 0,
     regime_smooth: int = 24,
     min_hold_bars: int = 48,
-    adverse_exit_cooldown_bars: int | None = None,
     # vote + quality-gate parameters
     rsi_period: int = 14,
     ma_fast: int = 20,
@@ -329,8 +330,7 @@ def consolidated_backtest(
     4. Max-hold-bars
     5. Parabolic SAR stop (optional)
     6. MACD bearish cross / RSI reversal / consolidation (optional)
-    7a. quality-gate adverse-exit SELL (after adverse_exit_cooldown_bars, default
-        == min_hold_bars — set lower/0 to let it fire sooner than a plain signal SELL)
+    7a. quality-gate adverse-exit SELL (after min_hold_bars, same as a plain signal SELL)
     7b. plain composite_signal SELL (after min_hold_bars)
 
     Position sizing
@@ -362,7 +362,6 @@ def consolidated_backtest(
     )
 
     effective_weights = {**_CONSOLIDATED_WEIGHTS, **(weights or {})}
-    _cooldown_bars = min_hold_bars if adverse_exit_cooldown_bars is None else adverse_exit_cooldown_bars
 
     # Skip whole-run setup for indicators the active strategy weights at zero
     # (opt out with skip_unused_indicators=False, e.g. for strategy development).
@@ -417,12 +416,18 @@ def consolidated_backtest(
     _exit: ExitStrategyProtocol = (
         exit_strategy
         if exit_strategy is not None
-        else _PluginExitAdapter(exit_plugin, effective_stop_adj, take_profit_pct)
+        else _PluginExitAdapter(exit_plugin, effective_stop_adj, take_profit_pct, min_hold_bars)
     )
     # When a strategy provides its own stop/take-profit, context adjuster still
     # adjusts the stop but the take-profit comes straight from the strategy.
     _effective_stop = effective_stop_adj   # after context-adjuster nudge
     _effective_target = _exit.take_profit_pct
+
+    # Extract optional require_flip_entry knob (defaults to True for backward compatibility)
+    _require_flip_entry = getattr(_entry, "require_flip_entry", True)
+
+    # Extract optional min_hold_bars knob (defaults to CLI param for backward compatibility)
+    _min_hold_bars = getattr(_exit, "min_hold_bars", min_hold_bars)
 
     # ------------------------------------------------------------------
     # Data preparation
@@ -536,11 +541,7 @@ def consolidated_backtest(
             else:
                 sig_in = _entry.evaluate(regime_state, mom_snap, cur_vol_ratio, currently_in=True)
                 if sig_in.flag == "SELL":
-                    # A quality-gate adverse-exit is treated as a real deterioration
-                    # signal and only waits out adverse_exit_cooldown_bars; a plain
-                    # composite-signal SELL still waits the full min_hold_bars so
-                    # fresh-entry noise doesn't cause an immediate whipsaw exit.
-                    hold_req = _cooldown_bars if sig_in.gate_fired else min_hold_bars
+                    hold_req = _min_hold_bars
                     if bars_held >= hold_req:
                         trade_event = "SELL"
                         sell_reason = sig_in.reason or "signal"
@@ -559,9 +560,9 @@ def consolidated_backtest(
             if vol_ok:
                 decision = _entry.evaluate(regime_state, mom_snap, cur_vol_ratio, currently_in=False)
 
-                # Transition guard: only enter on a non-BUY → BUY flip
+                # Transition guard: only enter on a non-BUY → BUY flip (unless require_flip_entry is False)
                 raw_flag = decision.raw_flag
-                if raw_flag == "BUY" and (prev_signal_flag is None or prev_signal_flag == "BUY"):
+                if _require_flip_entry and raw_flag == "BUY" and (prev_signal_flag is None or prev_signal_flag == "BUY"):
                     raw_flag = "HOLD"
                 prev_signal_flag = decision.raw_flag
 

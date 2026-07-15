@@ -88,11 +88,22 @@ class TestChoppyVolStrategy:
         decision = entry.evaluate(self._regime(), mom, 1.0, currently_in=False)
         assert decision.flag == "BUY"
 
-    def test_entry_while_in_position_always_holds(self):
-        """The reversion exit lives in ChoppyVolExit, not here."""
+    def test_entry_while_in_position_exits_on_rsi_reversion(self):
+        """RSI-reversion exit now fires via the entry path when currently_in=True
+        and cur_rsi >= 50."""
         from Strategy_Auto_Trader.strategy.choppy_vol import ChoppyVolEntry
         entry = ChoppyVolEntry()
-        mom = {"cur_rsi": 65.0, "bb_pctb": 0.9, "consolidation": False}
+        mom = {"cur_rsi": 55.0, "bb_pctb": 0.9, "consolidation": False}
+        decision = entry.evaluate(self._regime(), mom, 1.0, currently_in=True)
+        assert decision.flag == "SELL"
+        assert decision.raw_flag == "SELL"
+        assert "RSI" in decision.reason and "reversion" in decision.reason
+
+    def test_entry_while_in_position_holds_when_rsi_not_reverted(self):
+        """When in position but RSI hasn't reverted yet, hold."""
+        from Strategy_Auto_Trader.strategy.choppy_vol import ChoppyVolEntry
+        entry = ChoppyVolEntry()
+        mom = {"cur_rsi": 45.0, "consolidation": False}
         decision = entry.evaluate(self._regime(), mom, 1.0, currently_in=True)
         assert decision.flag == "HOLD"
 
@@ -120,19 +131,13 @@ class TestChoppyVolStrategy:
         assert ex.stop_loss_pct == pytest.approx(0.04)
         assert ex.take_profit_pct == pytest.approx(0.06)
 
-    def test_exit_fires_on_rsi_reversion(self):
+    def test_exit_does_not_fire_on_rsi_reversion(self):
+        """RSI reversion exit now lives in ChoppyVolEntry.evaluate()'s
+        currently_in=True path, not in ChoppyVolExit.check(). ChoppyVolExit
+        should not fire on high RSI."""
         from Strategy_Auto_Trader.strategy.choppy_vol import ChoppyVolExit
         ex = ChoppyVolExit()
         result = ex.check(self._trade(days_in_trade=2), self._bar(cur_close=102.0, cur_rsi=55.0))
-        assert result.exit_hit is True
-        assert "reversion" in result.sell_reason
-
-    def test_exit_does_not_fire_on_entry_bar(self):
-        """days_in_trade == 0 means this is the bar right after entry —
-        the reversion check requires at least one full bar to have passed."""
-        from Strategy_Auto_Trader.strategy.choppy_vol import ChoppyVolExit
-        ex = ChoppyVolExit()
-        result = ex.check(self._trade(days_in_trade=0), self._bar(cur_close=101.0, cur_rsi=60.0))
         assert result.exit_hit is False
 
     def test_exit_holds_when_rsi_not_reverted(self):

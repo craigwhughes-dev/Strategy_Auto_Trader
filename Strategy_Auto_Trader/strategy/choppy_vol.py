@@ -67,15 +67,15 @@ strategy is trading for.
 
 Exit
 ----
-Primary exit is the RSI reversion itself: `cur_rsi >= 50`. This is checked
-in ChoppyVolExit.check() (the engine's unconditional per-bar exit-rules
-path) rather than via the entry strategy's currently_in=True SELL signal,
-because the engine only consults that path after `min_hold_bars` (default
-48) — well past the ~16-21 bar average reversion this strategy is trading
-for. Backstopped by a tight hard stop -4% (chop ranges are narrow; don't
-wait around for a big loss), modest take-profit +6%, and a 40-bar max hold
-(matches the study's reversion-search cap) in case RSI never recovers. No
-trailing stop — the point is a quick in/out, not letting a winner run.
+Primary exit is the RSI reversion itself: `cur_rsi >= 50`. This is now
+checked via the entry strategy's currently_in=True SELL signal path (in
+ChoppyVolEntry.evaluate()), which fires immediately since this strategy's
+ChoppyVolExit.min_hold_bars=0 overrides the engine's global default (no
+hold gate needed). Backstopped by a tight hard stop -4% (chop ranges are
+narrow; don't wait around for a big loss), modest take-profit +6%, and a
+40-bar max hold (matches the study's reversion-search cap) in case RSI
+never recovers, enforced via ChoppyVolExit.check(). No trailing stop — the
+point is a quick in/out, not letting a winner run.
 """
 
 from __future__ import annotations
@@ -111,10 +111,18 @@ class ChoppyVolEntry:
         _volume_ratio: float,
         currently_in: bool = False,
     ) -> EntryDecision:
-        """Score a bar. The real exit (RSI reversion) lives in
-        ChoppyVolExit.check() instead of here — see module docstring for why
-        — so while in a position this always holds and lets that path decide."""
+        """Score a bar. While in a position, check for RSI reversion exit
+        (cur_rsi >= 50). If reversion conditions met, return SELL; otherwise
+        hold. The RSI-reversion exit fires via this path (min_hold_bars=0
+        allows it immediately). Stop-loss/take-profit/max-hold backstops
+        are enforced in ChoppyVolExit.check()."""
         if currently_in:
+            cur_rsi = mom.get("cur_rsi")
+            if cur_rsi is not None and cur_rsi >= _RSI_REVERSION:
+                return EntryDecision(
+                    flag="SELL", raw_flag="SELL", score=1.0,
+                    reason="choppy_vol: RSI reversion (RSI>=50)",
+                )
             return EntryDecision(flag="HOLD", raw_flag="HOLD", score=0.0, reason="")
 
         cur_rsi = mom.get("cur_rsi")
@@ -133,13 +141,12 @@ class ChoppyVolEntry:
 
 
 class ChoppyVolExit:
-    """RSI-reversion exit first, then a tight stop/target/max-hold backstop.
+    """Tight stop/target/max-hold backstop.
 
-    The RSI-reversion check lives here rather than in ChoppyVolEntry's
-    currently_in=True path because the engine only consults that path after
-    min_hold_bars (default 48 bars) — well past this strategy's ~16-21 bar
-    average reversion. check() runs unconditionally every bar, so it fires
-    on schedule instead of being blocked by min_hold_bars.
+    RSI-reversion exit has been moved to ChoppyVolEntry.evaluate()'s
+    currently_in=True path, which fires immediately (min_hold_bars=0).
+    This class now handles only the hard stop (-4%), hard take-profit (+6%),
+    and max-hold-bars (40) backstop — the safety bounds for the trade.
 
     Satisfies ExitStrategyProtocol.
     """
@@ -147,6 +154,7 @@ class ChoppyVolExit:
     _stop: float = 0.04
     _target: float = 0.06
     _max_hold_bars: int = 40
+    min_hold_bars: int = 0  # Allow signal-based SELL immediately (no hold gate)
 
     def __init__(self) -> None:
         self._impl = StandardExitRules(
@@ -174,13 +182,6 @@ class ChoppyVolExit:
         return self._target
 
     def check(self, trade: TradeState, bar_data: BarData) -> ExitResult:
-        """RSI reversion first (this strategy's real exit), then delegate to
-        the stop/target/max-hold backstop."""
-        if bar_data.cur_rsi is not None and bar_data.cur_rsi >= _RSI_REVERSION and trade.days_in_trade >= 1:
-            return ExitResult(
-                exit_hit=True,
-                sell_reason=f"choppy_vol_reversion(RSI>={_RSI_REVERSION:.0f})",
-                peak_price_since_entry=max(trade.peak_price_since_entry, bar_data.cur_close),
-                days_in_trade=trade.days_in_trade,
-            )
+        """Delegate to the stop/target/max-hold backstop. RSI reversion exit
+        is now handled by ChoppyVolEntry.evaluate()'s currently_in=True path."""
         return self._impl.check(trade, bar_data)

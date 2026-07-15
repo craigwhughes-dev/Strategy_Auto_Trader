@@ -14,13 +14,8 @@ A secondary quality gate acts as a veto: even if the vote score reaches the buy
 threshold, the entry is blocked if the market context looks weak (e.g. RSI below
 50, below the SMA200, and thin volume — any two of five weak conditions blocks).
 While in a trade the same gate watches for adverse conditions and forces an early
-exit if at least two deterioration signals fire together — but only after
-min_hold_bars has elapsed (~2 trading days), same as a plain composite-signal
-SELL. consolidated_engine.py exposes an adverse_exit_cooldown_bars knob that
-can let this fire sooner, but backtesting it (all 4 strategies, 2 tickers) made
-things worse across the board — more than double the trade count and lower P&L
-in every case, the entry-noise whipsaw failure mode this was meant to avoid.
-Left at its default (== min_hold_bars) everywhere; not a live tuning knob.
+exit if at least two deterioration signals fire together, waiting min_hold_bars
+(~2 trading days) same as a plain composite-signal SELL.
 
 Risk management is simple: take profit at +15% or cut the loss at -5%. There is
 no trailing stop — the strategy relies on the signal gate to exit rather than on

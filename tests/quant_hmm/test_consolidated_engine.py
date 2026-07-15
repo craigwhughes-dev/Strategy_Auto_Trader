@@ -442,86 +442,286 @@ class TestConsolidatedEngine:
         assert np.isfinite(result["final_portfolio"])
         assert set(result["detail"]["trade_event"].unique()).issubset({"", "BUY", "SELL"})
 
-    # -- adverse_exit_cooldown_bars tests --------------------------------
+    # -- require_flip_entry knob ------------------------------------------
 
-    def test_consolidated_adverse_exit_cooldown_bypasses_min_hold(self):
-        """With adverse_exit_cooldown_bars=0, an adverse-exit SELL should fire before min_hold_bars."""
-        # Construct: bear baseline (transition guard), bull rise (BUY entry), sharp drop (adverse exit).
-        # Adverse context triggered by steep price drop + regime flip.
-        n = 250
-        close = np.concatenate([
-            np.linspace(100, 98, 20),      # short bear baseline
-            np.linspace(98, 120, 30),      # rising → BUY transition around bar 20-35
-            np.linspace(120, 80, 35),      # sharp drop → triggers adverse (RSI<40, below SMA20/50)
-            np.full(165, 80),               # flat to avoid other exits
-        ])
-        p_bull_seq = [0.20] * 20 + [0.85] * 30 + [0.05] * 200
+    def test_require_flip_entry_false_allows_consecutive_buys(self):
+        """Verify that require_flip_entry=False bypasses the flip guard.
+
+        With require_flip_entry=True (default), consecutive BUY signals from the
+        same bar are suppressed — only a non-BUY → BUY transition triggers entry.
+
+        With require_flip_entry=False, a BUY signal is acted on even if the
+        previous bar also generated a BUY (allowing rapid re-entry after close).
+        """
+        from Strategy_Auto_Trader.plugins.types import EntryDecision, RegimeState
+
+        # Create a mock entry strategy that always returns BUY (to isolate flip-guard behavior)
+        class AlwaysBuyEntry:
+            """Entry strategy that always returns BUY, for testing flip guard."""
+            require_flip_entry = False  # KEY: disable flip guard
+
+            def evaluate(
+                self,
+                regime: RegimeState,
+                mom: dict,
+                _volume_ratio: float,
+                currently_in: bool = False,
+            ) -> EntryDecision:
+                return EntryDecision(
+                    flag="BUY",
+                    raw_flag="BUY",
+                    score=5.0,
+                    reason="always_buy_for_test",
+                )
+
+        # Use a simple exit strategy (from an existing strategy)
+        from Strategy_Auto_Trader.strategy.default import DefaultExit
+
+        # Scenario: steady rising price (will induce BUY signals) with short hold window
+        n = 200
+        close = np.linspace(100, 130, n)  # steady rise
+        p_bull_seq = [0.80] * n  # always bullish
 
         result = _run_consolidated_fake(
-            close, p_bull_seq,
-            min_train_bars=30, hmm_refit_bars=30,
-            regime_smooth=1, buy_threshold=1.0,
-            min_hold_bars=30, adverse_exit_cooldown_bars=0,
+            close,
+            p_bull_seq,
+            min_train_bars=50,
+            hmm_refit_bars=50,
+            regime_smooth=1,
+            buy_threshold=1.0,
             volume_min_ratio=0.0,
-            stop_loss_pct=0.35, take_profit_pct=0.60,
-            entry_prob=0.65, exit_prob=0.40,
+            max_hold_days=0,  # exit after each bar (or quickly) so we can re-enter
+            entry_strategy=AlwaysBuyEntry(),
+            exit_strategy=DefaultExit(),
+        )
+
+        # With require_flip_entry=False, we should see multiple BUY events
+        # because the strategy always returns BUY and exits quickly, allowing re-entry
+        n_buys = result["n_buys"]
+        assert n_buys >= 2, (
+            f"expected >= 2 BUY entries with require_flip_entry=False, got {n_buys}. "
+            "The flip guard should not suppress re-entry on consecutive BUY signals."
+        )
+
+    def test_require_flip_entry_true_suppresses_consecutive_buys(self):
+        """Verify that require_flip_entry=True (default) enforces the flip guard.
+
+        This is a sanity check: consecutive BUY signals without a transition
+        from non-BUY should be suppressed.
+        """
+        from Strategy_Auto_Trader.plugins.types import EntryDecision, RegimeState
+
+        # Create a mock entry strategy that always returns BUY
+        class AlwaysBuyEntry:
+            """Entry strategy that always returns BUY."""
+            require_flip_entry = True  # explicitly set (or omit for default True)
+
+            def evaluate(
+                self,
+                regime: RegimeState,
+                mom: dict,
+                _volume_ratio: float,
+                currently_in: bool = False,
+            ) -> EntryDecision:
+                return EntryDecision(
+                    flag="BUY",
+                    raw_flag="BUY",
+                    score=5.0,
+                    reason="always_buy_for_test",
+                )
+
+        from Strategy_Auto_Trader.strategy.default import DefaultExit
+
+        n = 200
+        close = np.linspace(100, 130, n)
+        p_bull_seq = [0.80] * n
+
+        result = _run_consolidated_fake(
+            close,
+            p_bull_seq,
+            min_train_bars=50,
+            hmm_refit_bars=50,
+            regime_smooth=1,
+            buy_threshold=1.0,
+            volume_min_ratio=0.0,
+            max_hold_days=0,
+            entry_strategy=AlwaysBuyEntry(),
+            exit_strategy=DefaultExit(),
+        )
+
+        # With require_flip_entry=True (default), we should see fewer BUY entries
+        # because consecutive BUY signals are suppressed until a non-BUY occurs.
+        n_buys = result["n_buys"]
+        assert n_buys <= 1, (
+            f"expected <= 1 BUY entries with require_flip_entry=True, got {n_buys}. "
+            "The flip guard should suppress re-entry on consecutive BUY signals."
+        )
+
+    # -- min_hold_bars knob ---
+
+    def test_min_hold_bars_zero_allows_early_signal_exit(self):
+        """Verify that min_hold_bars=0 on exit strategy allows signal-based SELL
+        to fire immediately (on bar 2, bars_held=1) instead of waiting 48 bars.
+
+        With the default min_hold_bars=48, a signal-based SELL is blocked until
+        at least 48 bars have elapsed. With min_hold_bars=0, the signal fires
+        immediately without the hold-bars gate.
+        """
+        from Strategy_Auto_Trader.plugins.types import EntryDecision, ExitResult, RegimeState, TradeState, BarData
+
+        # Entry strategy that buys once, then returns SELL after entry
+        class QuickExitEntry:
+            """Entry that BUYs on first call when not in position, then SELL immediately when in position."""
+            require_flip_entry = False  # Bypass flip guard for test clarity
+
+            def __init__(self):
+                self._has_entered = False
+
+            def evaluate(
+                self,
+                regime: RegimeState,
+                mom: dict,
+                _volume_ratio: float,
+                currently_in: bool = False,
+            ) -> EntryDecision:
+                # BUY once when not in position
+                if not currently_in and not self._has_entered:
+                    self._has_entered = True
+                    return EntryDecision(flag="BUY", raw_flag="BUY", score=5.0, reason="test_buy")
+                # Signal SELL immediately when in position (after entry)
+                if currently_in and self._has_entered:
+                    return EntryDecision(flag="SELL", raw_flag="SELL", score=5.0, reason="test_sell")
+                # Otherwise hold
+                return EntryDecision(flag="HOLD", raw_flag="HOLD", score=0.0, reason="")
+
+        # Exit strategy with min_hold_bars=0 (no hold gate)
+        class QuickExit:
+            """Exit strategy with min_hold_bars=0."""
+            min_hold_bars = 0  # KEY: Allow signal-based SELL immediately
+
+            @property
+            def stop_loss_pct(self) -> float:
+                return 0.05
+
+            @property
+            def take_profit_pct(self) -> float:
+                return 0.15
+
+            def check(self, trade: TradeState, bar: BarData) -> ExitResult:
+                # No exit logic here; let the entry strategy's SELL signal fire
+                return ExitResult(
+                    exit_hit=False,
+                    sell_reason="",
+                    peak_price_since_entry=max(trade.peak_price_since_entry, bar.cur_close),
+                    days_in_trade=trade.days_in_trade,
+                )
+
+        # Scenario: entry on bar 51+, exit signal 1 bar later (bars_held=1)
+        n = 200
+        close = np.linspace(100, 120, n)  # rising price (no stop)
+        p_bull_seq = [0.80] * n  # always bullish
+
+        result = _run_consolidated_fake(
+            close,
+            p_bull_seq,
+            min_train_bars=50,
+            hmm_refit_bars=50,
+            regime_smooth=1,
+            buy_threshold=1.0,
+            volume_min_ratio=0.0,
+            min_hold_bars=48,  # Global default (high)
+            entry_strategy=QuickExitEntry(),
+            exit_strategy=QuickExit(),
+        )
+
+        # We expect exactly 1 BUY and 1 SELL (trade opens on bar 1, closes on bar 2)
+        detail = result["detail"]
+        buys = detail[detail["trade_event"] == "BUY"]
+        sells = detail[detail["trade_event"] == "SELL"]
+
+        assert len(buys) == 1, f"expected 1 BUY, got {len(buys)}"
+        assert len(sells) == 1, f"expected 1 SELL, got {len(sells)}"
+
+        buy_pos = detail.index.get_loc(buys.index[0])
+        sell_pos = detail.index.get_loc(sells.index[0])
+
+        # With min_hold_bars=0 on exit strategy, SELL should fire 1 bar after BUY
+        assert sell_pos == buy_pos + 1, (
+            f"expected SELL {buy_pos + 1} (1 bar after BUY at {buy_pos}), got {sell_pos}. "
+            f"With min_hold_bars=0, the signal-based SELL should fire immediately (within 1 bar)."
+        )
+
+    def test_min_hold_bars_default_blocks_early_signal_exit(self):
+        """Verify that without min_hold_bars set on exit strategy, the global
+        min_hold_bars=48 blocks signal-based SELL before 48 bars elapse.
+
+        This is the sanity check: a strategy without the min_hold_bars override
+        should fall back to the global CLI param (48 by default).
+        """
+        from Strategy_Auto_Trader.plugins.types import EntryDecision, ExitResult, RegimeState, TradeState, BarData
+
+        # Entry strategy that buys once, then returns SELL every bar after
+        class AlwaysSellEntry:
+            """Entry that BUYs on first call when not in position, then SELL every bar after."""
+            require_flip_entry = False  # Bypass flip guard for test clarity
+
+            def __init__(self):
+                self._has_entered = False
+
+            def evaluate(
+                self,
+                regime: RegimeState,
+                mom: dict,
+                _volume_ratio: float,
+                currently_in: bool = False,
+            ) -> EntryDecision:
+                # BUY once when not in position
+                if not currently_in and not self._has_entered:
+                    self._has_entered = True
+                    return EntryDecision(flag="BUY", raw_flag="BUY", score=5.0, reason="test_buy")
+                # Always return SELL after entry
+                if currently_in:
+                    return EntryDecision(flag="SELL", raw_flag="SELL", score=5.0, reason="test_sell")
+                # Otherwise hold
+                return EntryDecision(flag="HOLD", raw_flag="HOLD", score=0.0, reason="")
+
+        # Exit strategy WITHOUT min_hold_bars set (uses plugin adapter default)
+        from Strategy_Auto_Trader.strategy.default import DefaultExit
+
+        # Scenario: entry on bar 51+, signal tries to SELL on bar 52+ but is blocked
+        # until bars_held >= 48
+        n = 250
+        close = np.linspace(100, 120, n)
+        p_bull_seq = [0.80] * n
+
+        result = _run_consolidated_fake(
+            close,
+            p_bull_seq,
+            min_train_bars=50,
+            hmm_refit_bars=50,
+            regime_smooth=1,
+            buy_threshold=1.0,
+            volume_min_ratio=0.0,
+            min_hold_bars=48,  # Global hold-bars gate
+            entry_strategy=AlwaysSellEntry(),
+            exit_strategy=DefaultExit(),
         )
 
         detail = result["detail"]
         buys = detail[detail["trade_event"] == "BUY"]
         sells = detail[detail["trade_event"] == "SELL"]
 
-        # Should have at least one BUY from the bear->bull transition
-        assert len(buys) >= 1, f"expected at least one BUY entry, got {len(buys)}"
-        assert len(sells) >= 1, f"expected at least one SELL, got {len(sells)}"
+        assert len(buys) == 1, f"expected 1 BUY, got {len(buys)}"
+        assert len(sells) == 1, f"expected 1 SELL, got {len(sells)}"
 
-        # Verify the SELL fired before min_hold_bars with adverse_exit_cooldown_bars=0
-        entry_idx = detail.index.get_loc(buys.index[0])
-        exit_idx = detail.index.get_loc(sells.index[0])
-        bars_held = exit_idx - entry_idx
-        # With adverse_exit_cooldown_bars=0, should fire well before min_hold_bars=30
-        assert bars_held < 30, f"expected early exit before min_hold_bars=30, got bars_held={bars_held}"
-        # Verify it was a quality-gate adverse exit
-        assert "quality_gate" in str(sells.iloc[0]["sell_reason"]), \
-            f"expected quality_gate in reason, got: {sells.iloc[0]['sell_reason']}"
+        buy_pos = detail.index.get_loc(buys.index[0])
+        sell_pos = detail.index.get_loc(sells.index[0])
 
-    def test_consolidated_adverse_exit_cooldown_none_matches_old_behavior(self):
-        """With adverse_exit_cooldown_bars=None (default), adverse-exit SELL should wait min_hold_bars."""
-        # Same scenario as test 1, but WITHOUT adverse_exit_cooldown_bars (defaults to None).
-        # Default behavior: quality-gate adverse exits respect the full min_hold_bars.
-        n = 250
-        close = np.concatenate([
-            np.linspace(100, 98, 20),      # short bear baseline
-            np.linspace(98, 120, 30),      # rising → BUY transition
-            np.linspace(120, 80, 35),      # sharp drop → adverse context
-            np.full(165, 80),               # flat
-        ])
-        p_bull_seq = [0.20] * 20 + [0.85] * 30 + [0.05] * 200
-
-        result = _run_consolidated_fake(
-            close, p_bull_seq,
-            min_train_bars=30, hmm_refit_bars=30,
-            regime_smooth=1, buy_threshold=1.0,
-            min_hold_bars=30,  # adverse_exit_cooldown_bars NOT specified, defaults to None
-            volume_min_ratio=0.0,
-            stop_loss_pct=0.35, take_profit_pct=0.60,
-            entry_prob=0.65, exit_prob=0.40,
+        # Without min_hold_bars override on exit strategy, signal-based SELL
+        # is blocked until bars_held >= 48. So SELL should be at least 48 bars
+        # after BUY.
+        assert sell_pos >= buy_pos + 48, (
+            f"expected SELL at position >= {buy_pos + 48} (48 bars after BUY at {buy_pos}), got {sell_pos}. "
+            f"Without min_hold_bars override, should use global default of 48."
         )
 
-        detail = result["detail"]
-        buys = detail[detail["trade_event"] == "BUY"]
-        sells = detail[detail["trade_event"] == "SELL"]
-
-        # Should have at least one BUY
-        assert len(buys) >= 1, f"expected at least one BUY entry, got {len(buys)}"
-
-        # With default behavior, any quality-gate adverse SELL must NOT fire before min_hold_bars
-        if len(sells) > 0:
-            entry_idx = detail.index.get_loc(buys.index[0])
-            exit_idx = detail.index.get_loc(sells.index[0])
-            bars_held = exit_idx - entry_idx
-            # If a SELL happened before min_hold_bars, it should NOT be quality-gate
-            if bars_held < 30:
-                assert "quality_gate" not in str(sells.iloc[0]["sell_reason"]), \
-                    f"with default adverse_exit_cooldown_bars=None, quality-gate SELL should not " \
-                    f"fire before min_hold_bars=30, but got {bars_held} bars with reason: {sells.iloc[0]['sell_reason']}"

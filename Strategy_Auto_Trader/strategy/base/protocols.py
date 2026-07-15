@@ -13,7 +13,14 @@ from ...plugins.types import BarData, EntryDecision, ExitResult, RegimeState, Tr
 
 @runtime_checkable
 class EntryStrategyProtocol(Protocol):
-    """Decides whether to enter a trade on each bar."""
+    """Decides whether to enter a trade on each bar.
+
+    Optional attributes (not enforced by Protocol, but supported by the engine):
+    - require_flip_entry (bool): If False, allows entry on consecutive BUY bars
+      (bypasses the flip-guard requirement that entry transitions from non-BUY to BUY).
+      Defaults to True (requires flip). Strategies that don't declare this attribute
+      fall back to the default True behavior.
+    """
 
     def evaluate(
         self,
@@ -26,7 +33,13 @@ class EntryStrategyProtocol(Protocol):
 
 @runtime_checkable
 class ExitStrategyProtocol(Protocol):
-    """Owns stop/target levels and per-bar exit logic."""
+    """Owns stop/target levels and per-bar exit logic.
+
+    Optional attributes (not enforced by Protocol, but supported by the engine):
+    - min_hold_bars (int): Minimum bars to hold before allowing signal-based SELL.
+      If declared, the engine uses it instead of the global CLI `min_hold_bars` param.
+      Defaults to the engine's own `min_hold_bars` param if not declared.
+    """
 
     @property
     def stop_loss_pct(self) -> float: ...
