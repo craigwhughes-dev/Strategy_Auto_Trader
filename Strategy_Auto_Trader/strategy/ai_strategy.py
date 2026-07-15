@@ -41,7 +41,7 @@ class AiEntry:
         raw = 0.45 * reg + 0.35 * rsi_n + 0.15 * disp_n + 0.05 * vol_n
         return raw
 
-    def evaluate(self, regime: RegimeState, mom: dict, _volume_ratio: float, _currently_in: bool = False) -> EntryDecision:
+    def evaluate(self, regime: RegimeState, mom: dict, _volume_ratio: float, currently_in: bool = False) -> EntryDecision:
         if not self._vol_filter_ok:
             return EntryDecision(flag="HOLD", raw_flag="HOLD", score=0.0, reason="vol_filter: unsuitable (choppy/mean-reverting)")
 

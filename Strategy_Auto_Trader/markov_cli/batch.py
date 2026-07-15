@@ -425,6 +425,7 @@ def main() -> int:
     run_results = []    # status tracking
     collected = []      # successfully collected results for email
     failed_list = []    # failed tickers
+    journal_trade_count = 0
 
     for i, ticker_cfg in enumerate(tickers, 1):
         ticker = ticker_cfg.get("ticker", "???")

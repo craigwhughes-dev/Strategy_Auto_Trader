@@ -41,7 +41,7 @@ class MeanReversionEntry:
         _regime: RegimeState,
         mom: dict,
         _volume_ratio: float,
-        _currently_in: bool = False,
+        currently_in: bool = False,
     ) -> EntryDecision:
         if self._vol_filter_ok:
             return EntryDecision(

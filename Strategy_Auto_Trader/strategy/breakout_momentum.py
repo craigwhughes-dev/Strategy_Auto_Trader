@@ -44,7 +44,7 @@ class BreakoutMomentumEntry:
         regime: RegimeState,
         mom: dict,
         volume_ratio: float,
-        _currently_in: bool = False,
+        currently_in: bool = False,
     ) -> EntryDecision:
         if not self._vol_filter_ok:
             return EntryDecision(
