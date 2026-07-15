@@ -4,17 +4,26 @@ Entry
 -----
 Uses a momentum-weighted composite signal biased towards breakouts: larger
 weight for short-term trend and volume. Requires the short-term trend to be
-aligned (above SMA20 & SMA50) and rewards volume spikes.
+aligned (above SMA20 & SMA50) and rewards volume spikes. Quality gate
+(quality_gate_enabled=True) applies on top of the trend-adjusted score.
 
 Exit
 ----
 Wider stop and large take-profit to let strong breakouts run; uses a
 vol-scaled trailing stop to protect gains.
+Kelly position sizing on (use_kelly=True, kelly_lookback=20).
+
+Best suited to: no live/backtest validation yet.
+Known weaknesses: UNTESTED — added alongside ai_strategy and mean_reversion,
+none of the three have a backtest run against them. Treat as experimental
+until validated (see choppy_vol for what an untested strategy looks like
+after backtesting turned it negative).
 """
 
 from __future__ import annotations
 
 from ..core.momentum import composite_signal
+from ..core.quality_gate import _apply_quality_gate
 from ..plugins.exit_rules import StandardExitRules
 from ..plugins.types import BarData, EntryDecision, ExitResult, RegimeState, TradeState
 
@@ -32,6 +41,8 @@ class BreakoutMomentumEntry:
     }
     buy_threshold: float = 4.0
     sell_threshold: float = -3.0
+    #: Whether core/quality_gate._apply_quality_gate runs on top of the score.
+    quality_gate_enabled: bool = True
 
     def __init__(self, vol_filter_ok: bool = True) -> None:
         self._weights = self.weights
@@ -63,21 +74,39 @@ class BreakoutMomentumEntry:
             weights=self._weights,
         )
 
-        # Require short-term trend alignment for breakout
-        if not (mom.get("above_sma20") and mom.get("above_sma50")):
-            return EntryDecision(flag="HOLD", raw_flag=raw["flag"], score=float(raw.get("score", 0.0)), reason="needs short-term trend alignment")
-
-        # Reward volume spikes by nudging the score
+        # Reward volume spikes by nudging the score — applied before the
+        # trend-alignment gate so the reported score stays consistent
+        # across both the HOLD and admitted branches.
         vr = mom.get("volume_ratio") or volume_ratio or 1.0
         score = float(raw.get("score", 0.0)) + (0.8 if vr > 1.3 else 0.0)
+
+        # Require short-term trend alignment for breakout
+        if not (mom.get("above_sma20") and mom.get("above_sma50")):
+            return EntryDecision(
+                flag="HOLD", raw_flag=raw["flag"], score=round(score, 2),
+                reason="needs short-term trend alignment",
+            )
+
         final_flag = "BUY" if score >= self._buy_t else ("SELL" if score <= self._sell_t else "HOLD")
 
-        return EntryDecision(flag=final_flag, raw_flag=raw["flag"], score=round(score, 2), reason="")
+        if self.quality_gate_enabled:
+            gated = _apply_quality_gate(
+                {"flag": final_flag, "score": score},
+                mom, regime.regime_signal, currently_in=currently_in,
+            )
+        else:
+            gated = {"flag": final_flag, "reason": "", "gate_fired": False}
+        return EntryDecision(
+            flag=gated["flag"], raw_flag=raw["flag"], score=round(score, 2),
+            reason=gated.get("reason", ""), gate_fired=gated.get("gate_fired", False),
+        )
 
 
 class BreakoutMomentumExit:
     _stop: float = 0.06
     _target: float = 0.25
+    use_kelly: bool = True
+    kelly_lookback: int = 20
 
     def __init__(self) -> None:
         self._impl = StandardExitRules(

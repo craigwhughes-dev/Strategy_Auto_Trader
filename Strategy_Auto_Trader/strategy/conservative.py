@@ -30,11 +30,13 @@ Entry
 -----
 Weighted vote: HMM (2.0) + RSI (1.5) + SMA200 (3.0) + trend SMA20/50 (1.5)
 + volume (1.5).  Buy threshold 4.5 (out of max ~10.5).
-Quality gate still applies on top (same 2-of-5 veto threshold as default).
+Quality gate (quality_gate_enabled=True) still applies on top (same 2-of-5
+veto threshold as default).
 
 Exit
 ----
 Tighter stop-loss 3%, take-profit 10%.  No trailing stop.
+Kelly position sizing on (use_kelly=True, kelly_lookback=20).
 """
 
 from __future__ import annotations
@@ -61,6 +63,8 @@ class ConservativeEntry:
     }
     buy_threshold: float = 4.5
     sell_threshold: float = -4.5
+    #: Whether core/quality_gate._apply_quality_gate runs on top of the vote.
+    quality_gate_enabled: bool = True
 
     def __init__(self, vol_filter_ok: bool = True) -> None:
         self._weights = self.weights
@@ -89,7 +93,10 @@ class ConservativeEntry:
             sell_threshold=self._sell_t,
             weights=self._weights,
         )
-        gated = _apply_quality_gate(raw, mom, regime.regime_signal, currently_in=currently_in)
+        if self.quality_gate_enabled:
+            gated = _apply_quality_gate(raw, mom, regime.regime_signal, currently_in=currently_in)
+        else:
+            gated = dict(raw, reason="", gate_fired=False)
         return EntryDecision(
             flag=gated["flag"],
             raw_flag=raw["flag"],
@@ -107,6 +114,8 @@ class ConservativeExit:
 
     _stop: float = 0.03
     _target: float = 0.10
+    use_kelly: bool = True
+    kelly_lookback: int = 20
 
     def __init__(self) -> None:
         self._impl = StandardExitRules(

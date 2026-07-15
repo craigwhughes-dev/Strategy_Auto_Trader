@@ -17,6 +17,7 @@ from ..choppy_vol import ChoppyVolEntry, ChoppyVolExit
 from ..conservative import ConservativeEntry, ConservativeExit
 from ..default import DefaultEntry, DefaultExit
 from ..optimised import OptimisedEntry, OptimisedExit
+from ..optimised_aggressive import OptimisedAggressiveEntry, OptimisedAggressiveExit
 from ..trend_follow import TrendEntry, TrendExit
 from ..mean_reversion import MeanReversionEntry, MeanReversionExit
 from ..breakout_momentum import BreakoutMomentumEntry, BreakoutMomentumExit
@@ -39,6 +40,10 @@ STRATEGY_REGISTRY: dict[str, dict[str, type]] = {
         "entry": OptimisedEntry,
         "exit":  OptimisedExit,
     },
+    "optimised_aggressive": {
+        "entry": OptimisedAggressiveEntry,
+        "exit":  OptimisedAggressiveExit,
+    },
     "choppy_vol": {
         "entry": ChoppyVolEntry,
         "exit":  ChoppyVolExit,
@@ -47,7 +52,7 @@ STRATEGY_REGISTRY: dict[str, dict[str, type]] = {
         "entry": MeanReversionEntry,
         "exit":  MeanReversionExit,
     },
-    "breakout": {
+    "breakout_momentum": {
         "entry": BreakoutMomentumEntry,
         "exit":  BreakoutMomentumExit,
     },

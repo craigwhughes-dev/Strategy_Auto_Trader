@@ -122,6 +122,8 @@ class OptimisedExit:
 
     _stop: float = 0.08
     _target: float = 0.30
+    use_kelly: bool = True
+    kelly_lookback: int = 20
 
     def __init__(self) -> None:
         self._impl = StandardExitRules(

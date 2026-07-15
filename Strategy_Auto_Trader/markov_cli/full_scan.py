@@ -95,7 +95,6 @@ from ..core.momentum import (
     compute_sma,
 )
 from ..output.journal import TradeRecord, extract_trades_from_detail
-from ..plugins.kelly_sizer import KellySizer
 from ..plugins.persistent_hmm import PersistentHMMRegimeModel
 from ..quant_hmm import sentiment as sentiment_mod
 from ..quant_hmm.consolidated_engine import consolidated_backtest
@@ -526,7 +525,6 @@ def scan_ticker(
     bt = consolidated_backtest(
         df,
         regime_model=regime_model,
-        position_sizer=KellySizer(use_kelly=True, lookback=20),
         entry_strategy=entry_s,
         exit_strategy=exit_s,
         trade_cost=trade_cost,

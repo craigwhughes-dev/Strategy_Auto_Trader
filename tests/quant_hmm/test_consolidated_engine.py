@@ -725,3 +725,110 @@ class TestConsolidatedEngine:
             f"Without min_hold_bars override, should use global default of 48."
         )
 
+    # -- use_kelly / kelly_lookback knobs (read from exit_strategy) ------------
+
+    def test_use_kelly_false_on_exit_strategy_disables_kelly_sizing(self):
+        """Verify exit_strategy.use_kelly=False disables Kelly recompute,
+        leaving final_kelly at KellySizer's static default (0.10) even after
+        many closed trades.
+        """
+        from Strategy_Auto_Trader.plugins.types import EntryDecision, ExitResult, RegimeState, TradeState, BarData
+
+        class RepeatingEntry:
+            """BUY when flat, SELL when in position -- generates many round trips."""
+            require_flip_entry = False
+
+            def evaluate(self, regime, mom, _volume_ratio, currently_in=False):
+                if not currently_in:
+                    return EntryDecision(flag="BUY", raw_flag="BUY", score=5.0, reason="buy")
+                return EntryDecision(flag="SELL", raw_flag="SELL", score=5.0, reason="sell")
+
+        class NoKellyExit:
+            """Exit strategy that declares Kelly sizing off."""
+            min_hold_bars = 0
+            use_kelly = False  # KEY: disables Kelly recompute
+
+            @property
+            def stop_loss_pct(self) -> float:
+                return 0.05
+
+            @property
+            def take_profit_pct(self) -> float:
+                return 0.15
+
+            def check(self, trade, bar) -> ExitResult:
+                return ExitResult(
+                    exit_hit=False, sell_reason="",
+                    peak_price_since_entry=max(trade.peak_price_since_entry, bar.cur_close),
+                    days_in_trade=trade.days_in_trade,
+                )
+
+        n = 200
+        close = np.linspace(100, 120, n)
+        p_bull_seq = [0.80] * n
+
+        result = _run_consolidated_fake(
+            close, p_bull_seq,
+            min_train_bars=50, hmm_refit_bars=50, regime_smooth=1,
+            buy_threshold=1.0, volume_min_ratio=0.0,
+            entry_strategy=RepeatingEntry(),
+            exit_strategy=NoKellyExit(),
+        )
+        sells = result["detail"][result["detail"]["trade_event"] == "SELL"]
+        assert len(sells) >= 5, f"expected >= 5 round trips to exercise Kelly recompute, got {len(sells)}"
+        assert result["final_kelly"] == pytest.approx(0.10), (
+            "use_kelly=False on exit_strategy should keep final_kelly at the static default"
+        )
+
+    def test_kelly_lookback_read_from_exit_strategy(self):
+        """Verify exit_strategy.kelly_lookback overrides the engine's default
+        (20): a lookback of 2 lets final_kelly diverge from the static 0.10
+        default after just a couple of trades.
+        """
+        from Strategy_Auto_Trader.plugins.types import EntryDecision, ExitResult, RegimeState, TradeState, BarData
+
+        class RepeatingEntry:
+            require_flip_entry = False
+
+            def evaluate(self, regime, mom, _volume_ratio, currently_in=False):
+                if not currently_in:
+                    return EntryDecision(flag="BUY", raw_flag="BUY", score=5.0, reason="buy")
+                return EntryDecision(flag="SELL", raw_flag="SELL", score=5.0, reason="sell")
+
+        class ShortLookbackExit:
+            min_hold_bars = 0
+            use_kelly = True
+            kelly_lookback = 2  # KEY: recompute after just 2 trades
+
+            @property
+            def stop_loss_pct(self) -> float:
+                return 0.05
+
+            @property
+            def take_profit_pct(self) -> float:
+                return 0.15
+
+            def check(self, trade, bar) -> ExitResult:
+                return ExitResult(
+                    exit_hit=False, sell_reason="",
+                    peak_price_since_entry=max(trade.peak_price_since_entry, bar.cur_close),
+                    days_in_trade=trade.days_in_trade,
+                )
+
+        n = 200
+        close = np.linspace(100, 120, n)
+        p_bull_seq = [0.80] * n
+
+        result = _run_consolidated_fake(
+            close, p_bull_seq,
+            min_train_bars=50, hmm_refit_bars=50, regime_smooth=1,
+            buy_threshold=1.0, volume_min_ratio=0.0,
+            entry_strategy=RepeatingEntry(),
+            exit_strategy=ShortLookbackExit(),
+        )
+        sells = result["detail"][result["detail"]["trade_event"] == "SELL"]
+        assert len(sells) >= 5, f"expected >= 5 round trips to exercise Kelly recompute, got {len(sells)}"
+        assert result["final_kelly"] != pytest.approx(0.10), (
+            "kelly_lookback=2 on exit_strategy should have triggered a Kelly recompute by now"
+        )
+

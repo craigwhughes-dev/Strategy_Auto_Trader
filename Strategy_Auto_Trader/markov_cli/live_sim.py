@@ -32,7 +32,6 @@ import pandas as pd
 
 from ..output.journal import LIVE_JOURNAL, TradeRecord, append_trades, extract_trades_from_detail
 from ..plugins.context_adjuster import SentimentAdjuster
-from ..plugins.kelly_sizer import KellySizer
 from ..quant_hmm.consolidated_engine import consolidated_backtest
 from ..quant_hmm.quant_engine import fetch_hourly
 from ..quant_hmm.vol_screen import screen_tickers
@@ -68,7 +67,6 @@ def _fetch_and_extract(
         df.columns = df.columns.get_level_values(0)
 
     entry_s, exit_s = resolve_strategy(strategy_name, vol_filter_ok=vol_filter_ok)
-    position_sizer = KellySizer(use_kelly=True, lookback=20)
 
     from pathlib import Path
     from ..plugins.persistent_hmm import PersistentHMMRegimeModel
@@ -83,7 +81,6 @@ def _fetch_and_extract(
     bt = consolidated_backtest(
         df,
         regime_model=regime_model,
-        position_sizer=position_sizer,
         context_adjuster=SentimentAdjuster(),
         entry_strategy=entry_s,
         exit_strategy=exit_s,

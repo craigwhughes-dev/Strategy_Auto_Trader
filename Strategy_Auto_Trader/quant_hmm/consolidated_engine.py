@@ -335,8 +335,11 @@ def consolidated_backtest(
 
     Position sizing
     ---------------
-    Kelly fraction based on trailing realised trade P&L (unchanged from
-    quant_backtest), capped at 25%, floored at 2%.
+    Kelly fraction based on trailing realised trade P&L, capped at 25%,
+    floored at 2%. use_kelly/kelly_lookback are read from exit_strategy when
+    one is supplied (see ExitStrategyProtocol), else fall back to the
+    use_kelly/kelly_lookback kwargs — either way, explicit position_sizer
+    always wins.
 
     Plugin injection
     ----------------
@@ -402,9 +405,13 @@ def consolidated_backtest(
         exit_on_consolidation=exit_on_consolidation,
         use_sar_stop=use_sar_stop,
     )
+    _use_kelly = getattr(exit_strategy, "use_kelly", use_kelly) if exit_strategy is not None else use_kelly
+    _kelly_lookback = (
+        getattr(exit_strategy, "kelly_lookback", kelly_lookback) if exit_strategy is not None else kelly_lookback
+    )
     sizer_plugin: PositionSizerProtocol = position_sizer or KellySizer(
-        use_kelly=use_kelly,
-        lookback=kelly_lookback,
+        use_kelly=_use_kelly,
+        lookback=_kelly_lookback,
     )
 
     # Unified entry/exit interfaces — strategy supersedes plugin-level adapters when set.

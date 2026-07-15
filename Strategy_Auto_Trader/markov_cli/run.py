@@ -218,11 +218,14 @@ def main(argv: list[str] | None = None) -> int:
     df.to_csv(run_dir / "inputData.csv")
 
     _ADJ_MAP = {"sentiment": SentimentAdjuster, "none": NullAdjuster}
-    position_sizer = (
-        KellySizer(use_kelly=args.use_kelly, lookback=20)
-        if args.plugin_sizer == "kelly"
-        else FixedSizer()
-    )
+    # None lets the engine derive use_kelly/kelly_lookback from exit_strategy
+    # (see ExitStrategyProtocol) — only build an explicit sizer here when the
+    # CLI wants something other than the strategy's own declared default.
+    position_sizer = None
+    if args.plugin_sizer == "fixed":
+        position_sizer = FixedSizer()
+    elif not args.use_kelly:
+        position_sizer = KellySizer(use_kelly=False, lookback=20)
     context_adjuster = _ADJ_MAP[args.plugin_adjuster]()
 
     # Strategy: resolve named entry+exit pair (supersedes plugin-gate when not default).

@@ -33,7 +33,8 @@ Entry
 -----
 Weighted vote: HMM (1.5) + RSI (1.0) + SMA200 (3.0) + trend SMA20/50 (2.0)
 + volume (0.5).  Buy threshold 4.5, sell threshold -4.0.
-Quality gate applies but trend-heavy weights mean SMA200/trend dominate.
+Quality gate (quality_gate_enabled=True) applies but trend-heavy weights
+mean SMA200/trend dominate.
 
 Exit
 ----
@@ -41,6 +42,7 @@ Wide hard stop 8%, wide take-profit 30%.
 Vol-scaled trailing stop (vol_stop_mult=2.0, vol_stop_window=20).
 Profit-stop tightening (profit_stop_scale=0.5), floor 4%.
 No max hold limit — let the trend determine exit timing.
+Kelly position sizing on (use_kelly=True, kelly_lookback=20).
 """
 
 from __future__ import annotations
@@ -67,6 +69,8 @@ class TrendEntry:
     }
     buy_threshold: float = 4.5
     sell_threshold: float = -4.0
+    #: Whether core/quality_gate._apply_quality_gate runs on top of the vote.
+    quality_gate_enabled: bool = True
 
     def __init__(self, vol_filter_ok: bool = True) -> None:
         self._weights = self.weights
@@ -95,7 +99,10 @@ class TrendEntry:
             sell_threshold=self._sell_t,
             weights=self._weights,
         )
-        gated = _apply_quality_gate(raw, mom, regime.regime_signal, currently_in=currently_in)
+        if self.quality_gate_enabled:
+            gated = _apply_quality_gate(raw, mom, regime.regime_signal, currently_in=currently_in)
+        else:
+            gated = dict(raw, reason="", gate_fired=False)
         return EntryDecision(
             flag=gated["flag"],
             raw_flag=raw["flag"],
@@ -117,6 +124,8 @@ class TrendExit:
 
     _stop: float = 0.08
     _target: float = 0.30
+    use_kelly: bool = True
+    kelly_lookback: int = 20
 
     def __init__(self) -> None:
         self._impl = StandardExitRules(

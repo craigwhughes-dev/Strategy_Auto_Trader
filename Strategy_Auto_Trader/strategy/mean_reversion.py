@@ -14,10 +14,26 @@ small heuristic rather than a learned model.
 Exit
 ----
 Small stop (3%) and modest target (8%) — keep trades tight and frequent.
+Kelly position sizing on (use_kelly=True, kelly_lookback=20).
+
+Score is a custom heuristic (RSI undershoot + SMA20 distance + volume
+boost), not the shared composite_signal/weights-dict path other strategies
+use — deliberately, since the weights dict's "trend"/"sma200" keys assume
+a trend-following signal, which is the opposite of what this strategy
+wants.
+
+Quality gate: quality_gate_enabled=False (documentation-only — the shared
+_apply_quality_gate is never called). Only the adverse-exit escalation half
+is applied inline (see _is_adverse_exit_context in core/quality_gate.py).
+The weak-buy-context veto half is skipped — it counts "price below
+SMA20/50" and "RSI<50 without a cross above 50" as weak-context signals,
+which is exactly the setup this strategy buys, so applying it would veto
+nearly every entry.
 """
 
 from __future__ import annotations
 
+from ..core.quality_gate import _is_adverse_exit_context
 from ..plugins.exit_rules import StandardExitRules
 from ..plugins.types import BarData, EntryDecision, ExitResult, RegimeState, TradeState
 
@@ -30,6 +46,10 @@ class MeanReversionEntry:
 
     buy_threshold: float = 2.5
     sell_threshold: float = -2.5
+    #: Documentation-only — this strategy never calls _apply_quality_gate;
+    #: only its adverse-exit half is applied inline in evaluate() (see module
+    #: docstring for why the weak-buy veto half is skipped).
+    quality_gate_enabled: bool = False
 
     def __init__(self, vol_filter_ok: bool = True) -> None:
         # mean-reversion prefers choppy tickers; if vol_filter_ok is True
@@ -38,7 +58,7 @@ class MeanReversionEntry:
 
     def evaluate(
         self,
-        _regime: RegimeState,
+        regime: RegimeState,
         mom: dict,
         _volume_ratio: float,
         currently_in: bool = False,
@@ -59,14 +79,33 @@ class MeanReversionEntry:
         score = 0.0
         # RSI contribution: below 50 is bullish for reversion; stronger below 40
         score += max(0.0, (50.0 - rsi) / 10.0)
-        # Price distance from SMA20: deeper below -> larger score
-        score += max(0.0, -pct_sma20 * 10.0)
+        # Price distance from SMA20: deeper below -> larger score. Multiplier
+        # is 30 (not 10) so a realistic 3-5% dip contributes comparably to
+        # the RSI term instead of being dwarfed by it — at 10x, a 10% dip
+        # only scored 1.0 against RSI's max ~5.0, making this term decorative.
+        score += max(0.0, -pct_sma20 * 30.0)
         # Volume boost
         if vol_ratio > 1.2:
             score += 0.8
 
         # Map to BUY/HOLD/SELL similar to composite_signal thresholds
-        raw_flag = "BUY" if score >= self.buy_threshold else ("SELL" if score <= self.sell_threshold else "HOLD")
+        if score >= self.buy_threshold:
+            raw_flag = "BUY"
+        elif score <= self.sell_threshold:
+            raw_flag = "SELL"
+        else:
+            raw_flag = "HOLD"
+
+        # Adverse-exit escalation only (see module docstring for why the
+        # weak-buy veto half of the shared gate is skipped for this strategy).
+        if currently_in and _is_adverse_exit_context(regime.regime_signal, mom):
+            return EntryDecision(
+                flag="SELL",
+                raw_flag=raw_flag,
+                score=float(round(score, 2)),
+                reason="quality_gate: adverse exit context",
+                gate_fired=True,
+            )
 
         return EntryDecision(
             flag=raw_flag,
@@ -84,6 +123,8 @@ class MeanReversionExit:
 
     _stop: float = 0.03
     _target: float = 0.08
+    use_kelly: bool = True
+    kelly_lookback: int = 20
 
     def __init__(self) -> None:
         self._impl = StandardExitRules(

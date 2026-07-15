@@ -30,14 +30,16 @@ Entry
 Weighted vote: HMM (1.5) + RSI (1.5) + SMA200 (2.0) + trend SMA20/50 (1.0)
 + volume (1.0).  Markov slot zeroed (HMM carries that role).
 Buy threshold 3.0 (out of max ~7.5), sell -3.0.
-Quality gate vetoes BUY if >= 2 of 5 weak-context signals are true;
-forces SELL if >= 2 of 5 adverse-exit signals are true while in a position
-(after min_hold_bars — backtesting confirmed bypassing this hurts P&L).
+Quality gate (quality_gate_enabled=True) vetoes BUY if >= 2 of 5 weak-context
+signals are true; forces SELL if >= 2 of 5 adverse-exit signals are true
+while in a position (after min_hold_bars — backtesting confirmed bypassing
+this hurts P&L).
 
 Exit
 ----
 Hard stop-loss 5%, hard take-profit 15%.
 No trailing stop, no vol-stop, no indicator exits.
+Kelly position sizing on (use_kelly=True, kelly_lookback=20).
 """
 
 from __future__ import annotations
@@ -67,6 +69,9 @@ class DefaultEntry:
     weights: dict[str, float] = _WEIGHTS
     buy_threshold: float = 3.0
     sell_threshold: float = -3.0
+    #: Whether core/quality_gate._apply_quality_gate runs on top of the
+    #: composite vote. Overridable at construction (e.g. CLI --plugin-gate none).
+    quality_gate_enabled: bool = True
 
     def __init__(
         self,
@@ -74,11 +79,15 @@ class DefaultEntry:
         buy_threshold: float | None = None,
         sell_threshold: float | None = None,
         vol_filter_ok: bool = True,
+        quality_gate_enabled: bool | None = None,
     ) -> None:
         self._weights = {**self.weights, **(weights or {})}
         self._buy_t = buy_threshold if buy_threshold is not None else self.buy_threshold
         self._sell_t = sell_threshold if sell_threshold is not None else self.sell_threshold
         self._vol_filter_ok = vol_filter_ok
+        self._quality_gate_enabled = (
+            quality_gate_enabled if quality_gate_enabled is not None else self.quality_gate_enabled
+        )
 
     def evaluate(
         self,
@@ -101,7 +110,10 @@ class DefaultEntry:
             sell_threshold=self._sell_t,
             weights=self._weights,
         )
-        gated = _apply_quality_gate(raw, mom, regime.regime_signal, currently_in=currently_in)
+        if self._quality_gate_enabled:
+            gated = _apply_quality_gate(raw, mom, regime.regime_signal, currently_in=currently_in)
+        else:
+            gated = dict(raw, reason="", gate_fired=False)
         return EntryDecision(
             flag=gated["flag"],
             raw_flag=raw["flag"],
@@ -119,6 +131,8 @@ class DefaultExit:
 
     _stop: float = 0.05
     _target: float = 0.15
+    use_kelly: bool = True
+    kelly_lookback: int = 20
 
     def __init__(self) -> None:
         self._impl = StandardExitRules(

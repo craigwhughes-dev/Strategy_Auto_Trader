@@ -275,3 +275,66 @@ class TestStrategy:
         # rsi 1.0 + trend 2.0 + sma200 3.0 + volume 1.0 = 7.0 >= 6.0
         assert decision.flag == "BUY"
         assert decision.score == 7.0
+
+    # -- quality_gate_enabled flag ---------------------------------------------
+
+    def test_quality_gate_enabled_defaults_true_on_composite_strategies(self):
+        from Strategy_Auto_Trader.strategy.default import DefaultEntry
+        from Strategy_Auto_Trader.strategy.conservative import ConservativeEntry
+        from Strategy_Auto_Trader.strategy.trend_follow import TrendEntry
+        from Strategy_Auto_Trader.strategy.breakout_momentum import BreakoutMomentumEntry
+        from Strategy_Auto_Trader.strategy.ai_strategy import AiEntry
+        for cls in (DefaultEntry, ConservativeEntry, TrendEntry, BreakoutMomentumEntry, AiEntry):
+            assert cls.quality_gate_enabled is True
+
+    def test_quality_gate_enabled_false_on_partial_gate_strategies(self):
+        from Strategy_Auto_Trader.strategy.mean_reversion import MeanReversionEntry
+        from Strategy_Auto_Trader.strategy.choppy_vol import ChoppyVolEntry
+        assert MeanReversionEntry.quality_gate_enabled is False
+        assert ChoppyVolEntry.quality_gate_enabled is False
+
+    def test_default_entry_quality_gate_forces_sell_when_enabled(self):
+        # Adverse-exit context: regime_signal < -0.20 and above_sma20/50 both
+        # False (2 of 5 conditions) — forces SELL while in a position.
+        from Strategy_Auto_Trader.strategy.default import DefaultEntry
+        from Strategy_Auto_Trader.plugins.types import RegimeState
+        mom = {
+            "cur_rsi": 55.0, "recent_cross_above_50": True,
+            "recent_cross_below_40": False, "above_sma20": False,
+            "above_sma50": False, "above_sma200": True, "volume_ratio": 1.2,
+        }
+        regime = RegimeState(p_bull=0.3, p_bear=0.3, p_bull_smooth=0.3,
+                             regime_signal=-0.3, hmm_vote=1)
+        entry = DefaultEntry()
+        decision = entry.evaluate(regime, mom, 1.2, currently_in=True)
+        assert decision.gate_fired is True
+        assert decision.flag == "SELL"
+
+    def test_default_entry_quality_gate_disabled_skips_forced_sell(self):
+        # Same adverse-exit context as above, but quality_gate_enabled=False —
+        # the forced SELL must not fire; flag should just be the raw signal.
+        from Strategy_Auto_Trader.strategy.default import DefaultEntry
+        from Strategy_Auto_Trader.plugins.types import RegimeState
+        mom = {
+            "cur_rsi": 55.0, "recent_cross_above_50": True,
+            "recent_cross_below_40": False, "above_sma20": False,
+            "above_sma50": False, "above_sma200": True, "volume_ratio": 1.2,
+        }
+        regime = RegimeState(p_bull=0.3, p_bear=0.3, p_bull_smooth=0.3,
+                             regime_signal=-0.3, hmm_vote=1)
+        entry = DefaultEntry(quality_gate_enabled=False)
+        decision = entry.evaluate(regime, mom, 1.2, currently_in=True)
+        assert decision.gate_fired is False
+        assert decision.flag == decision.raw_flag
+
+    # -- use_kelly / kelly_lookback declared on Exit classes --------------------
+
+    def test_exit_classes_declare_kelly_defaults(self):
+        from Strategy_Auto_Trader.strategy.default import DefaultExit
+        from Strategy_Auto_Trader.strategy.conservative import ConservativeExit
+        from Strategy_Auto_Trader.strategy.trend_follow import TrendExit
+        from Strategy_Auto_Trader.strategy.mean_reversion import MeanReversionExit
+        from Strategy_Auto_Trader.strategy.choppy_vol import ChoppyVolExit
+        for cls in (DefaultExit, ConservativeExit, TrendExit, MeanReversionExit, ChoppyVolExit):
+            assert cls.use_kelly is True
+            assert cls.kelly_lookback == 20

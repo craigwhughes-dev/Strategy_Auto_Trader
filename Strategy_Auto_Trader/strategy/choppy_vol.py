@@ -76,6 +76,10 @@ narrow; don't wait around for a big loss), modest take-profit +6%, and a
 40-bar max hold (matches the study's reversion-search cap) in case RSI
 never recovers, enforced via ChoppyVolExit.check(). No trailing stop — the
 point is a quick in/out, not letting a winner run.
+Kelly position sizing on (use_kelly=True, kelly_lookback=20).
+Quality gate: quality_gate_enabled=False (never calls _apply_quality_gate;
+the RSI-reversion SELL above is this strategy's own exit signal, not the
+shared gate).
 """
 
 from __future__ import annotations
@@ -99,6 +103,8 @@ class ChoppyVolEntry:
     #: entirely) — declared only so consolidated_backtest's skip_unused_
     #: indicators optimisation knows the HMM regime model isn't needed here.
     _weights: dict[str, float] = {"hmm": 0.0, "rsi": 1.0}
+    #: Documentation-only — this strategy never calls _apply_quality_gate.
+    quality_gate_enabled: bool = False
 
     def __init__(self, vol_filter_ok: bool = True) -> None:
         """vol_filter_ok is accepted only for registry constructor-signature
@@ -155,6 +161,8 @@ class ChoppyVolExit:
     _target: float = 0.06
     _max_hold_bars: int = 40
     min_hold_bars: int = 0  # Allow signal-based SELL immediately (no hold gate)
+    use_kelly: bool = True
+    kelly_lookback: int = 20
 
     def __init__(self) -> None:
         self._impl = StandardExitRules(
