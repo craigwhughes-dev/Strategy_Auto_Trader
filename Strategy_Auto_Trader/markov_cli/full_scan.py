@@ -7,9 +7,13 @@ hourly backtest over the maximum history yfinance offers at 1h interval
 vol profile is computed and *recorded* instead of used to skip.
 
 Per ticker, written as soon as that ticker finishes (so review can start
-while the scan is still running):
+while the scan is still running). Output paths are namespaced by
+strategy (`_scan_paths()`) so a multi-strategy sweep can't have one
+strategy's per-ticker files overwrite another's, or make the resume/skip
+check wrongly think a ticker is already done under a different strategy:
 
-  reports/full_scan/hourly/<ticker>.csv   every bar, every engine column
+  reports/full_scan/<strategy>/hourly/<ticker>.csv
+                                          every bar, every engine column
                                           plus raw indicator values
                                           (SMAs, MACD, Bollinger, ATR,
                                           SAR, rolling vol, exit flags)
@@ -18,11 +22,13 @@ while the scan is still running):
                                           Same column set as daily.csv;
                                           the day_* aggregate columns are
                                           blank here (bar granularity).
-  reports/full_scan/daily/<ticker>.csv    one row per calendar day:
+  reports/full_scan/<strategy>/daily/<ticker>.csv
+                                          one row per calendar day:
                                           end-of-day snapshot of all
                                           columns + intraday aggregates
                                           + the ticker's vol profile
-  data/journals/full_scan/<ticker>.csv    per-ticker trade journal: one
+  data/journals/full_scan/<strategy>/<ticker>.csv
+                                          per-ticker trade journal: one
                                           row per closed trade (the usual
                                           TradeRecord fields) plus, on
                                           every row, the ticker+strategy
@@ -104,9 +110,22 @@ from ..strategy.base.registry import resolve_strategy
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 UNIVERSE_FILE = ROOT / "config" / "universe_full.json"
+SP_FTSE_UNIVERSE_FILE = ROOT / "config" / "universe_sp_ftse.json"
 SCAN_DIR = ROOT / "reports" / "full_scan"
 JOURNAL_DIR = ROOT / "data" / "journals" / "full_scan"
 HMM_CACHE_DIR = ROOT / "state" / "hmm_cache"
+
+
+def _scan_paths(strategy: str, ticker: str) -> tuple[Path, Path, Path]:
+    """(hourly_csv, daily_csv, journal_csv) for one (strategy, ticker) —
+    strategy-namespaced so a multi-strategy sweep can't have strategy #2
+    overwrite strategy #1's per-ticker files or make the resume/skip check
+    wrongly think a ticker is already done under a different strategy."""
+    safe = ticker.replace("/", "-").replace("\\", "-")
+    hourly = SCAN_DIR / strategy / "hourly" / f"{safe}.csv"
+    daily = SCAN_DIR / strategy / "daily" / f"{safe}.csv"
+    journal = JOURNAL_DIR / strategy / f"{safe}.csv"
+    return hourly, daily, journal
 
 
 def _cache_vix_regime_for_process() -> None:
@@ -378,6 +397,35 @@ def load_universe() -> list[str]:
     return data["tickers"]
 
 
+def build_sp_ftse_universe(out_path: Path = SP_FTSE_UNIVERSE_FILE) -> list[str]:
+    """Fetch fresh S&P 500 + FTSE 100 constituent lists only (no watchlist
+    union) and cache them, so a multi-strategy sweep over just these two
+    indices fetches Wikipedia once instead of once per strategy."""
+    sources: dict[str, list[str]] = {}
+    for name, fn in (("ftse100", _ftse100_tickers), ("sp500", _sp500_tickers)):
+        sources[name] = fn()
+        print(f"  {name}: {len(sources[name])} tickers from Wikipedia")
+
+    all_tickers = set(sources["ftse100"]) | set(sources["sp500"])
+    uk = sorted(t for t in all_tickers if t.endswith(".L"))
+    us = sorted(t for t in all_tickers if not t.endswith(".L"))
+    universe = uk + us
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps({
+        "built": datetime.now().isoformat(timespec="seconds"),
+        "sources": {k: len(v) for k, v in sources.items()},
+        "tickers": universe,
+    }, indent=2), encoding="utf-8")
+    print(f"  sp_ftse universe: {len(universe)} tickers ({len(uk)} UK + {len(us)} US) -> {out_path}")
+    return universe
+
+
+def load_sp_ftse_universe() -> list[str]:
+    data = json.loads(SP_FTSE_UNIVERSE_FILE.read_text(encoding="utf-8"))
+    return data["tickers"]
+
+
 # ---------------------------------------------------------------------------
 # Per-ticker indicator augmentation
 # ---------------------------------------------------------------------------
@@ -545,8 +593,7 @@ def scan_ticker(
     for k in _DAILY_ONLY_KEYS:
         hourly[k] = np.nan
 
-    hourly_path = SCAN_DIR / "hourly" / f"{safe}.csv"
-    daily_path = SCAN_DIR / "daily" / f"{safe}.csv"
+    hourly_path, daily_path, journal_path = _scan_paths(strategy_name, ticker)
     hourly_path.parent.mkdir(parents=True, exist_ok=True)
     daily_path.parent.mkdir(parents=True, exist_ok=True)
     hourly.to_csv(hourly_path)
@@ -566,7 +613,7 @@ def scan_ticker(
     extra_cols.update(_trade_aggregates(trades, bt, trade_cost, days_covered))
     extra_cols.update(_ticker_sentiment(ticker, sentiment))
 
-    _write_ticker_journal(JOURNAL_DIR / f"{safe}.csv", trades, extra_cols, hourly)
+    _write_ticker_journal(journal_path, trades, extra_cols, hourly)
 
     for k in _SUMMARY_STAT_KEYS:
         row[k] = bt.get(k)
@@ -612,8 +659,8 @@ def main(argv: list[str] | None = None) -> int:
 
     done = failed = skipped = 0
     for i, ticker in enumerate(tickers, 1):
-        safe = ticker.replace("/", "-").replace("\\", "-")
-        if not args.force and (SCAN_DIR / "daily" / f"{safe}.csv").exists():
+        _, daily_path, _ = _scan_paths(args.strategy, ticker)
+        if not args.force and daily_path.exists():
             skipped += 1
             continue
         print(f"[{i}/{len(tickers)}] {ticker} ...", flush=True)

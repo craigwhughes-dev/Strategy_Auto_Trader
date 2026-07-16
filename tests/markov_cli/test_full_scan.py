@@ -138,6 +138,33 @@ class TestSummaryRow:
             assert k in full_scan._SUMMARY_COLUMNS
 
 
+class TestScanPaths:
+    def test_paths_namespaced_by_strategy(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(full_scan, "SCAN_DIR", tmp_path / "reports")
+        monkeypatch.setattr(full_scan, "JOURNAL_DIR", tmp_path / "journals")
+        hourly, daily, journal = full_scan._scan_paths("default", "AAA")
+        assert hourly == tmp_path / "reports" / "default" / "hourly" / "AAA.csv"
+        assert daily == tmp_path / "reports" / "default" / "daily" / "AAA.csv"
+        assert journal == tmp_path / "journals" / "default" / "AAA.csv"
+
+    def test_paths_differ_across_strategies(self):
+        h1, d1, j1 = full_scan._scan_paths("default", "AAA")
+        h2, d2, j2 = full_scan._scan_paths("conservative", "AAA")
+        assert h1 != h2
+        assert d1 != d2
+        assert j1 != j2
+
+    def test_ticker_slashes_sanitized(self):
+        hourly, daily, journal = full_scan._scan_paths("default", "BRK/B")
+        assert hourly.name == "BRK-B.csv"
+        assert daily.name == "BRK-B.csv"
+        assert journal.name == "BRK-B.csv"
+
+    def test_uk_ticker_dot_l_preserved(self):
+        hourly, _, _ = full_scan._scan_paths("default", "SHEL.L")
+        assert hourly.name == "SHEL.L.csv"
+
+
 class TestUniverse:
     def _fake_tables(self, col: str, symbols: list[str]) -> list[pd.DataFrame]:
         return [pd.DataFrame({col: symbols, "Name": ["x"] * len(symbols)})]
@@ -172,6 +199,22 @@ class TestUniverse:
             '{"tickers": ["BBB", "CCC"]}', encoding="utf-8")
         monkeypatch.setattr(full_scan, "ROOT", tmp_path)
         assert full_scan._watchlist_tickers() == ["AAA", "BBB", "CCC"]
+
+    def test_build_sp_ftse_universe_no_watchlist_union(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(full_scan, "_sp500_tickers", lambda: ["AAPL", "MSFT"])
+        monkeypatch.setattr(full_scan, "_ftse100_tickers", lambda: ["SHEL.L"])
+        out_path = tmp_path / "universe_sp_ftse.json"
+        tickers = full_scan.build_sp_ftse_universe(out_path)
+        assert tickers == ["SHEL.L", "AAPL", "MSFT"]
+        assert out_path.exists()
+
+    def test_load_sp_ftse_universe(self, tmp_path, monkeypatch):
+        out_path = tmp_path / "universe_sp_ftse.json"
+        monkeypatch.setattr(full_scan, "SP_FTSE_UNIVERSE_FILE", out_path)
+        monkeypatch.setattr(full_scan, "_sp500_tickers", lambda: ["AAPL"])
+        monkeypatch.setattr(full_scan, "_ftse100_tickers", lambda: ["SHEL.L"])
+        full_scan.build_sp_ftse_universe(out_path)
+        assert full_scan.load_sp_ftse_universe() == ["SHEL.L", "AAPL"]
 
 
 def _trade(pnl_usd, return_pct, opened, closed) -> TradeRecord:
