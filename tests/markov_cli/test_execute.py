@@ -306,3 +306,161 @@ class TestExecuteSignalsNormal:
         assert buys == []
         assert sells == []
         assert skipped == ["AAPL"]
+
+
+class TestInFlightMarkerIntegration:
+    """Test marker write/clear around place_order() calls."""
+
+    def test_marker_written_and_cleared_on_successful_buy(self, monkeypatch, tmp_path):
+        """Marker is written before place_order and cleared after for successful BUY."""
+        from Strategy_Auto_Trader.markov_cli.execute import execute_signals
+        from Strategy_Auto_Trader.broker.types import FillResult
+        from Strategy_Auto_Trader.broker.in_flight_marker import read_marker
+
+        portfolio = mock.Mock()
+        limit_tracker = mock.Mock()
+        broker = mock.Mock()
+        data_dir = None
+
+        portfolio.can_open.return_value = True
+        portfolio.compute_quantity.return_value = 10
+
+        fill = FillResult("AAPL", "BUY", 150.0, 10, "2026-07-01T00:00:00Z")
+        broker.place_order.return_value = fill
+
+        signal_reader = mock.Mock()
+        signal_reader.return_value = {"flag": "BUY", "close": 150.0, "kelly_fraction": 0.1, "stop_level": 140.0, "target_level": 160.0}
+
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.broker.signal_reader.read_latest_signal",
+            signal_reader
+        )
+
+        marker_path = tmp_path / "marker.json"
+        execute_signals(
+            ["AAPL"],
+            data_dir,
+            portfolio,
+            limit_tracker,
+            broker,
+            daily_buy_limit=2,
+            daily_sell_limit=None,
+            marker_path=marker_path,
+        )
+
+        assert not marker_path.exists()
+
+    def test_marker_written_and_cleared_on_successful_sell(self, monkeypatch, tmp_path):
+        """Marker is written before place_order and cleared after for successful SELL."""
+        from Strategy_Auto_Trader.markov_cli.execute import execute_signals
+        from Strategy_Auto_Trader.broker.types import FillResult
+
+        portfolio = mock.Mock()
+        limit_tracker = mock.Mock()
+        broker = mock.Mock()
+        data_dir = None
+
+        portfolio.can_sell.return_value = True
+        portfolio.positions = {"AAPL": {"quantity": 10}}
+
+        fill = FillResult("AAPL", "SELL", 150.0, 10, "2026-07-01T00:00:00Z")
+        broker.place_order.return_value = fill
+
+        signal_reader = mock.Mock()
+        signal_reader.return_value = {"flag": "SELL", "close": 150.0, "kelly_fraction": 0.1}
+
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.broker.signal_reader.read_latest_signal",
+            signal_reader
+        )
+
+        marker_path = tmp_path / "marker.json"
+        execute_signals(
+            ["AAPL"],
+            data_dir,
+            portfolio,
+            limit_tracker,
+            broker,
+            daily_buy_limit=2,
+            daily_sell_limit=None,
+            marker_path=marker_path,
+        )
+
+        assert not marker_path.exists()
+
+    def test_marker_cleared_when_order_not_filled(self, monkeypatch, tmp_path):
+        """Marker is cleared when place_order returns None (not filled)."""
+        from Strategy_Auto_Trader.markov_cli.execute import execute_signals
+
+        portfolio = mock.Mock()
+        limit_tracker = mock.Mock()
+        broker = mock.Mock()
+        data_dir = None
+
+        portfolio.can_open.return_value = True
+        portfolio.compute_quantity.return_value = 10
+        broker.place_order.return_value = None  # Not filled
+
+        signal_reader = mock.Mock()
+        signal_reader.return_value = {"flag": "BUY", "close": 150.0, "kelly_fraction": 0.1, "stop_level": 140.0, "target_level": 160.0}
+
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.broker.signal_reader.read_latest_signal",
+            signal_reader
+        )
+
+        marker_path = tmp_path / "marker.json"
+        execute_signals(
+            ["AAPL"],
+            data_dir,
+            portfolio,
+            limit_tracker,
+            broker,
+            daily_buy_limit=2,
+            daily_sell_limit=None,
+            marker_path=marker_path,
+        )
+
+        assert not marker_path.exists()
+
+    def test_marker_left_in_place_on_exception(self, monkeypatch, tmp_path):
+        """Marker is deliberately left in place when place_order() raises."""
+        from Strategy_Auto_Trader.markov_cli.execute import execute_signals, ExecutionInterrupted
+        from Strategy_Auto_Trader.broker.in_flight_marker import read_marker
+
+        portfolio = mock.Mock()
+        limit_tracker = mock.Mock()
+        broker = mock.Mock()
+        data_dir = None
+
+        portfolio.can_open.return_value = True
+        portfolio.compute_quantity.return_value = 10
+        broker.place_order.side_effect = RuntimeError("Socket error during place_order")
+
+        signal_reader = mock.Mock()
+        signal_reader.return_value = {"flag": "BUY", "close": 150.0, "kelly_fraction": 0.1, "stop_level": 140.0, "target_level": 160.0}
+
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.broker.signal_reader.read_latest_signal",
+            signal_reader
+        )
+
+        marker_path = tmp_path / "marker.json"
+
+        with pytest.raises(ExecutionInterrupted):
+            execute_signals(
+                ["AAPL"],
+                data_dir,
+                portfolio,
+                limit_tracker,
+                broker,
+                daily_buy_limit=2,
+                daily_sell_limit=None,
+                marker_path=marker_path,
+            )
+
+        marker = read_marker(marker_path)
+        assert marker is not None
+        assert marker["ticker"] == "AAPL"
+        assert marker["action"] == "BUY"
+        assert marker["quantity"] == 10

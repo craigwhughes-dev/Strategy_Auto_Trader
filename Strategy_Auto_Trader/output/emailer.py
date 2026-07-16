@@ -249,7 +249,7 @@ def send_execution_interrupted_alert(
     html = f"""<html><body style="margin:0;padding:20px;background:#0f1117;font-family:system-ui,sans-serif;color:#e0e0e0">
 <div style="max-width:700px;margin:0 auto">
   <h1 style="color:#ef9a9a;margin:0 0 4px">Execution interrupted</h1>
-  <div style="color:#888;margin-bottom:16px">[{market_name}] Connection lost after orders were placed</div>
+  <div style="color:#888;margin-bottom:16px">[{market_name}] Connection lost during order execution — some outcomes unknown</div>
   <div style="background:#2a1a1a;border:1px solid #4a2a2a;border-radius:8px;padding:12px 16px;margin:16px 0">
     <p style="color:#ddd;margin:0 0 8px"><strong>Error:</strong> {error}</p>
     {orders_section}
@@ -262,7 +262,10 @@ def send_execution_interrupted_alert(
 </div></body></html>"""
 
     n_orders = len(buys) + len(sells)
-    subject = f"EXECUTION INTERRUPTED [{market_name}]: {n_orders} order(s) placed before failure — new entries halted"
+    if n_orders:
+        subject = f"EXECUTION INTERRUPTED [{market_name}]: {n_orders} order(s) placed before failure — new entries halted"
+    else:
+        subject = f"EXECUTION INTERRUPTED [{market_name}]: {len(unresolved)} ticker(s) outcome unknown — new entries halted"
     _send(subject, html)
     print(f"  Execution-interrupted alert sent: {subject}")
 

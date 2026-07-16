@@ -626,6 +626,226 @@ class TestReconciliation:
         saved = json.loads(state_path.read_text(encoding="utf-8"))
         assert saved["halt_new_entries"] is False
 
+    def test_mismatch_dedup_suppresses_repeated_alerts(self):
+        """Same mismatch + already alerted → skip email, log warning instead."""
+        sent = {}
+        def fake_alert(d):
+            sent["alert_sent"] = True
+            sent["discrepancies"] = d
+
+        discrepancies_list = ["SPY: internal state shows 10 shares, broker shows 7"]
+        daemon_state = {
+            "reconciliation_discrepancies": discrepancies_list,
+            "reconciliation_mismatch_alerted": True,
+        }
+
+        outcome = live_daemon.run_reconciliation(
+            self._portfolio({"SPY": {"quantity": 10}}),
+            self._broker({"SPY": 7}),
+            daemon_state, mock.Mock(),
+            save_state=lambda s: None,
+            send_alert=fake_alert,
+        )
+        assert outcome == "mismatch"
+        assert daemon_state["halt_new_entries"] is True
+        assert "alert_sent" not in sent  # Email suppressed
+        assert daemon_state["reconciliation_mismatch_alerted"] is True
+
+    def test_mismatch_dedup_fires_on_different_discrepancies(self):
+        """New discrepancy list + already alerted → alert fires (regression test for Fix 2)."""
+        sent = []
+        def fake_alert(d):
+            sent.append(d)
+
+        old_discrepancies = ["SPY: internal state shows 10 shares, broker shows 7"]
+        daemon_state = {
+            "reconciliation_discrepancies": old_discrepancies,
+            "reconciliation_mismatch_alerted": True,
+        }
+
+        outcome = live_daemon.run_reconciliation(
+            self._portfolio({"AAPL": {"quantity": 5}}),
+            self._broker({}),
+            daemon_state, mock.Mock(),
+            save_state=lambda s: None,
+            send_alert=fake_alert,
+        )
+        assert outcome == "mismatch"
+        assert daemon_state["halt_new_entries"] is True
+        assert len(sent) == 1  # New alert sent
+        assert daemon_state["reconciliation_discrepancies"] == ["AAPL: internal state shows 5 shares, broker shows no position"]
+        assert daemon_state["reconciliation_mismatch_alerted"] is True
+
+    def test_mismatch_dedup_sends_on_first_occurrence(self):
+        """New mismatch or first time → send alert."""
+        sent = []
+        def fake_alert(d):
+            sent.append(d)
+
+        daemon_state = {}
+
+        outcome = live_daemon.run_reconciliation(
+            self._portfolio({"SPY": {"quantity": 10}}),
+            self._broker({"SPY": 7}),
+            daemon_state, mock.Mock(),
+            save_state=lambda s: None,
+            send_alert=fake_alert,
+        )
+        assert outcome == "mismatch"
+        assert len(sent) == 1
+        assert daemon_state["reconciliation_mismatch_alerted"] is True
+
+    def test_mismatch_dedup_flag_reset_on_clean(self):
+        """Clean pass resets the mismatch-alerted flag."""
+        daemon_state = {
+            "reconciliation_mismatch_alerted": True,
+            "halt_new_entries": True,
+        }
+
+        outcome = live_daemon.run_reconciliation(
+            self._portfolio({"SPY": {"quantity": 10}}),
+            self._broker({"SPY": 10}),
+            daemon_state, mock.Mock(),
+            save_state=lambda s: None,
+        )
+        assert outcome == "clean"
+        assert daemon_state["halt_new_entries"] is False
+        assert daemon_state["reconciliation_mismatch_alerted"] is False
+
+    def test_run_startup_reconciliation_forces_halt_on_entry(self):
+        """startup_reconciliation must force halt_new_entries=True immediately."""
+        daemon_state = {"halt_new_entries": False}
+
+        outcome = live_daemon.run_startup_reconciliation(
+            daemon_state,
+            self._portfolio({"SPY": {"quantity": 10}}),
+            self._broker({"SPY": 10}),
+            mock.Mock(),
+            run_recon=lambda *a, **k: "clean",
+            save_state=lambda s: None,
+        )
+        assert daemon_state["halt_new_entries"] is True
+        assert outcome is True
+
+    def test_run_startup_reconciliation_delegates_to_run_recon(self):
+        """startup_reconciliation calls the provided run_recon function."""
+        calls = []
+        def fake_recon(*args, **kwargs):
+            calls.append((args, kwargs))
+            return "clean"
+
+        daemon_state = {}
+        outcome = live_daemon.run_startup_reconciliation(
+            daemon_state,
+            self._portfolio({"SPY": {"quantity": 10}}),
+            self._broker({"SPY": 10}),
+            mock.Mock(),
+            run_recon=fake_recon,
+            save_state=lambda s: None,
+        )
+        assert outcome is True
+        assert len(calls) == 1
+
+    def test_run_startup_reconciliation_returns_true_on_clean(self):
+        """reconciliation clean → return True (reconciliation done)."""
+        daemon_state = {}
+
+        outcome = live_daemon.run_startup_reconciliation(
+            daemon_state,
+            self._portfolio({"SPY": {"quantity": 10}}),
+            self._broker({"SPY": 10}),
+            mock.Mock(),
+            run_recon=lambda *a, **k: "clean",
+            save_state=lambda s: None,
+        )
+        assert outcome is True
+
+    def test_run_startup_reconciliation_returns_true_on_mismatch(self):
+        """reconciliation mismatch → return True (definitive outcome)."""
+        daemon_state = {}
+
+        outcome = live_daemon.run_startup_reconciliation(
+            daemon_state,
+            self._portfolio({"SPY": {"quantity": 10}}),
+            self._broker({"SPY": 7}),
+            mock.Mock(),
+            run_recon=lambda *a, **k: "mismatch",
+            save_state=lambda s: None,
+            send_interrupt_alert=lambda *a: None,
+        )
+        assert outcome is True
+
+    def test_run_startup_reconciliation_returns_false_on_error(self, tmp_path):
+        """reconciliation error → return False (caller retries)."""
+        daemon_state = {}
+        marker_path = tmp_path / "marker.json"
+
+        outcome = live_daemon.run_startup_reconciliation(
+            daemon_state,
+            self._portfolio({"SPY": {"quantity": 10}}),
+            self._broker({})  # Will fail on positions fetch
+            ,
+            mock.Mock(),
+            run_recon=lambda *a, **k: "error",
+            save_state=lambda s: None,
+            send_interrupt_alert=lambda *a: None,
+            marker_path=marker_path,
+        )
+        assert outcome is False
+
+    def test_run_startup_reconciliation_escalates_if_marker_present_and_error(self, tmp_path):
+        """error + marker → immediate escalation alert."""
+        from Strategy_Auto_Trader.broker.in_flight_marker import write_marker
+
+        alerted = []
+        def fake_escalate(market_name, error, buys, sells, unresolved):
+            alerted.append({
+                "market_name": market_name,
+                "error": error,
+                "buys": buys,
+                "sells": sells,
+                "unresolved": unresolved,
+            })
+
+        daemon_state = {}
+        marker_path = tmp_path / "marker.json"
+        write_marker(marker_path, "SPY", "BUY", 10)
+
+        outcome = live_daemon.run_startup_reconciliation(
+            daemon_state,
+            self._portfolio({}),
+            mock.Mock(),
+            mock.Mock(),
+            run_recon=lambda *a, **k: "error",
+            save_state=lambda s: None,
+            send_interrupt_alert=fake_escalate,
+            marker_path=marker_path,
+        )
+        assert outcome is False
+        assert len(alerted) == 1
+        assert alerted[0]["unresolved"] == ["SPY"]
+
+    def test_run_startup_reconciliation_clears_marker_on_clean(self, tmp_path):
+        """reconciliation clean + marker present → marker cleared."""
+        from Strategy_Auto_Trader.broker.in_flight_marker import write_marker, read_marker
+
+        daemon_state = {}
+        marker_path = tmp_path / "marker.json"
+        write_marker(marker_path, "SPY", "BUY", 10)
+        assert read_marker(marker_path) is not None
+
+        outcome = live_daemon.run_startup_reconciliation(
+            daemon_state,
+            self._portfolio({"SPY": {"quantity": 10}}),
+            self._broker({"SPY": 10}),
+            mock.Mock(),
+            run_recon=lambda *a, **k: "clean",
+            save_state=lambda s: None,
+            marker_path=marker_path,
+        )
+        assert outcome is True
+        assert read_marker(marker_path) is None
+
 
 def test_process_cycle_halt_flag_blocks_new_entries(monkeypatch):
     """halt_new_entries forces daily_buy_limit=0 into execute_signals."""
@@ -729,6 +949,48 @@ def test_main_keyboard_interrupt_skips_sleep(monkeypatch, config, tmp_path):
     assert live_daemon.main([]) == 0
     assert sleeps == []  # No sleep on shutdown
     assert snapshot_written  # Snapshot still written on the final iteration
+
+
+def test_main_startup_reconciliation_retries_until_done(monkeypatch, config, tmp_path):
+    """Startup reconciliation retries once per poll until resolved, then stops."""
+    from Strategy_Auto_Trader.core import self_check
+
+    startup_recon_calls = []
+
+    def fake_startup_recon(*args, **kwargs):
+        startup_recon_calls.append(1)
+        return len(startup_recon_calls) >= 2  # Fail first time, succeed second time
+
+    monkeypatch.setattr(live_daemon, "setup_logging", lambda: mock.Mock())
+    monkeypatch.setattr(live_daemon, "load_config", lambda: config)
+    monkeypatch.setattr(live_daemon, "validate_startup_environment", lambda logger: True)
+    monkeypatch.setattr(live_daemon, "acquire_process_lock",
+                        lambda logger, takeover=False: True)
+    monkeypatch.setattr(live_daemon, "release_process_lock", lambda logger: None)
+    monkeypatch.setattr(live_daemon, "kill_stray_daemons", lambda logger: 0)
+    monkeypatch.setattr(live_daemon, "cleanup_incomplete_runs", lambda d, l: 0)
+    monkeypatch.setattr(self_check, "run_startup_checks", lambda **kwargs: None)
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(live_daemon, "run_startup_reconciliation", fake_startup_recon)
+
+    loop_count = [0]
+
+    def fake_check_overnight(*args):
+        loop_count[0] += 1
+        if loop_count[0] >= 3:  # Exit after 2-3 loop iterations
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(live_daemon, "check_overnight_screening", fake_check_overnight)
+    monkeypatch.setattr(live_daemon, "check_nightly_reconciliation", lambda *a, **k: None)
+    monkeypatch.setattr(live_daemon, "process_manual_commands_wrapper", lambda *a, **k: None)
+    monkeypatch.setattr(live_daemon, "_write_app_status_snapshot_safe", lambda *a, **k: None)
+    monkeypatch.setattr(live_daemon, "is_trading_hours", lambda *a, **k: False)
+    monkeypatch.setattr(live_daemon.time, "sleep", lambda s: None)
+
+    config["execution"]["dry_run"] = False
+    assert live_daemon.main([]) == 0
+
+    assert len(startup_recon_calls) == 2  # Called twice: fails, retries, succeeds
 
 
 class TestExecuteSignalsWithRetry:
@@ -990,44 +1252,123 @@ class TestExecuteSignalsWithRetry:
         assert daemon_state["halt_new_entries"] is True
         assert result == ([], ["AAPL x100 @ 145.0"], ["MSFT"])
 
-    def test_execution_interrupted_no_orders_retries(self, monkeypatch):
-        """ExecutionInterrupted with empty buys/sells triggers safe retry path."""
+    def test_execution_interrupted_no_orders_still_halts_and_alerts(self, monkeypatch):
+        """ExecutionInterrupted with empty buys/sells still halts — unresolved's
+        broker-call outcome is unknown even when no confirmed fill exists yet.
+        Regression test for the VOD incident: a socket disconnect mid
+        place_order() must not be silently retried and dropped."""
         from Strategy_Auto_Trader.markov_cli import execute as execute_mod
-        import time
 
         call_count = [0]
         broker = mock.Mock()
         logger = mock.Mock()
         daemon_state = {"halt_new_entries": False}
+        saved_state = []
+        alerts = []
 
         def fake_execute(*args, **kwargs):
             call_count[0] += 1
-            if call_count[0] == 1:
-                exc = execute_mod.ExecutionInterrupted(
-                    RuntimeError("Early interrupt"),
-                    buys=[],
-                    sells=[],
-                    skipped=[],
-                    unresolved=["AAPL", "MSFT"],
-                )
-                raise exc
-            return ([], [], ["AAPL", "MSFT"])
+            raise execute_mod.ExecutionInterrupted(
+                RuntimeError("Early interrupt"),
+                buys=[],
+                sells=[],
+                skipped=[],
+                unresolved=["AAPL", "MSFT"],
+            )
 
-        def fake_sleep(secs):
-            pass
+        def fake_save(*args, **kwargs):
+            saved_state.append(True)
 
-        monkeypatch.setattr(time, "sleep", fake_sleep)
+        def mock_send_alert(*args, **kwargs):
+            alerts.append(args)
 
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL", "MSFT"], None, None, None, broker,
             2, None, logger, daemon_state=daemon_state, max_retries=2,
-            execute_signals=fake_execute
+            execute_signals=fake_execute,
+            save_state=fake_save,
+            send_interrupt_alert=mock_send_alert,
         )
 
-        assert daemon_state.get("halt_new_entries") is False  # Not halted
+        assert daemon_state["halt_new_entries"] is True
         assert result == ([], [], ["AAPL", "MSFT"])
-        assert broker.disconnect.called  # Should have retried
-        assert call_count[0] == 2  # Called twice (first failed, retry succeeded)
+        assert call_count[0] == 1  # No retry — halted on first interrupt
+        assert not broker.disconnect.called  # Should not retry
+        assert logger.critical.called
+        assert saved_state  # daemon_state was persisted
+        assert alerts  # alert email was sent
+
+    def test_execution_interrupted_alert_includes_unresolved_when_no_orders(self, monkeypatch):
+        """Alert call carries the unresolved ticker(s) even when buys/sells are empty —
+        guards against a regression where alerting only fires for confirmed fills."""
+        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
+
+        broker = mock.Mock()
+        logger = mock.Mock()
+        daemon_state = {"halt_new_entries": False}
+        alert_calls = []
+
+        def fake_execute(*args, **kwargs):
+            raise execute_mod.ExecutionInterrupted(
+                RuntimeError("Socket disconnect"),
+                buys=[],
+                sells=[],
+                skipped=[],
+                unresolved=["VOD.L"],
+            )
+
+        def mock_send_alert(*args, **kwargs):
+            alert_calls.append(args)
+
+        live_daemon.execute_signals_with_retry(
+            "ftse", ["VOD.L"], None, None, None, broker,
+            2, None, logger, daemon_state=daemon_state,
+            execute_signals=fake_execute,
+            save_state=lambda s: None,
+            send_interrupt_alert=mock_send_alert,
+        )
+
+        assert len(alert_calls) == 1
+        market_name, error, buys, sells, unresolved = alert_calls[0]
+        assert buys == []
+        assert sells == []
+        assert unresolved == ["VOD.L"]
+
+    def test_execution_interrupted_single_unresolved_ticker_matches_incident(self, monkeypatch):
+        """Shape of the real VOD incident: one ticker in the batch, socket disconnect
+        mid place_order(), no confirmed fills — must halt and alert, not retry."""
+        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
+
+        broker = mock.Mock()
+        logger = mock.Mock()
+        daemon_state = {"halt_new_entries": False}
+        call_count = [0]
+
+        def fake_execute(*args, **kwargs):
+            call_count[0] += 1
+            raise execute_mod.ExecutionInterrupted(
+                RuntimeError("Socket disconnect during order placement: Socket disconnect."),
+                buys=[],
+                sells=[],
+                skipped=[],
+                unresolved=["VOD.L"],
+            )
+
+        def mock_send_alert(*args, **kwargs):
+            pass
+
+        result = live_daemon.execute_signals_with_retry(
+            "ftse", ["VOD.L"], None, None, None, broker,
+            2, None, logger, daemon_state=daemon_state, max_retries=3,
+            execute_signals=fake_execute,
+            save_state=lambda s: None,
+            send_interrupt_alert=mock_send_alert,
+        )
+
+        assert daemon_state["halt_new_entries"] is True
+        assert result == ([], [], ["VOD.L"])
+        assert call_count[0] == 1  # Not retried 3x like the real incident did
+        assert not broker.disconnect.called
 
     def test_execution_interrupted_no_daemon_state_doesnt_crash(self, monkeypatch):
         """ExecutionInterrupted works without daemon_state parameter."""

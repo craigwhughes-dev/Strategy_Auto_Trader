@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -21,6 +22,8 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = ROOT / "data"
 STATE_DIR = ROOT / "state"
 CONFIG_DIR = ROOT / "config"
+
+logger = logging.getLogger("live_daemon.execute")
 
 
 class ExecutionInterrupted(Exception):
@@ -90,15 +93,20 @@ def execute_signals(
     daily_sell_limit: int | None = None,
     market_name: str = "",
     market_currency: str = "",
+    marker_path: Path | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
     """Execute BUY/SELL signals for the given tickers.
 
     Returns (buys, sells, skipped) lists of strings for logging/display.
     Modifies portfolio and limit_tracker state in place.
     """
+    from ..broker.in_flight_marker import write_marker, clear_marker
     from ..broker.signal_reader import read_latest_signal
     from ..broker.symbols import sizing_price
     from ..broker.types import FillResult, OrderRequest
+
+    if marker_path is None:
+        marker_path = STATE_DIR / "order_in_flight.json"
 
     buys: list[str] = []
     sells: list[str] = []
@@ -138,7 +146,22 @@ def execute_signals(
                 skipped.append(f"{ticker}(qty=0)")
                 resolved.add(ticker)
                 continue
-            fill = broker.place_order(OrderRequest(ticker, "BUY", qty))
+            logger.info(f"About to place order: BUY {qty}x {ticker} — marker written")
+            write_marker(marker_path, ticker, "BUY", qty)
+            try:
+                fill = broker.place_order(OrderRequest(ticker, "BUY", qty))
+            except Exception as e:
+                logger.warning(f"Order call for {ticker} raised before returning — in-flight marker left in place: {e}")
+                raise
+            try:
+                clear_marker(marker_path)
+            except Exception as e:
+                logger.warning(f"Failed to clear in-flight marker for {ticker} after a successful order: {e}")
+
+            if fill is not None:
+                logger.info(f"Order placed: BUY {qty}x {ticker} @ {fill.fill_price} — marker cleared")
+            else:
+                logger.info(f"Order not filled: BUY {qty}x {ticker} (status not Filled) — marker cleared")
 
             # Order not filled (cancelled, partially filled, etc.)
             if fill is None:
@@ -209,7 +232,22 @@ def execute_signals(
                 resolved.add(ticker)
                 continue
             qty = portfolio.positions[ticker]["quantity"]
-            fill = broker.place_order(OrderRequest(ticker, "SELL", qty))
+            logger.info(f"About to place order: SELL {qty}x {ticker} — marker written")
+            write_marker(marker_path, ticker, "SELL", qty)
+            try:
+                fill = broker.place_order(OrderRequest(ticker, "SELL", qty))
+            except Exception as e:
+                logger.warning(f"Order call for {ticker} raised before returning — in-flight marker left in place: {e}")
+                raise
+            try:
+                clear_marker(marker_path)
+            except Exception as e:
+                logger.warning(f"Failed to clear in-flight marker for {ticker} after a successful order: {e}")
+
+            if fill is not None:
+                logger.info(f"Order placed: SELL {qty}x {ticker} @ {fill.fill_price} — marker cleared")
+            else:
+                logger.info(f"Order not filled: SELL {qty}x {ticker} (status not Filled) — marker cleared")
 
             # Order not filled (cancelled, partially filled, etc.)
             if fill is None:

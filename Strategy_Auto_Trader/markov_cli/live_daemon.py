@@ -576,47 +576,30 @@ def execute_signals_with_retry(
                 market_currency=market_currency,
             )
         except ExecutionInterrupted as exc:
-            if exc.buys or exc.sells:
-                logger.critical(
-                    f"[{market_name}] Execution interrupted mid-batch after "
-                    f"{len(exc.buys)} buy(s)/{len(exc.sells)} sell(s) already placed "
-                    f"— halting new entries, not retrying. Unresolved: {exc.unresolved}. "
-                    f"Error: {exc.original}"
+            # exc.unresolved always contains at least the ticker that was being
+            # processed when the exception hit — its broker-call outcome is
+            # unknown (order may have reached IB before the ack was lost).
+            # There is no "nothing happened yet, safe to retry" case here.
+            logger.critical(
+                f"[{market_name}] Execution interrupted — outcome of {exc.unresolved} "
+                f"unknown (broker call may have gone through before the connection "
+                f"dropped). {len(exc.buys)} buy(s)/{len(exc.sells)} sell(s) confirmed "
+                f"placed before the interrupt. Halting new entries, not retrying. "
+                f"Error: {exc.original}"
+            )
+            if daemon_state is not None:
+                daemon_state["halt_new_entries"] = True
+                save_state(daemon_state)
+            try:
+                if send_interrupt_alert is None:
+                    from ..output.emailer import send_execution_interrupted_alert
+                    send_interrupt_alert = send_execution_interrupted_alert
+                send_interrupt_alert(
+                    market_name, exc.original, exc.buys, exc.sells, exc.unresolved
                 )
-                if daemon_state is not None:
-                    daemon_state["halt_new_entries"] = True
-                    save_state(daemon_state)
-                try:
-                    if send_interrupt_alert is None:
-                        from ..output.emailer import send_execution_interrupted_alert
-                        send_interrupt_alert = send_execution_interrupted_alert
-                    send_interrupt_alert(
-                        market_name, exc.original, exc.buys, exc.sells, exc.unresolved
-                    )
-                except Exception as email_err:
-                    logger.error(f"[{market_name}] Execution-interrupted alert email failed: {email_err}")
-                return exc.buys, exc.sells, exc.skipped + exc.unresolved
-            else:
-                logger.warning(
-                    f"[{market_name}] Execution interrupted before any order placed "
-                    f"(attempt {attempt + 1}/{max_retries}): {exc.original}. Retrying..."
-                )
-                if attempt < max_retries - 1:
-                    wait_secs = 2 ** attempt
-                    time.sleep(wait_secs)
-                    try:
-                        broker.disconnect()
-                        time.sleep(0.5)
-                        broker.connect()
-                        logger.info(f"[{market_name}] Broker reconnected successfully")
-                    except Exception as reconnect_err:
-                        logger.warning(f"[{market_name}] Reconnect attempt failed: {reconnect_err}")
-                else:
-                    logger.error(
-                        f"[{market_name}] Execution interrupt persists after {max_retries} attempts. "
-                        f"Skipping signals for this cycle."
-                    )
-                    return [], [], ticker_list
+            except Exception as email_err:
+                logger.error(f"[{market_name}] Execution-interrupted alert email failed: {email_err}")
+            return exc.buys, exc.sells, exc.skipped + exc.unresolved
         except (ConnectionError, OSError, TimeoutError) as e:
             if attempt < max_retries - 1:
                 wait_secs = 2 ** attempt
@@ -872,18 +855,21 @@ def run_reconciliation(
         save_state = save_daemon_state
 
     if not broker.is_connected():
+        logger.info("Reconciliation: broker not connected — connecting...")
         try:
             broker.connect()
         except Exception as e:
             logger.error(f"Reconciliation: broker connect failed: {e}")
             return "error"
 
+    logger.debug("Reconciliation: fetching broker positions...")
     try:
         broker_positions = broker.get_open_positions()
     except Exception as e:
         logger.error(f"Reconciliation: could not fetch broker positions: {e}")
         return "error"
 
+    logger.info(f"Reconciliation: comparing {len(portfolio.positions)} internal position(s) against broker...")
     discrepancies = reconcile_positions(portfolio.positions, broker_positions)
 
     if discrepancies:
@@ -891,16 +877,26 @@ def run_reconciliation(
                      f"— halting new entries:")
         for d in discrepancies:
             logger.error(f"  {d}")
+        last_discrepancies = daemon_state.get("reconciliation_discrepancies", [])
+        already_alerted = daemon_state.get("reconciliation_mismatch_alerted", False)
+
         daemon_state["halt_new_entries"] = True
         daemon_state["reconciliation_discrepancies"] = discrepancies
+
+        if discrepancies == last_discrepancies and already_alerted:
+            logger.info("Mismatch unchanged since last alert — halt stays set, email suppressed")
+        else:
+            logger.warning(f"About to send reconciliation mismatch alert ({len(discrepancies)} discrepancies)...")
+            try:
+                if send_alert is None:
+                    from ..output.emailer import send_reconciliation_alert
+                    send_alert = send_reconciliation_alert
+                send_alert(discrepancies)
+            except Exception as e:
+                logger.error(f"Reconciliation: alert email failed: {e}")
+            daemon_state["reconciliation_mismatch_alerted"] = True
+
         save_state(daemon_state)
-        try:
-            if send_alert is None:
-                from ..output.emailer import send_reconciliation_alert
-                send_alert = send_reconciliation_alert
-            send_alert(discrepancies)
-        except Exception as e:
-            logger.error(f"Reconciliation: alert email failed: {e}")
         return "mismatch"
 
     if daemon_state.get("halt_new_entries"):
@@ -910,8 +906,69 @@ def run_reconciliation(
                     f"positions match broker")
     daemon_state["halt_new_entries"] = False
     daemon_state["reconciliation_discrepancies"] = []
+    daemon_state["reconciliation_mismatch_alerted"] = False
     save_state(daemon_state)
     return "clean"
+
+
+def run_startup_reconciliation(
+    daemon_state: dict,
+    portfolio: object,
+    broker: object,
+    logger: logging.Logger,
+    *,
+    run_recon: Callable | None = None,
+    save_state: Callable | None = None,
+    send_interrupt_alert: Callable | None = None,
+    marker_path: Path | None = None,
+) -> bool:
+    """Reconciliation pass on daemon startup.
+
+    Forces halt_new_entries = True immediately (fail-safe), reads in-flight
+    marker if any, delegates to run_reconciliation for the actual comparison,
+    and escalates to immediate alert if broker unreachable with marker present.
+    Returns True only when reconciliation completes (clean or mismatch), False
+    if broker unreachable (caller retries).
+    """
+    from ..broker.in_flight_marker import read_marker
+
+    if run_recon is None:
+        run_recon = run_reconciliation
+    if save_state is None:
+        save_state = save_daemon_state
+    if marker_path is None:
+        marker_path = STATE_DIR / "order_in_flight.json"
+
+    daemon_state["halt_new_entries"] = True
+
+    marker = read_marker(marker_path)
+    logger.info(f"About to run startup reconciliation (in-flight marker present: {marker is not None})...")
+
+    outcome = run_recon(portfolio, broker, daemon_state, logger,
+                        save_state=save_state)
+
+    if outcome == "error":
+        logger.warning("Startup reconciliation could not reach broker — will retry next poll")
+        if marker is not None:
+            logger.critical("About to send startup in-flight alert (broker unreachable, marker present)...")
+            try:
+                if send_interrupt_alert is None:
+                    from ..output.emailer import send_execution_interrupted_alert
+                    send_interrupt_alert = send_execution_interrupted_alert
+                send_interrupt_alert(
+                    "startup", RuntimeError("broker unreachable at startup with an in-flight order marker present"),
+                    [], [], [marker["ticker"]]
+                )
+            except Exception as e:
+                logger.error(f"Startup reconciliation: in-flight alert email failed: {e}")
+        return False
+
+    logger.info(f"Startup reconciliation resolved: {outcome} — halt {'remains set' if outcome == 'mismatch' else 'cleared'}")
+    if marker is not None:
+        logger.info("In-flight marker cleared after reconciliation completed")
+        marker_path.unlink(missing_ok=True)
+
+    return True
 
 
 def check_nightly_reconciliation(
@@ -1069,12 +1126,9 @@ def main(argv: list[str] | None = None) -> int:
         if not dry_run:
             logger.warning("Continuing anyway; will retry on first trade attempt")
 
-    # Startup reconciliation — catch drift from downtime, crashes between
-    # fill and state write, or manual TWS trades. Skipped in dry_run because
-    # the NullBroker holds no real account.
-    # Also skip in live mode for now (broker connection may be pending)
+    startup_reconciliation_done = False
     if not dry_run:
-        logger.info("Reconciliation deferred (broker connection pending)")
+        logger.warning("New entries halted pending startup reconciliation")
 
     try:
         poll_interval = config.get("daytime", {}).get("poll_interval_seconds", 60)
@@ -1087,6 +1141,12 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 # Check overnight screening
                 check_overnight_screening(config, daemon_state, logger)
+
+                # Startup reconciliation — run on every poll until resolved (live mode only)
+                if not dry_run and not startup_reconciliation_done:
+                    if run_startup_reconciliation(daemon_state, portfolio, broker, logger):
+                        startup_reconciliation_done = True
+                        logger.info("Startup reconciliation complete — resuming normal entry evaluation")
 
                 # Nightly broker/state reconciliation (real broker only)
                 if not dry_run:
