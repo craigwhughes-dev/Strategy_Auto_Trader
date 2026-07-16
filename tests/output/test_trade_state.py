@@ -98,3 +98,27 @@ class TestTradeState:
             row = next(csv.DictReader(f))
         expected = (1 + 0.12) / (1 + 0.0) - 1
         assert abs(float(row["market_ret_during_hold"]) - expected) < 1e-9
+
+    def test_get_open_strategy_returns_none_when_no_open_buy(self, tmp_path):
+        from Strategy_Auto_Trader.output import trade_state
+        state_file = tmp_path / "trade_state.json"
+        with mock.patch.object(trade_state, "STATE_FILE", state_file):
+            result = trade_state.get_open_strategy("AAPL")
+            assert result is None
+
+    def test_get_open_strategy_returns_stored_strategy(self, tmp_path):
+        from Strategy_Auto_Trader.output import trade_state
+        state_file = tmp_path / "trade_state.json"
+        with mock.patch.object(trade_state, "STATE_FILE", state_file):
+            trade_state.record_buy("AAPL", {"strategy": "breakout_momentum"})
+            result = trade_state.get_open_strategy("AAPL")
+            assert result == "breakout_momentum"
+
+    def test_get_open_strategy_returns_none_when_strategy_key_missing(self, tmp_path):
+        from Strategy_Auto_Trader.output import trade_state
+        state_file = tmp_path / "trade_state.json"
+        with mock.patch.object(trade_state, "STATE_FILE", state_file):
+            # Record without strategy (old-format entry)
+            trade_state.record_buy("AAPL", {"price": 100.0})
+            result = trade_state.get_open_strategy("AAPL")
+            assert result is None

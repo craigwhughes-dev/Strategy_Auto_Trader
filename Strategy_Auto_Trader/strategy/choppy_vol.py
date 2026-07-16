@@ -105,6 +105,10 @@ class ChoppyVolEntry:
     _weights: dict[str, float] = {"hmm": 0.0, "rsi": 1.0}
     #: Documentation-only — this strategy never calls _apply_quality_gate.
     quality_gate_enabled: bool = False
+    #: Trades the low-trend-quality names the default vol_screen vetoes —
+    #: overnight_scope.py's stage-1 screen inverts to keep those tickers
+    #: instead of excluding them when the market's strategy sets this.
+    wants_low_trend_quality: bool = True
 
     def __init__(self, vol_filter_ok: bool = True) -> None:
         """vol_filter_ok is accepted only for registry constructor-signature

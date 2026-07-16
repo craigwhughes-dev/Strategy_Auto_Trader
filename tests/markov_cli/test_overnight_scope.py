@@ -89,6 +89,103 @@ def test_screen_market_vol_screen_excluded():
             assert any(e["ticker"] == "BAD_TICKER" for e in result["excluded"])
 
 
+def test_screen_market_choppy_strategy_inverts_vol_screen():
+    """mean_reversion/choppy_vol are designed to trade what vol_screen vetoes —
+    scope screening must keep the low-trend-quality names, not exclude them."""
+    market_cfg = {
+        "watchlist": "config/watchlist.json",
+        "defaults": {"strategy": "mean_reversion"},
+        "vol_screen": {"enabled": True, "min_trend_quality": 0.0, "period": "2y"},
+        "sentiment_screen": {"enabled": False},
+        "exempt_if_open_position": True,
+    }
+
+    with mock.patch("Strategy_Auto_Trader.quant_hmm.vol_screen.screen_tickers") as mock_vol:
+        with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_watchlist") as mock_wl:
+            mock_wl.return_value = {
+                "tickers": [
+                    {"ticker": "TRENDING"},
+                    {"ticker": "CHOPPY"},
+                ]
+            }
+            mock_vol.return_value = (
+                ["TRENDING"],
+                [
+                    {"ticker": "TRENDING", "trend_quality": 1.5, "downside_vol": 0.1},
+                    {"ticker": "CHOPPY", "trend_quality": -0.5, "downside_vol": 0.1},
+                ],
+            )
+
+            result = overnight_scope.screen_market("test", market_cfg, {})
+
+            assert "CHOPPY" in result["kept"]
+            assert "TRENDING" not in result["kept"]
+            assert any(e["ticker"] == "TRENDING" and e["reason"] == "vol_screen_inverted"
+                       for e in result["excluded"])
+
+
+def test_screen_market_choppy_strategy_still_caps_downside_vol():
+    """Inverted screen still excludes low-trend-quality names that blow the
+    downside-vol risk cap — mean_reversion wants choppy, not reckless."""
+    market_cfg = {
+        "watchlist": "config/watchlist.json",
+        "defaults": {"strategy": "choppy_vol"},
+        "vol_screen": {"enabled": True, "min_trend_quality": 0.0, "max_downside_vol": 0.25, "period": "2y"},
+        "sentiment_screen": {"enabled": False},
+        "exempt_if_open_position": True,
+    }
+
+    with mock.patch("Strategy_Auto_Trader.quant_hmm.vol_screen.screen_tickers") as mock_vol:
+        with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_watchlist") as mock_wl:
+            mock_wl.return_value = {
+                "tickers": [
+                    {"ticker": "CHOPPY_SAFE"},
+                    {"ticker": "CHOPPY_RECKLESS"},
+                ]
+            }
+            mock_vol.return_value = (
+                [],
+                [
+                    {"ticker": "CHOPPY_SAFE", "trend_quality": -0.5, "downside_vol": 0.1},
+                    {"ticker": "CHOPPY_RECKLESS", "trend_quality": -0.5, "downside_vol": 0.9},
+                ],
+            )
+
+            result = overnight_scope.screen_market("test", market_cfg, {})
+
+            assert "CHOPPY_SAFE" in result["kept"]
+            assert "CHOPPY_RECKLESS" not in result["kept"]
+
+
+def test_screen_market_non_choppy_strategy_unaffected():
+    """Regular (trend-following) strategy default keeps the original vol_screen behavior."""
+    market_cfg = {
+        "watchlist": "config/watchlist.json",
+        "defaults": {"strategy": "default"},
+        "vol_screen": {"enabled": True, "min_trend_quality": 0.0, "period": "2y"},
+        "sentiment_screen": {"enabled": False},
+        "exempt_if_open_position": True,
+    }
+
+    with mock.patch("Strategy_Auto_Trader.quant_hmm.vol_screen.screen_tickers") as mock_vol:
+        with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_watchlist") as mock_wl:
+            mock_wl.return_value = {
+                "tickers": [{"ticker": "TRENDING"}, {"ticker": "CHOPPY"}]
+            }
+            mock_vol.return_value = (
+                ["TRENDING"],
+                [
+                    {"ticker": "TRENDING", "trend_quality": 1.5, "downside_vol": 0.1},
+                    {"ticker": "CHOPPY", "trend_quality": -0.5, "downside_vol": 0.1},
+                ],
+            )
+
+            result = overnight_scope.screen_market("test", market_cfg, {})
+
+            assert "TRENDING" in result["kept"]
+            assert "CHOPPY" not in result["kept"]
+
+
 def test_screen_market_open_position_exempt():
     """Open position is always kept, even if vol screen would exclude it."""
     market_cfg = {
@@ -178,6 +275,67 @@ def test_generate_scoped_watchlist_merges_defaults(tmp_path):
             assert parsed["defaults"]["daily_buy_limit"] == 5
             assert parsed["defaults"]["daily_sell_limit"] == 2
             assert parsed["defaults"]["strategy"] == "conservative"
+
+
+def test_screen_market_overrides_populated_for_dict_tickers_with_override_keys():
+    """screen_market() returns overrides populated only for tickers with OVERRIDE_KEYS."""
+    market_cfg = {
+        "watchlist": "config/watchlist.json",
+        "vol_screen": {"enabled": False},
+        "sentiment_screen": {"enabled": False},
+        "exempt_if_open_position": True,
+    }
+
+    with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_watchlist") as mock_wl:
+        mock_wl.return_value = {
+            "tickers": [
+                "BARE_STRING_TICKER",
+                {"ticker": "DICT_NO_OVERRIDE"},
+                {"ticker": "DICT_WITH_STRATEGY", "strategy": "breakout_momentum"},
+                {"ticker": "DICT_WITH_UNRELATED_KEY", "notes": "some metadata"},
+            ]
+        }
+
+        result = overnight_scope.screen_market("test", market_cfg, {})
+
+        assert "overrides" in result
+        assert "BARE_STRING_TICKER" not in result["overrides"]
+        assert "DICT_NO_OVERRIDE" not in result["overrides"]
+        assert "DICT_WITH_UNRELATED_KEY" not in result["overrides"]
+        assert "DICT_WITH_STRATEGY" in result["overrides"]
+        assert result["overrides"]["DICT_WITH_STRATEGY"]["strategy"] == "breakout_momentum"
+
+
+def test_screen_market_overrides_round_trips_through_write_scope_result(tmp_path):
+    """overrides key survives write_scope_result and is readable from written JSON."""
+    market_cfg = {
+        "watchlist": "config/watchlist.json",
+        "vol_screen": {"enabled": False},
+        "sentiment_screen": {"enabled": False},
+        "exempt_if_open_position": True,
+    }
+
+    with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_watchlist") as mock_wl:
+        with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.STATE_DIR", tmp_path):
+            mock_wl.return_value = {
+                "tickers": [
+                    {"ticker": "T1", "strategy": "default"},
+                    {"ticker": "T2", "strategy": "conservative"},
+                ]
+            }
+
+            result = overnight_scope.screen_market("test", market_cfg, {})
+            overnight_scope.write_scope_result("test", result)
+
+            # Read back from written file
+            output_file = tmp_path / "in_scope_test.json"
+            assert output_file.exists()
+            with open(output_file, encoding="utf-8") as f:
+                persisted = json.load(f)
+
+            assert "overrides" in persisted
+            assert persisted["overrides"]["T1"]["strategy"] == "default"
+            assert persisted["overrides"]["T2"]["strategy"] == "conservative"
 
 
 if __name__ == "__main__":

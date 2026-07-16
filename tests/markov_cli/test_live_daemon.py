@@ -1395,5 +1395,239 @@ def test_write_app_status_snapshot_paused_by_user_defaults_false(tmp_path, monke
     assert snapshot["paused_by_user"] is False
 
 
+# -- Per-ticker strategy overrides from watchlist ----
+
+def test_load_ticker_overrides_returns_empty_dict_when_file_missing(tmp_path, monkeypatch):
+    """load_ticker_overrides returns {} when in_scope file doesn't exist."""
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    logger = mock.Mock()
+
+    result = live_daemon.load_ticker_overrides("ftse", logger)
+
+    assert result == {}
+    assert not logger.error.called
+
+
+def test_load_ticker_overrides_returns_empty_dict_when_overrides_key_missing(tmp_path, monkeypatch):
+    """load_ticker_overrides returns {} when overrides key is absent from JSON."""
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    logger = mock.Mock()
+
+    # Create in_scope file without overrides key
+    scope_file = tmp_path / "in_scope_ftse.json"
+    scope_file.write_text(json.dumps({"kept": ["AAPL", "MSFT"], "excluded": []}), encoding="utf-8")
+
+    result = live_daemon.load_ticker_overrides("ftse", logger)
+
+    assert result == {}
+
+
+def test_load_ticker_overrides_returns_persisted_overrides(tmp_path, monkeypatch):
+    """load_ticker_overrides returns the persisted overrides dict when present."""
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    logger = mock.Mock()
+
+    # Create in_scope file with overrides
+    scope_file = tmp_path / "in_scope_ftse.json"
+    overrides_data = {
+        "AAPL": {"strategy": "breakout_momentum"},
+        "MSFT": {"strategy": "conservative"},
+    }
+    scope_file.write_text(
+        json.dumps({"kept": ["AAPL", "MSFT"], "excluded": [], "overrides": overrides_data}),
+        encoding="utf-8"
+    )
+
+    result = live_daemon.load_ticker_overrides("ftse", logger)
+
+    assert result == overrides_data
+
+
+def test_load_ticker_overrides_handles_json_error(tmp_path, monkeypatch):
+    """load_ticker_overrides returns {} and logs error on JSON parse failure."""
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    logger = mock.Mock()
+
+    # Create invalid JSON file
+    scope_file = tmp_path / "in_scope_ftse.json"
+    scope_file.write_text("{ invalid json", encoding="utf-8")
+
+    result = live_daemon.load_ticker_overrides("ftse", logger)
+
+    assert result == {}
+    assert logger.error.called
+
+
+def test_process_cycle_merges_overrides_into_must_run_ticker_cfg(monkeypatch):
+    """In must-run stage, ticker_cfg is merged with overrides from watchlist."""
+    from Strategy_Auto_Trader.markov_cli import batch
+
+    captured = {}
+
+    def fake_process_ticker(ticker_cfg, defaults, send_email):
+        captured["ticker_cfg"] = ticker_cfg
+        return {"ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0}
+
+    monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: ["AAPL"])
+    # Provide overrides via mock
+    overrides_data = {"AAPL": {"strategy": "breakout_momentum"}}
+    monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: overrides_data)
+
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    live_daemon.process_cycle(
+        "test_market", {}, config, {"cursors": {}},
+        portfolio=None, broker=None, logger=mock.Mock(),
+    )
+
+    assert captured["ticker_cfg"]["ticker"] == "AAPL"
+    assert captured["ticker_cfg"]["strategy"] == "breakout_momentum"
+
+
+def test_process_cycle_merges_overrides_into_round_robin_ticker_cfg(monkeypatch):
+    """In round-robin stage, ticker_cfg is merged with overrides from watchlist."""
+    from Strategy_Auto_Trader.markov_cli import batch
+
+    captured = {}
+
+    def fake_process_ticker(ticker_cfg, defaults, send_email):
+        captured["ticker_cfg"] = ticker_cfg
+        return {"ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0}
+
+    monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL", "MSFT"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+    # Provide overrides via mock
+    overrides_data = {"MSFT": {"strategy": "conservative"}}
+    monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: overrides_data)
+    monkeypatch.setattr(live_daemon, "next_round_robin_slice",
+                       lambda market_name, candidates, total, daemon_state, logger: ["MSFT"])
+
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    live_daemon.process_cycle(
+        "test_market", {}, config, {"cursors": {}},
+        portfolio=None, broker=None, logger=mock.Mock(),
+    )
+
+    assert captured["ticker_cfg"]["ticker"] == "MSFT"
+    assert captured["ticker_cfg"]["strategy"] == "conservative"
+
+
+def test_process_cycle_pins_already_open_strategy_over_watchlist_override(monkeypatch, tmp_path):
+    """In must-run stage, pinned strategy from get_open_strategy() wins over watchlist override."""
+    from Strategy_Auto_Trader.markov_cli import batch
+    from Strategy_Auto_Trader.output import trade_state
+
+    captured = {}
+
+    def fake_process_ticker(ticker_cfg, defaults, send_email):
+        captured["ticker_cfg"] = ticker_cfg
+        return {"ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0}
+
+    monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: ["AAPL"])
+    # Override says "conservative" but pinned is "breakout_momentum"
+    overrides_data = {"AAPL": {"strategy": "conservative"}}
+    monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: overrides_data)
+
+    # Mock get_open_strategy to return the pinned strategy
+    monkeypatch.setattr(trade_state, "get_open_strategy", lambda t: "breakout_momentum")
+
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    live_daemon.process_cycle(
+        "test_market", {}, config, {"cursors": {}},
+        portfolio=None, broker=None, logger=mock.Mock(),
+    )
+
+    # Pinned strategy should win
+    assert captured["ticker_cfg"]["ticker"] == "AAPL"
+    assert captured["ticker_cfg"]["strategy"] == "breakout_momentum"
+
+
+def test_process_cycle_no_pin_in_round_robin_stage(monkeypatch):
+    """In round-robin stage, no pin is applied (only open positions get pinned)."""
+    from Strategy_Auto_Trader.markov_cli import batch
+    from Strategy_Auto_Trader.output import trade_state
+
+    captured = {}
+
+    def fake_process_ticker(ticker_cfg, defaults, send_email):
+        captured["ticker_cfg"] = ticker_cfg
+        return {"ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0}
+
+    monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["MSFT"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+    overrides_data = {"MSFT": {"strategy": "conservative"}}
+    monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: overrides_data)
+    monkeypatch.setattr(live_daemon, "next_round_robin_slice",
+                       lambda market_name, candidates, total, daemon_state, logger: ["MSFT"])
+    # get_open_strategy should never be called for round-robin candidates
+    monkeypatch.setattr(trade_state, "get_open_strategy", lambda t: "should_not_be_used")
+
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    live_daemon.process_cycle(
+        "test_market", {}, config, {"cursors": {}},
+        portfolio=None, broker=None, logger=mock.Mock(),
+    )
+
+    # Override strategy should be used, not pinned
+    assert captured["ticker_cfg"]["strategy"] == "conservative"
+
+
+def test_process_cycle_logs_warning_on_must_run_fail_status(monkeypatch):
+    """When must-run ticker returns FAIL status, logger.warning is called."""
+    from Strategy_Auto_Trader.markov_cli import batch
+
+    def fake_process_ticker(ticker_cfg, defaults, send_email):
+        return {"ticker": ticker_cfg["ticker"], "status": "FAIL: bad strategy name", "time": 0.0}
+
+    monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: ["AAPL"])
+    monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: {})
+
+    logger = mock.Mock()
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    live_daemon.process_cycle(
+        "test_market", {}, config, {"cursors": {}},
+        portfolio=None, broker=None, logger=logger,
+    )
+
+    # Check that logger.warning was called with the right message
+    assert logger.warning.called
+    calls = [c for c in logger.warning.call_args_list if "processing failed" in str(c)]
+    assert len(calls) > 0
+
+
+def test_process_cycle_logs_warning_on_round_robin_fail_status(monkeypatch):
+    """When round-robin ticker returns FAIL status, logger.warning is called."""
+    from Strategy_Auto_Trader.markov_cli import batch
+
+    def fake_process_ticker(ticker_cfg, defaults, send_email):
+        return {"ticker": ticker_cfg["ticker"], "status": "FAIL: data unavailable", "time": 0.0}
+
+    monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["MSFT"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+    monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: {})
+    monkeypatch.setattr(live_daemon, "next_round_robin_slice",
+                       lambda market_name, candidates, total, daemon_state, logger: ["MSFT"])
+
+    logger = mock.Mock()
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    live_daemon.process_cycle(
+        "test_market", {}, config, {"cursors": {}},
+        portfolio=None, broker=None, logger=logger,
+    )
+
+    # Check that logger.warning was called
+    assert logger.warning.called
+    calls = [c for c in logger.warning.call_args_list if "processing failed" in str(c)]
+    assert len(calls) > 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -104,3 +104,19 @@ def resolve_strategy(
                 vol_filter_ok = prof["trend_quality"] >= min_trend_quality
 
     return cls_map["entry"](vol_filter_ok=vol_filter_ok), cls_map["exit"]()
+
+
+def wants_low_trend_quality(name: str) -> bool:
+    """True if the named strategy is meant to trade the low-trend-quality
+    (choppy) tickers the default vol_screen vetoes, rather than the
+    high-trend-quality names it keeps.
+
+    Reads the Entry class's `wants_low_trend_quality` attribute (default
+    False) instead of a hardcoded strategy-name list — set the flag on the
+    strategy's Entry class, not here.
+    """
+    if name not in STRATEGY_REGISTRY:
+        raise KeyError(
+            f"Unknown strategy '{name}'. Available: {sorted(STRATEGY_REGISTRY)}"
+        )
+    return getattr(STRATEGY_REGISTRY[name]["entry"], "wants_low_trend_quality", False)

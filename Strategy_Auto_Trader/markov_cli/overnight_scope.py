@@ -20,6 +20,13 @@ CONFIG_DIR = ROOT / "config"
 STATE_DIR = ROOT / "state"
 DATA_DIR = ROOT / "data"
 
+#: Ticker-dict keys that are treated as live daemon overrides when carried
+#: from a watchlist into in_scope_<market>.json. Whitelisted explicitly (not
+#: "any extra key") so unrelated metadata added to a ticker dict later can't
+#: silently become a daemon behavior override. Expand if per-ticker tuning
+#: beyond strategy assignment is needed.
+OVERRIDE_KEYS = {"strategy"}
+
 
 def load_config() -> dict:
     """Load overnight_strategy.json from config/."""
@@ -58,12 +65,20 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict) -> dict:
       - kept: list of in-scope tickers
       - excluded: list of {ticker, reason} dicts
       - open_positions: tickers with open positions (always kept)
+      - overrides: {ticker: {override_key: value}} for tickers with a watchlist override
     """
     from ..quant_hmm.vol_screen import screen_tickers
     from ..quant_hmm.sentiment import composite_sentiment
+    from ..strategy.base.registry import wants_low_trend_quality
 
     watchlist = load_watchlist(market_cfg["watchlist"])
     all_tickers = [t["ticker"] if isinstance(t, dict) else t for t in watchlist.get("tickers", [])]
+
+    overrides = {
+        entry["ticker"]: {k: v for k, v in entry.items() if k in OVERRIDE_KEYS}
+        for entry in watchlist.get("tickers", [])
+        if isinstance(entry, dict) and any(k in OVERRIDE_KEYS for k in entry)
+    }
 
     # Check vol screen config
     vol_cfg = market_cfg.get("vol_screen", {})
@@ -88,6 +103,11 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict) -> dict:
     excluded: list[dict] = []
 
     # Stage 1: volatility screen
+    market_strategy = market_cfg.get("defaults", {}).get("strategy")
+    wants_choppy = (
+        wants_low_trend_quality(market_strategy) if market_strategy else False
+    )
+
     if do_vol_screen:
         print(f"  Vol-screening {len(all_tickers)} tickers for {market_name}...")
         vol_kept, vol_profiles = screen_tickers(
@@ -97,10 +117,25 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict) -> dict:
             period=vol_period,
             verbose=False
         )
-        stage1_tickers = set(vol_kept)
+        if wants_choppy:
+            # This market's strategy is designed to trade the low-trend-quality
+            # names the default screen vetoes (see registry.py resolve_strategy
+            # docstring) — keep those instead. Downside-vol cap still applies
+            # as a risk safety net.
+            profile_by_ticker = {p["ticker"]: p for p in vol_profiles}
+            stage1_tickers = {
+                t for t in all_tickers
+                if t in profile_by_ticker
+                and profile_by_ticker[t]["trend_quality"] < min_trend_quality
+                and (max_downside_vol is None or profile_by_ticker[t]["downside_vol"] <= max_downside_vol)
+            }
+            reason = "vol_screen_inverted"
+        else:
+            stage1_tickers = set(vol_kept)
+            reason = "vol_screen"
         for ticker in all_tickers:
             if ticker not in stage1_tickers and ticker not in open_positions:
-                excluded.append({"ticker": ticker, "reason": "vol_screen"})
+                excluded.append({"ticker": ticker, "reason": reason})
     else:
         stage1_tickers = set(all_tickers)
 
@@ -129,6 +164,7 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict) -> dict:
         "kept": kept,
         "excluded": excluded,
         "open_positions": open_positions,
+        "overrides": overrides,
     }
 
 
@@ -146,7 +182,11 @@ def generate_scoped_watchlist(
     in_scope_tickers: list[str],
     execution_cfg: dict,
 ) -> None:
-    """Generate a scoped watchlist with filtered tickers and merged defaults."""
+    """Generate a scoped watchlist with filtered tickers and merged defaults.
+
+    Note: This function's output (config/generated/watchlist_<market>_scoped.json)
+    is currently unused by the live daemon (which reads in_scope_<market>.json
+    instead) — kept for reference / potential future use."""
     original = load_watchlist(original_watchlist_path)
     original_defaults = original.get("defaults", {})
 

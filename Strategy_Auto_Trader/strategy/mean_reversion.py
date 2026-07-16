@@ -50,6 +50,10 @@ class MeanReversionEntry:
     #: only its adverse-exit half is applied inline in evaluate() (see module
     #: docstring for why the weak-buy veto half is skipped).
     quality_gate_enabled: bool = False
+    #: Trades the low-trend-quality names the default vol_screen vetoes —
+    #: overnight_scope.py's stage-1 screen inverts to keep those tickers
+    #: instead of excluding them when the market's strategy sets this.
+    wants_low_trend_quality: bool = True
 
     def __init__(self, vol_filter_ok: bool = True) -> None:
         # mean-reversion prefers choppy tickers; if vol_filter_ok is True

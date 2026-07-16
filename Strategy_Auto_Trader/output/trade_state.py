@@ -58,6 +58,19 @@ def has_open_buy(ticker: str) -> bool:
     return ticker in state.get("buys", {})
 
 
+def get_open_strategy(ticker: str) -> str | None:
+    """Return the strategy that opened this ticker's currently-tracked BUY, if any.
+
+    Used to pin an already-open position to its entry-time strategy even if
+    a watchlist override changes mid-trade.
+    """
+    state = _load()
+    entry = state.get("buys", {}).get(ticker)
+    if not entry:
+        return None
+    return entry.get("strategy") or None
+
+
 def record_sell(ticker: str, context: dict | None = None) -> None:
     """Record that a SELL alert was sent — removes the BUY entry and logs the trade.
 

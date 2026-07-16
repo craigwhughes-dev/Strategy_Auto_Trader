@@ -471,6 +471,20 @@ def load_in_scope_tickers(market_name: str, logger: logging.Logger) -> list[str]
         return []
 
 
+def load_ticker_overrides(market_name: str, logger: logging.Logger) -> dict[str, dict]:
+    """Load per-ticker strategy overrides from in_scope_<market>.json."""
+    scope_path = STATE_DIR / f"in_scope_{market_name}.json"
+    if not scope_path.exists():
+        return {}
+    try:
+        with open(scope_path, encoding="utf-8") as f:
+            result = json.load(f)
+        return result.get("overrides", {})
+    except Exception as e:
+        logger.error(f"  Error loading overrides from in_scope_{market_name}.json: {e}")
+        return {}
+
+
 def get_open_positions(market_name: str, all_tickers: list[str], logger: logging.Logger) -> list[str]:
     """Get tickers with open positions in this market (intersection of exec state positions and market tickers)."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -679,11 +693,13 @@ def process_cycle(
     Returns number of tickers processed.
     """
     from .batch import process_ticker
+    from ..output.trade_state import get_open_strategy
 
     if last_cycle_hour is None:
         last_cycle_hour = {}
 
     in_scope = load_in_scope_tickers(market_name, logger)
+    overrides = load_ticker_overrides(market_name, logger)
     if not in_scope:
         logger.debug(f"  {market_name}: no in-scope tickers")
         return 0
@@ -718,8 +734,13 @@ def process_cycle(
         _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
 
         logger.debug(f"  Processing {ticker}")
-        ticker_cfg = {"ticker": ticker}
+        ticker_cfg = {"ticker": ticker, **overrides.get(ticker, {})}
+        pinned_strategy = get_open_strategy(ticker)
+        if pinned_strategy:
+            ticker_cfg["strategy"] = pinned_strategy
         result = process_ticker(ticker_cfg, defaults, send_email=True)
+        if not str(result.get("status", "")).startswith("OK"):
+            logger.warning(f"[{market_name}] {ticker} processing failed: {result.get('status')}")
         processed.append(result)
 
     # Stage 2: candidates (round-robin through rest)
@@ -747,8 +768,10 @@ def process_cycle(
             _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
 
             logger.debug(f"  Processing {ticker}")
-            ticker_cfg = {"ticker": ticker}
+            ticker_cfg = {"ticker": ticker, **overrides.get(ticker, {})}
             result = process_ticker(ticker_cfg, defaults, send_email=True)
+            if not str(result.get("status", "")).startswith("OK"):
+                logger.warning(f"[{market_name}] {ticker} processing failed: {result.get('status')}")
             processed.append(result)
 
     # Execute signals once for all processed tickers this cycle
