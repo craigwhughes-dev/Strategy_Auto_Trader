@@ -13,28 +13,69 @@ To register a new strategy:
 
 from __future__ import annotations
 
+from ..ai_optimised import AiOptimisedEntry, AiOptimisedExit
+from ..ai_strategy import AiEntry, AiExit
+from ..breakout_momentum import BreakoutMomentumEntry, BreakoutMomentumExit
+from ..breakout_momentum_optimised import (
+    BreakoutMomentumOptimisedEntry,
+    BreakoutMomentumOptimisedExit,
+)
 from ..choppy_vol import ChoppyVolEntry, ChoppyVolExit
+from ..choppy_vol_optimised import ChoppyVolOptimisedEntry, ChoppyVolOptimisedExit
 from ..conservative import ConservativeEntry, ConservativeExit
+from ..conservative_optimised import ConservativeOptimisedEntry, ConservativeOptimisedExit
 from ..default import DefaultEntry, DefaultExit
+from ..mean_reversion import MeanReversionEntry, MeanReversionExit
 from ..optimised import OptimisedEntry, OptimisedExit
 from ..optimised_aggressive import OptimisedAggressiveEntry, OptimisedAggressiveExit
+from ..optimised_aggressive_optimised import (
+    OptimisedAggressiveOptimisedEntry,
+    OptimisedAggressiveOptimisedExit,
+)
+from ..optimised_optimised import OptimisedOptimisedEntry, OptimisedOptimisedExit
 from ..trend_follow import TrendEntry, TrendExit
-from ..mean_reversion import MeanReversionEntry, MeanReversionExit
-from ..breakout_momentum import BreakoutMomentumEntry, BreakoutMomentumExit
-from ..ai_strategy import AiEntry, AiExit
+from ..trend_optimised import TrendOptimisedEntry, TrendOptimisedExit
 
 STRATEGY_REGISTRY: dict[str, dict[str, type]] = {
-    "default": {
-        "entry": DefaultEntry,
-        "exit":  DefaultExit,
+    "ai": {
+        "entry": AiEntry,
+        "exit":  AiExit,
+    },
+    "ai_optimised": {
+        "entry": AiOptimisedEntry,
+        "exit":  AiOptimisedExit,
+    },
+    "breakout_momentum": {
+        "entry": BreakoutMomentumEntry,
+        "exit":  BreakoutMomentumExit,
+    },
+    "breakout_momentum_optimised": {
+        "entry": BreakoutMomentumOptimisedEntry,
+        "exit":  BreakoutMomentumOptimisedExit,
+    },
+    "choppy_vol": {
+        "entry": ChoppyVolEntry,
+        "exit":  ChoppyVolExit,
+    },
+    "choppy_vol_optimised": {
+        "entry": ChoppyVolOptimisedEntry,
+        "exit":  ChoppyVolOptimisedExit,
     },
     "conservative": {
         "entry": ConservativeEntry,
         "exit":  ConservativeExit,
     },
-    "trend": {
-        "entry": TrendEntry,
-        "exit":  TrendExit,
+    "conservative_optimised": {
+        "entry": ConservativeOptimisedEntry,
+        "exit":  ConservativeOptimisedExit,
+    },
+    "default": {
+        "entry": DefaultEntry,
+        "exit":  DefaultExit,
+    },
+    "mean_reversion": {
+        "entry": MeanReversionEntry,
+        "exit":  MeanReversionExit,
     },
     "optimised": {
         "entry": OptimisedEntry,
@@ -44,21 +85,21 @@ STRATEGY_REGISTRY: dict[str, dict[str, type]] = {
         "entry": OptimisedAggressiveEntry,
         "exit":  OptimisedAggressiveExit,
     },
-    "choppy_vol": {
-        "entry": ChoppyVolEntry,
-        "exit":  ChoppyVolExit,
+    "optimised_aggressive_optimised": {
+        "entry": OptimisedAggressiveOptimisedEntry,
+        "exit":  OptimisedAggressiveOptimisedExit,
     },
-    "mean_reversion": {
-        "entry": MeanReversionEntry,
-        "exit":  MeanReversionExit,
+    "optimised_optimised": {
+        "entry": OptimisedOptimisedEntry,
+        "exit":  OptimisedOptimisedExit,
     },
-    "breakout_momentum": {
-        "entry": BreakoutMomentumEntry,
-        "exit":  BreakoutMomentumExit,
+    "trend": {
+        "entry": TrendEntry,
+        "exit":  TrendExit,
     },
-    "ai": {
-        "entry": AiEntry,
-        "exit":  AiExit,
+    "trend_optimised": {
+        "entry": TrendOptimisedEntry,
+        "exit":  TrendOptimisedExit,
     },
 }
 

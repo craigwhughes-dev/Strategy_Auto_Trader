@@ -34,9 +34,12 @@ daemon_output*.txt
 # Session / work-tracking files
 HANDOFF.md
 todo.md
+BACKTEST_LOG.md
 
 # Local planning / temporary docs
 *PLAN.md
+PLAN_*.md
+PROMPT_*.md
 *_SAFEGUARDS.md
 PROJECT_OVERVIEW.md
 RELIABILITY_SETUP.md

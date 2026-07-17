@@ -33,7 +33,7 @@ import pandas as pd
 from ..output.journal import LIVE_JOURNAL, TradeRecord, append_trades, extract_trades_from_detail
 from ..plugins.context_adjuster import SentimentAdjuster
 from ..quant_hmm.consolidated_engine import consolidated_backtest
-from ..quant_hmm.quant_engine import fetch_hourly
+from ..quant_hmm.data_cache import fetch_hourly_cached
 from ..quant_hmm.vol_screen import screen_tickers
 from ..strategy.base.registry import resolve_strategy
 
@@ -59,7 +59,7 @@ def _fetch_and_extract(
     (baked into every Entry class) — this is a bool, not a re-lookup, since
     the caller has usually already screened the ticker once (efficiency).
     """
-    df = fetch_hourly(ticker, period="730d")
+    df = fetch_hourly_cached(ticker, period="730d")
     if df is None or df.empty:
         print(f"  {ticker}: no data, skipping")
         return []

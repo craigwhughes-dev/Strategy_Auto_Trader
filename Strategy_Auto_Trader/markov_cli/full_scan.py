@@ -104,8 +104,7 @@ from ..output.journal import TradeRecord, extract_trades_from_detail
 from ..plugins.persistent_hmm import PersistentHMMRegimeModel
 from ..quant_hmm import sentiment as sentiment_mod
 from ..quant_hmm.consolidated_engine import consolidated_backtest
-from ..quant_hmm.quant_engine import fetch_hourly
-from ..quant_hmm.vol_screen import volatility_profile
+from ..quant_hmm.data_cache import fetch_hourly_cached, volatility_profile_cached
 from ..strategy.base.registry import resolve_strategy
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -547,11 +546,11 @@ def scan_ticker(
         "note": "",
     }
 
-    prof = volatility_profile(ticker)
+    prof = volatility_profile_cached(ticker)
     for k in _VOL_PROFILE_KEYS:
         row[k] = prof.get(k) if prof else None
 
-    df = fetch_hourly(ticker, period="730d")
+    df = fetch_hourly_cached(ticker, period="730d")
     if df is None or df.empty:
         row["status"] = "no_data"
         return row
