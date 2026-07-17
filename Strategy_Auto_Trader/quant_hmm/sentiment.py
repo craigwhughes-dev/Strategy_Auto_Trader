@@ -355,6 +355,7 @@ def composite_sentiment(
     include_vix: bool = True,
     include_insider: bool = True,
     include_short: bool = True,
+    vix_data: dict | None = None,
 ) -> dict:
     """Compute a composite sentiment score from all available alternative data.
 
@@ -380,7 +381,7 @@ def composite_sentiment(
             weights.append(1.0)
 
     if include_vix:
-        vix = vix_regime()
+        vix = vix_data if vix_data is not None else vix_regime()
         all_data["vix"] = vix
         if vix["vix_current"] is not None:
             signals.append(vix["vix_signal"])

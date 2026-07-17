@@ -37,6 +37,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Re-scan tickers whose output already exists")
     parser.add_argument("--limit", type=int, default=0,
                         help="Stop each strategy after N tickers (0 = all)")
+    parser.add_argument("--workers", type=int, default=2,
+                        help="Worker processes for parallel ticker scans per strategy (default: 2)")
     args = parser.parse_args(argv)
 
     strategies = args.strategies if args.strategies else STRATEGIES
@@ -59,7 +61,8 @@ def main(argv: list[str] | None = None) -> int:
     failed_strategies = []
     for i, strategy in enumerate(strategies, 1):
         print(f"\n{'='*64}\n [{i}/{len(strategies)}] strategy: {strategy}\n{'='*64}", flush=True)
-        scan_argv = ["--tickers", *tickers, "--strategy", strategy, "--no-sentiment"]
+        scan_argv = ["--tickers", *tickers, "--strategy", strategy, "--no-sentiment",
+                     "--workers", str(args.workers)]
         if args.force:
             scan_argv.append("--force")
         if args.limit:

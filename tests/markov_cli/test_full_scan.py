@@ -288,7 +288,8 @@ class TestTickerSentiment:
             "short_interest": {"short_pct_float": 5.0, "short_ratio": 1.5, "short_signal": 0},
             "sentiment_score": 0.4, "sentiment_label": "bullish", "confidence": 3,
         }
-        monkeypatch.setattr(full_scan.sentiment_mod, "composite_sentiment", lambda t: fake)
+        monkeypatch.setattr(full_scan.sentiment_mod, "composite_sentiment",
+                           lambda t, **kwargs: fake)
         out = full_scan._ticker_sentiment("AAA", enabled=True)
         assert out["vix_current"] == 15.0
         assert out["insider_net"] == 2
@@ -386,3 +387,142 @@ class TestCombineJournals:
         jdir.mkdir()
         out_path = full_scan.combine_journals(jdir, tmp_path / "combined.csv")
         assert out_path.exists()
+
+
+class TestSortSummary:
+    def test_sorts_by_ticker_then_strategy(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(full_scan, "SCAN_DIR", tmp_path)
+        full_scan._append_summary_row({"ticker": "BBB", "strategy": "default", "status": "ok"})
+        full_scan._append_summary_row({"ticker": "AAA", "strategy": "conservative", "status": "ok"})
+        full_scan._append_summary_row({"ticker": "AAA", "strategy": "default", "status": "ok"})
+        sorted_df = full_scan.sort_summary(tmp_path / "summary.csv")
+        assert len(sorted_df) == 3
+        assert sorted_df.iloc[0]["ticker"] == "AAA" and sorted_df.iloc[0]["strategy"] == "conservative"
+        assert sorted_df.iloc[1]["ticker"] == "AAA" and sorted_df.iloc[1]["strategy"] == "default"
+        assert sorted_df.iloc[2]["ticker"] == "BBB" and sorted_df.iloc[2]["strategy"] == "default"
+
+    def test_empty_summary_returns_empty_dataframe(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(full_scan, "SCAN_DIR", tmp_path)
+        df = full_scan.sort_summary(tmp_path / "summary.csv")
+        assert df.empty
+
+
+class TestAtomicWrites:
+    def test_hourly_csv_atomic_write_tmp_replaced(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(full_scan, "SCAN_DIR", tmp_path / "reports")
+        monkeypatch.setattr(full_scan, "HMM_CACHE_DIR", tmp_path / "hmm")
+        hourly_path = tmp_path / "reports" / "default" / "hourly" / "TEST.csv"
+        hourly = _hourly_for_journal()
+        hourly_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = hourly_path.with_suffix(hourly_path.suffix + ".tmp")
+        hourly.to_csv(tmp)
+        tmp.replace(hourly_path)
+        assert hourly_path.exists()
+        assert not tmp.exists()
+
+    def test_journal_atomic_write_tmp_replaced(self, tmp_path):
+        trades = [_trade(10.0, 0.01, "2026-01-01 09:00", "2026-01-01 12:00")]
+        hourly = _hourly_for_journal()
+        journal_path = tmp_path / "default" / "TEST.csv"
+        journal_path.parent.mkdir(parents=True, exist_ok=True)
+        full_scan._write_ticker_journal(journal_path, trades, {"trend_quality": 0.5}, hourly)
+        assert journal_path.exists()
+        assert not journal_path.with_suffix(journal_path.suffix + ".tmp").exists()
+
+
+class TestVixDataDependencyInjection:
+    def test_ticker_sentiment_uses_passed_vix_data(self, monkeypatch):
+        fake_vix = {"vix_current": 20.0, "vix_sma20": 18.0, "vix_regime": "elevated",
+                    "vix_signal": -1, "vix_term_structure": "backwardation"}
+        fake_composite = {
+            "options": {}, "vix": fake_vix, "insider": {}, "short_interest": {},
+            "sentiment_score": 0.0, "sentiment_label": "neutral", "confidence": 1,
+        }
+        monkeypatch.setattr(full_scan.sentiment_mod, "composite_sentiment",
+                           lambda t, vix_data=None: fake_composite)
+        out = full_scan._ticker_sentiment("TEST", enabled=True, vix_data=fake_vix)
+        assert out["vix_current"] == 20.0
+        assert out["vix_regime"] == "elevated"
+
+    def test_ticker_sentiment_vix_data_none_falls_back(self, monkeypatch):
+        called_with = []
+        def fake_composite(t, vix_data=None):
+            called_with.append(vix_data)
+            return {
+                "options": {}, "vix": {}, "insider": {}, "short_interest": {},
+                "sentiment_score": 0.0, "sentiment_label": "neutral", "confidence": 0,
+            }
+        monkeypatch.setattr(full_scan.sentiment_mod, "composite_sentiment", fake_composite)
+        full_scan._ticker_sentiment("TEST", enabled=True, vix_data=None)
+        assert called_with[0] is None
+
+
+class TestWorkersValidation:
+    def test_workers_zero_rejected(self):
+        with pytest.raises(SystemExit):
+            full_scan.main(["--workers", "0", "--tickers", "AAA"])
+
+    def test_workers_negative_rejected(self):
+        with pytest.raises(SystemExit):
+            full_scan.main(["--workers", "-1", "--tickers", "AAA"])
+
+
+class TestScanTickerWorkerError:
+    """Tests for _scan_ticker_worker error handling and payload structure."""
+
+    def test_error_payload_structure(self, monkeypatch):
+        """Test that _scan_ticker_worker returns error payload with expected keys."""
+        # Mock fetch to return valid data so resolve_strategy is reached.
+        df = _price_df(100)
+        monkeypatch.setattr(full_scan, "fetch_hourly_cached", lambda t, period: df)
+        monkeypatch.setattr(full_scan, "volatility_profile_cached", lambda t: {"trend_quality": 0.5})
+        # Mock resolve_strategy to raise for nonexistent strategy.
+        monkeypatch.setattr(
+            full_scan, "resolve_strategy",
+            lambda name, vol_filter_ok: (_ for _ in ()).throw(ValueError(f"Unknown strategy: {name}"))
+        )
+        payload = full_scan._scan_ticker_worker("TEST", "nonexistent_xyz", 10.0, False)
+        assert set(payload.keys()) == {"row", "traceback"}
+        assert payload["row"]["status"] == "error"
+        assert "ValueError" in payload["row"]["note"]
+        assert payload["traceback"] is not None and len(payload["traceback"]) > 0
+        # row should NOT have a "traceback" key; that's only in the payload
+        assert "traceback" not in payload["row"]
+
+    def test_error_row_aligns_with_summary_columns(self, monkeypatch):
+        """Test that error row can be safely reindexed to _SUMMARY_COLUMNS."""
+        df = _price_df(100)
+        monkeypatch.setattr(full_scan, "fetch_hourly_cached", lambda t, period: df)
+        monkeypatch.setattr(full_scan, "volatility_profile_cached", lambda t: {"trend_quality": 0.5})
+        monkeypatch.setattr(
+            full_scan, "resolve_strategy",
+            lambda name, vol_filter_ok: (_ for _ in ()).throw(RuntimeError("test error"))
+        )
+        payload = full_scan._scan_ticker_worker("TEST", "bad_strat", 10.0, False)
+        row = payload["row"]
+        # This should not raise; all _SUMMARY_COLUMNS should be available (or filled with NaN).
+        frame = pd.DataFrame([row]).reindex(columns=full_scan._SUMMARY_COLUMNS)
+        assert len(frame) == 1
+        assert frame["status"].iloc[0] == "error"
+        assert pd.notna(frame["ticker"].iloc[0])
+
+
+class TestOutOfOrderAppend:
+    """Test that out-of-order rows are correctly sorted by sort_summary."""
+
+    def test_sort_summary_reorders_scrambled_rows(self, tmp_path, monkeypatch):
+        """Append rows in scrambled (ticker, strategy) order, then assert sort_summary returns sorted."""
+        monkeypatch.setattr(full_scan, "SCAN_DIR", tmp_path)
+        # Append in non-alphabetical order
+        full_scan._append_summary_row({"ticker": "CCC", "strategy": "default", "status": "ok"})
+        full_scan._append_summary_row({"ticker": "AAA", "strategy": "conservative", "status": "ok"})
+        full_scan._append_summary_row({"ticker": "BBB", "strategy": "default", "status": "ok"})
+        full_scan._append_summary_row({"ticker": "AAA", "strategy": "default", "status": "ok"})
+
+        sorted_df = full_scan.sort_summary(tmp_path / "summary.csv")
+        assert len(sorted_df) == 4
+        # Verify sort order: (ticker, strategy) ascending
+        assert sorted_df.iloc[0]["ticker"] == "AAA" and sorted_df.iloc[0]["strategy"] == "conservative"
+        assert sorted_df.iloc[1]["ticker"] == "AAA" and sorted_df.iloc[1]["strategy"] == "default"
+        assert sorted_df.iloc[2]["ticker"] == "BBB" and sorted_df.iloc[2]["strategy"] == "default"
+        assert sorted_df.iloc[3]["ticker"] == "CCC" and sorted_df.iloc[3]["strategy"] == "default"

@@ -84,6 +84,8 @@ import argparse
 import json
 import time
 import traceback
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import asdict
 from dataclasses import fields as dc_fields
 from datetime import datetime
@@ -127,13 +129,13 @@ def _scan_paths(strategy: str, ticker: str) -> tuple[Path, Path, Path]:
     return hourly, daily, journal
 
 
-def _cache_vix_regime_for_process() -> None:
-    """VIX is market-wide, not ticker-specific — cache the one fetch across
-    a whole scan run instead of re-downloading it per ticker. Only called
-    from main() (a real scan process), never at import time, so importing
-    this module never mutates the shared sentiment module for callers/tests."""
-    if not hasattr(sentiment_mod.vix_regime, "cache_info"):
-        sentiment_mod.vix_regime = lru_cache(maxsize=1)(sentiment_mod.vix_regime)
+@lru_cache(maxsize=1)
+def _vix_once() -> dict:
+    """Fetch and cache VIX regime once per process.
+
+    VIX is market-wide, not ticker-specific; one fetch per worker process
+    suffices, cached locally in this module."""
+    return sentiment_mod.vix_regime()
 
 WIKI_SP500 = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 WIKI_FTSE100 = "https://en.wikipedia.org/wiki/FTSE_100_Index"
@@ -211,10 +213,10 @@ def _trade_aggregates(trades: list, bt: dict, trade_cost: float, days_covered: i
     return agg
 
 
-def _ticker_sentiment(ticker: str, enabled: bool) -> dict:
+def _ticker_sentiment(ticker: str, enabled: bool, vix_data: dict | None = None) -> dict:
     if not enabled:
         return {k: None for k in _SENTIMENT_KEYS}
-    sent = sentiment_mod.composite_sentiment(ticker)
+    sent = sentiment_mod.composite_sentiment(ticker, vix_data=vix_data)
     flat: dict = {}
     for group in ("options", "vix", "insider", "short_interest"):
         flat.update(sent.get(group, {}))
@@ -259,7 +261,8 @@ def _write_ticker_journal(
     exit-bar indicator snapshot (entry_*/exit_*) via snapshot_columns/
     bar_snapshot so the journal always carries everything hourly.csv does.
     Overwrites (ticker-scoped, not an append-only live log, so no dedup
-    needed)."""
+    needed). Uses atomic tmp-then-replace write to prevent partial files
+    when workers are killed mid-write."""
     journal_path.parent.mkdir(parents=True, exist_ok=True)
     cols = snapshot_columns(hourly)
     if not trades:
@@ -267,14 +270,17 @@ def _write_ticker_journal(
             [f.name for f in dc_fields(TradeRecord)] + list(extra_cols.keys())
             + [f"entry_{c}" for c in cols] + [f"exit_{c}" for c in cols]
         )
-        pd.DataFrame(columns=columns).to_csv(journal_path, index=False)
-        return
-    rows = []
-    for t in trades:
-        entry_snap = bar_snapshot(hourly, t.date_opened, cols, "entry_")
-        exit_snap = bar_snapshot(hourly, t.date_closed, cols, "exit_")
-        rows.append(asdict(t) | extra_cols | entry_snap | exit_snap)
-    pd.DataFrame(rows).to_csv(journal_path, index=False)
+        frame = pd.DataFrame(columns=columns)
+    else:
+        rows = []
+        for t in trades:
+            entry_snap = bar_snapshot(hourly, t.date_opened, cols, "entry_")
+            exit_snap = bar_snapshot(hourly, t.date_closed, cols, "exit_")
+            rows.append(asdict(t) | extra_cols | entry_snap | exit_snap)
+        frame = pd.DataFrame(rows)
+    tmp = journal_path.with_suffix(journal_path.suffix + ".tmp")
+    frame.to_csv(tmp, index=False)
+    tmp.replace(journal_path)
 
 
 def combine_journals(journal_dir: Path = JOURNAL_DIR, out_path: Path | None = None) -> Path:
@@ -535,8 +541,12 @@ def _append_summary_row(row: dict) -> None:
 
 def scan_ticker(
     ticker: str, strategy_name: str, *, trade_cost: float = 10.0, sentiment: bool = True,
+    vix_data: dict | None = None,
 ) -> dict:
-    """Run one ticker end-to-end; returns its summary row. Never skips on vol."""
+    """Run one ticker end-to-end; returns its summary row. Never skips on vol.
+
+    Called by both single-threaded and multiprocessing paths. vix_data is optional
+    and provided by parent when sentiment is enabled in a worker pool."""
     started = time.time()
     row: dict = {
         "ticker": ticker,
@@ -595,8 +605,15 @@ def scan_ticker(
     hourly_path, daily_path, journal_path = _scan_paths(strategy_name, ticker)
     hourly_path.parent.mkdir(parents=True, exist_ok=True)
     daily_path.parent.mkdir(parents=True, exist_ok=True)
-    hourly.to_csv(hourly_path)
-    daily.to_csv(daily_path)
+
+    # Atomic writes: tmp-then-replace to prevent partial files from resume check
+    tmp_hourly = hourly_path.with_suffix(hourly_path.suffix + ".tmp")
+    hourly.to_csv(tmp_hourly)
+    tmp_hourly.replace(hourly_path)
+
+    tmp_daily = daily_path.with_suffix(daily_path.suffix + ".tmp")
+    daily.to_csv(tmp_daily)
+    tmp_daily.replace(daily_path)
 
     trades = extract_trades_from_detail(
         ticker, detail.reset_index(), strategy=strategy_name,
@@ -610,7 +627,7 @@ def scan_ticker(
     for k in _VOL_PROFILE_KEYS:
         extra_cols[k] = prof.get(k) if prof else None
     extra_cols.update(_trade_aggregates(trades, bt, trade_cost, days_covered))
-    extra_cols.update(_ticker_sentiment(ticker, sentiment))
+    extra_cols.update(_ticker_sentiment(ticker, sentiment, vix_data=vix_data))
 
     _write_ticker_journal(journal_path, trades, extra_cols, hourly)
 
@@ -620,6 +637,86 @@ def scan_ticker(
     row["days_covered"] = days_covered
     row["elapsed_s"] = round(time.time() - started, 1)
     return row
+
+
+# ---------------------------------------------------------------------------
+# Worker function for ProcessPoolExecutor
+# ---------------------------------------------------------------------------
+
+def _scan_ticker_worker(
+    ticker: str, strategy_name: str, trade_cost: float, sentiment: bool,
+) -> dict:
+    """Top-level module worker function for ProcessPoolExecutor.
+
+    Returns dict payload: {"row": <summary_dict>, "traceback": <str or None>}.
+    Catches all exceptions internally and returns error-row matching the
+    except-branch schema in main()."""
+    try:
+        # Workers use the module-level _vix_once cache (per-process).
+        vix_data = _vix_once() if sentiment else None
+        row = scan_ticker(
+            ticker, strategy_name,
+            trade_cost=trade_cost, sentiment=sentiment, vix_data=vix_data,
+        )
+        return {"row": row, "traceback": None}
+    except Exception as exc:
+        # Return error row matching the except-branch schema.
+        row = {
+            "ticker": ticker, "strategy": strategy_name,
+            "scanned_at": datetime.now().isoformat(timespec="seconds"),
+            "status": "error",
+            "note": f"{type(exc).__name__}: {exc}",
+        }
+        return {"row": row, "traceback": traceback.format_exc()}
+
+
+def _pool_initializer(sentiment: bool) -> None:
+    """Per-worker initializer for ProcessPoolExecutor.
+
+    Primes the VIX cache once per worker process when sentiment is enabled."""
+    if sentiment:
+        _vix_once()
+
+
+def sort_summary(summary_path: Path | None = None) -> pd.DataFrame:
+    """Read summary.csv, sort by (ticker, strategy), return DataFrame.
+
+    Post-processing helper: rows land in completion order from as_completed,
+    not ticker-list order. Callers can use this to re-order before diffing."""
+    summary_path = summary_path or (SCAN_DIR / "summary.csv")
+    if not summary_path.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(summary_path)
+    if df.empty:
+        return df
+    return df.sort_values(["ticker", "strategy"]).reset_index(drop=True)
+
+
+def _report_row(row: dict, prefix: str, completed: int | None = None,
+                total: int | None = None) -> bool:
+    """Append row, print result line, return True if status=='ok'.
+
+    Args:
+        row: summary row dict (must have 'status', 'note', and on ok: 'bars_fetched',
+             'days_covered', 'n_buys', 'n_sells', 'trend_quality', 'elapsed_s')
+        prefix: string to prepend to output line (e.g. "    " for sequential,
+                or "TICKER: " for parallel)
+        completed: (optional) number of completed tasks (for progress counter in parallel path)
+        total: (optional) total tasks (for progress counter in parallel path)
+
+    Returns:
+        True if status=="ok", else False.
+    """
+    _append_summary_row(row)
+    progress = f"[{completed}/{total}] " if completed is not None and total is not None else ""
+    if row["status"] == "ok":
+        print(f"{progress}{prefix}ok: {row['bars_fetched']} bars, {row['days_covered']} days, "
+              f"{row['n_buys']} buys/{row['n_sells']} sells, "
+              f"trend_quality={row.get('trend_quality')}, {row['elapsed_s']}s", flush=True)
+        return True
+    else:
+        print(f"{progress}{prefix}{row['status']}: {row.get('note', '')}", flush=True)
+        return False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -636,13 +733,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="Stop after N tickers (0 = all)")
     parser.add_argument("--trade-cost", type=float, default=10.0,
                         help="Per-trade cost used for transaction_costs_total (default: 10.0)")
+    parser.add_argument("--workers", type=int, default=2,
+                        help="Worker processes for parallel ticker scans (1 = sequential, default: 2). "
+                             "Rows land in completion order, not ticker order; use sort_summary() if needed.")
     parser.add_argument("--no-sentiment", action="store_true",
                         help="Skip options/VIX/insider/short-interest fetches (faster; "
                              "sentiment columns are mostly empty anyway for non-US tickers)")
     args = parser.parse_args(argv)
 
-    if not args.no_sentiment:
-        _cache_vix_regime_for_process()
+    if args.workers < 1:
+        parser.error("--workers must be >= 1")
 
     if args.build_universe or (args.tickers is None and not UNIVERSE_FILE.exists()):
         print("Building universe...")
@@ -654,36 +754,101 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Full scan: {len(tickers)} tickers, strategy={args.strategy}, "
           f"no vol screening, max hourly history (730d)")
-    print(f"  outputs: {SCAN_DIR}  journals: {JOURNAL_DIR}\n", flush=True)
+    print(f"  outputs: {SCAN_DIR}  journals: {JOURNAL_DIR}")
+    print(f"  workers: {args.workers} (rows land in completion order)\n", flush=True)
 
-    done = failed = skipped = 0
-    for i, ticker in enumerate(tickers, 1):
+    # Parent-side resume/skip check: build task list before submitting to pool.
+    tasks_to_run = []
+    skipped = 0
+    for ticker in tickers:
         _, daily_path, _ = _scan_paths(args.strategy, ticker)
         if not args.force and daily_path.exists():
             skipped += 1
             continue
-        print(f"[{i}/{len(tickers)}] {ticker} ...", flush=True)
+        tasks_to_run.append(ticker)
+
+    if not tasks_to_run:
+        print(f"Scan finished: 0 ok, 0 failed/no-data, {skipped} already done.")
+        return 0
+
+    done = failed = 0
+
+    if args.workers == 1:
+        # Sequential path: no pool, direct calls (regression baseline).
+        for i, ticker in enumerate(tasks_to_run, 1):
+            print(f"[{i}/{len(tasks_to_run)}] {ticker} ...", flush=True)
+            try:
+                vix_data = _vix_once() if not args.no_sentiment else None
+                row = scan_ticker(
+                    ticker, args.strategy,
+                    trade_cost=args.trade_cost, sentiment=not args.no_sentiment,
+                    vix_data=vix_data,
+                )
+            except Exception as exc:
+                row = {
+                    "ticker": ticker, "strategy": args.strategy,
+                    "scanned_at": datetime.now().isoformat(timespec="seconds"),
+                    "status": "error", "note": f"{type(exc).__name__}: {exc}",
+                }
+                traceback.print_exc()
+            if _report_row(row, "    "):
+                done += 1
+            else:
+                failed += 1
+    else:
+        # Parallel path: ProcessPoolExecutor with worker pool.
+        # Manual lifecycle to handle KeyboardInterrupt without blocking.
+        executor = ProcessPoolExecutor(
+            max_workers=args.workers,
+            initializer=_pool_initializer,
+            initargs=(not args.no_sentiment,),
+        )
         try:
-            row = scan_ticker(
-                ticker, args.strategy,
-                trade_cost=args.trade_cost, sentiment=not args.no_sentiment,
-            )
-        except Exception as exc:
-            row = {
-                "ticker": ticker, "strategy": args.strategy,
-                "scanned_at": datetime.now().isoformat(timespec="seconds"),
-                "status": "error", "note": f"{type(exc).__name__}: {exc}",
+            futures = {
+                executor.submit(
+                    _scan_ticker_worker,
+                    ticker, args.strategy,
+                    args.trade_cost, not args.no_sentiment,
+                ): ticker
+                for ticker in tasks_to_run
             }
-            traceback.print_exc()
-        _append_summary_row(row)
-        if row["status"] == "ok":
-            done += 1
-            print(f"    ok: {row['bars_fetched']} bars, {row['days_covered']} days, "
-                  f"{row['n_buys']} buys/{row['n_sells']} sells, "
-                  f"trend_quality={row.get('trend_quality')}, {row['elapsed_s']}s", flush=True)
+
+            for future in as_completed(futures):
+                ticker = futures[future]
+                try:
+                    payload = future.result()
+                    row = payload["row"]
+                    traceback_str = payload["traceback"]
+                except BrokenProcessPool:
+                    # Pool died: report in-flight and exit non-zero.
+                    in_flight = [futures[f] for f in futures if not f.done()]
+                    print(f"\nBroken worker pool; in-flight tickers: {in_flight}")
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    return 1
+                except Exception as exc:
+                    # Shouldn't happen; wrap unexpected pool exceptions.
+                    row = {
+                        "ticker": ticker, "strategy": args.strategy,
+                        "scanned_at": datetime.now().isoformat(timespec="seconds"),
+                        "status": "error", "note": f"pool_error: {type(exc).__name__}: {exc}",
+                    }
+                    traceback_str = traceback.format_exc()
+
+                if traceback_str:
+                    print(traceback_str, flush=True)
+                completed = done + failed + 1
+                if _report_row(row, f"{ticker}: ", completed=completed, total=len(tasks_to_run)):
+                    done += 1
+                else:
+                    failed += 1
+        except KeyboardInterrupt:
+            print("\nInterrupted; canceling remaining futures...", flush=True)
+            executor.shutdown(wait=False, cancel_futures=True)
+            # Completed rows already written; incomplete tickers will resume next run.
+            print(f"Scan interrupted: {done} ok, {failed} failed/no-data, {skipped} already done.")
+            return 1
         else:
-            failed += 1
-            print(f"    {row['status']}: {row.get('note', '')}", flush=True)
+            executor.shutdown()
 
     print(f"\nScan finished: {done} ok, {failed} failed/no-data, {skipped} already done.")
     print(f"For the A1-A12 cross-ticker journal analyses, combine then analyze:\n"

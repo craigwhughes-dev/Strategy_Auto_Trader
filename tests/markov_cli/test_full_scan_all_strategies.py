@@ -89,3 +89,20 @@ class TestMainLoop:
         monkeypatch.setattr(fsa.full_scan, "main", lambda argv: None)
         fsa.main([])
         assert built == [True]
+
+    def test_workers_flag_passed_through(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(fsa.full_scan, "main", lambda argv: calls.append(argv))
+        fsa.main(["--workers", "4"])
+        for argv in calls:
+            assert "--workers" in argv
+            assert argv[argv.index("--workers") + 1] == "4"
+
+    def test_workers_default_passed_through(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(fsa.full_scan, "main", lambda argv: calls.append(argv))
+        fsa.main([])
+        for argv in calls:
+            assert "--workers" in argv
+            # Default should be 2
+            assert argv[argv.index("--workers") + 1] == "2"
