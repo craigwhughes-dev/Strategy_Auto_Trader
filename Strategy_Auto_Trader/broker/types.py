@@ -30,3 +30,25 @@ class PositionRecord:
     kelly_fraction: float
     stop_level: float
     target_level: float
+
+
+@dataclass
+class StopOrderRequest:
+    ticker: str
+    quantity: int
+    stop_price: float
+
+
+@dataclass
+class StopOrderResult:
+    perm_id: int
+    stop_price: float
+    timestamp: str
+
+
+@dataclass
+class OpenOrderInfo:
+    ticker: str
+    quantity: int
+    stop_price: float
+    perm_id: int

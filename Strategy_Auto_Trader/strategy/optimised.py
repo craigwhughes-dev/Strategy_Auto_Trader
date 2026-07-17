@@ -60,16 +60,17 @@ No max hold limit.
 
 from __future__ import annotations
 
+from ..core.momentum import composite_signal
+from ..core.quality_gate import _apply_quality_gate
 from ..plugins.exit_rules import StandardExitRules
 from ..plugins.types import BarData, EntryDecision, ExitResult, RegimeState, TradeState
-from .default import DefaultEntry
 
 #: Entry vetoes derived from the journal analysis (see module docstring).
 _RSI_OVERBOUGHT = 70.0
 _MIN_REGIME_SIGNAL = 0.0
 
 
-class OptimisedEntry(DefaultEntry):
+class OptimisedEntry:
     """Trend-style entry with journal-derived weights, threshold and vetoes.
 
     Satisfies EntryStrategyProtocol.
@@ -85,6 +86,14 @@ class OptimisedEntry(DefaultEntry):
     }
     buy_threshold: float = 6.0
     sell_threshold: float = -4.5
+    #: Whether core/quality_gate._apply_quality_gate runs on top of the vote.
+    quality_gate_enabled: bool = True
+
+    def __init__(self, vol_filter_ok: bool = True) -> None:
+        self._weights = self.weights
+        self._buy_t = self.buy_threshold
+        self._sell_t = self.sell_threshold
+        self._vol_filter_ok = vol_filter_ok
 
     def evaluate(
         self,
@@ -94,7 +103,30 @@ class OptimisedEntry(DefaultEntry):
         currently_in: bool = False,
     ) -> EntryDecision:
         """Score a bar, then veto overbought / bear-regime NEW entries."""
-        decision = super().evaluate(regime, mom, _volume_ratio, currently_in=currently_in)
+        if not self._vol_filter_ok:
+            return EntryDecision(
+                flag="HOLD", raw_flag="HOLD", score=0.0,
+                reason="vol_filter: unsuitable (choppy/mean-reverting)",
+            )
+        raw = composite_signal(
+            markov_signal=0.0,
+            mom=mom,
+            hmm_state=regime.hmm_vote,
+            buy_threshold=self._buy_t,
+            sell_threshold=self._sell_t,
+            weights=self._weights,
+        )
+        if self.quality_gate_enabled:
+            gated = _apply_quality_gate(raw, mom, regime.regime_signal, currently_in=currently_in)
+        else:
+            gated = dict(raw, reason="", gate_fired=False)
+        decision = EntryDecision(
+            flag=gated["flag"],
+            raw_flag=raw["flag"],
+            score=float(raw.get("score", 0.0)),
+            reason=gated.get("reason", ""),
+            gate_fired=gated.get("gate_fired", False),
+        )
         if currently_in or decision.flag != "BUY":
             return decision
         if float(mom.get("cur_rsi", 50.0)) > _RSI_OVERBOUGHT:

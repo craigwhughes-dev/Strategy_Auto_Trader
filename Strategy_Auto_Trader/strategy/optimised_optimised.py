@@ -2,19 +2,101 @@
 
 Differentiator: Winners return 0.033%, losers 0.007% (r=0.841).
 Gate: Only enter on strong composite signal score (> 6.0).
+What this strategy is trying to do
+------------------------------------
+This strategy was derived empirically rather than designed from first
+principles. The 2,122 closed trades in data/journals/live.csv (all three
+existing strategies, FTSE universe, hourly bars, 2025-01-02 .. 2026-07-02)
+were compared against actual subsequent price history (scripts/
+analyze_journal.py) to measure which signal components predicted profitable
+trades and which exits fired well. The findings, and how each shaped a
+parameter:
+
+* Trend was the clear backbone: best profit factor (1.36) and by far the
+  best total P&L (+£952 vs +£92 default / +£22 conservative), so the
+  weights and exit shape start from the trend strategy.
+* High-conviction entries paid: trades entered with a composite score above
+  ~62% of the maximum had profit factor ~1.96 vs ~1.30 below, so the buy
+  threshold is set at 66.7% of the maximum score (6.0 / 9.0) — stricter
+  than any existing strategy.
+* Volume mattered more than trend gave it credit for: entries with
+  volume_ratio > 1.5 carried the entire net profit of the journal
+  (+£2,293); everything below 1.5 was net negative. Volume weight raised
+  0.5 -> 1.0.
+* Regime confirmation mattered: entries with regime_signal > 0.75 hit 60%
+  with profit factor 1.75; entries with regime_signal <= 0 were net losers
+  across 870 trades. HMM weight raised 1.5 -> 2.0, plus a hard entry veto
+  when regime_signal <= 0.
+* Overbought entries lost: RSI > 70 at entry lost £1,123 over 402 trades
+  (profit factor 1.02), while RSI 60-70 was the sweet spot (1.71). RSI
+  weight kept low (1.0, as in trend) and a hard entry veto added for
+  RSI > 70.
+* Exits were left alone: forward returns fetched for 5/20/60 bars after
+  every exit showed no systematic whipsaw after trend's 8% stops and no
+  money left on the table after take-profits, and the shared quality-gate
+  exit (82% of all exits) was healthy (+0.9%..+1.6% average). Winners ran
+  up to 27 days, so no max-hold cap.
+
+The two vetoes only block NEW entries (a would-be BUY becomes HOLD); they
+never suppress SELL/exit signalling while a position is open.
+
+Caveat: parameters are fitted in-sample on the journal window above, and
+the trend edge was concentrated in a few tickers — treat live results as
+the real test.
+
+Entry
+-----
+Weighted vote: HMM (2.0) + RSI (1.0) + SMA200 (3.0) + trend SMA20/50 (2.0)
++ volume (1.0).  Markov slot zeroed (HMM carries that role).
+Buy threshold 6.0 (out of max 9.0), sell -4.5.
+Entry vetoes (BUY -> HOLD when flat): RSI > 70, or regime_signal <= 0.
+Standard quality gate applies on top.
+
+Exit
+----
+Wide hard stop 8%, wide take-profit 30%.
+Vol-scaled trailing stop (vol_stop_mult=2.0, vol_stop_window=20).
+Profit-stop tightening (profit_stop_scale=0.5), floor 4%.
+No max hold limit.
 """
 
 from __future__ import annotations
 
-from ..plugins.types import EntryDecision, RegimeState
-from .optimised import OptimisedEntry as BaseOptimisedEntry
-from .optimised import OptimisedExit
+from ..core.momentum import composite_signal
+from ..core.quality_gate import _apply_quality_gate
+from ..plugins.exit_rules import StandardExitRules
+from ..plugins.types import BarData, EntryDecision, ExitResult, RegimeState, TradeState
+
+#: Entry vetoes derived from the journal analysis (see module docstring).
+_RSI_OVERBOUGHT = 70.0
+_MIN_REGIME_SIGNAL = 0.0
+_MIN_SIGNAL_SCORE = 6.0
 
 
-class OptimisedOptimisedEntry(BaseOptimisedEntry):
-    """Optimised entry with high-conviction signal gate."""
+class OptimisedOptimisedEntry:
+    """Optimised entry with high-conviction signal gate.
 
-    min_signal_score: float = 6.0
+    Satisfies EntryStrategyProtocol.
+    """
+
+    weights: dict[str, float] = {
+        "markov": 0.0,
+        "rsi":    1.0,   # kept low — but see the RSI > 70 veto below
+        "trend":  2.0,
+        "sma200": 3.0,
+        "volume": 1.0,   # raised from trend's 0.5 — high volume carried the P&L
+        "hmm":    2.0,   # raised from 1.5 — strong regimes hit 60%
+    }
+    buy_threshold: float = 6.0
+    sell_threshold: float = -4.5
+    #: Whether core/quality_gate._apply_quality_gate runs on top of the vote.
+    quality_gate_enabled: bool = True
+
+    def __init__(self, vol_filter_ok: bool = True) -> None:
+        self._weights = self.weights
+        self._buy_t = self.buy_threshold
+        self._sell_t = self.sell_threshold
+        self._vol_filter_ok = vol_filter_ok
 
     def evaluate(
         self,
@@ -23,15 +105,92 @@ class OptimisedOptimisedEntry(BaseOptimisedEntry):
         _volume_ratio: float,
         currently_in: bool = False,
     ) -> EntryDecision:
-        decision = super().evaluate(regime, mom, _volume_ratio, currently_in)
-
-        if decision.flag == "BUY" and decision.score < self.min_signal_score:
+        """Score a bar, veto overbought/bear-regime entries, then apply conviction gate."""
+        if not self._vol_filter_ok:
+            return EntryDecision(
+                flag="HOLD", raw_flag="HOLD", score=0.0,
+                reason="vol_filter: unsuitable (choppy/mean-reverting)",
+            )
+        raw = composite_signal(
+            markov_signal=0.0,
+            mom=mom,
+            hmm_state=regime.hmm_vote,
+            buy_threshold=self._buy_t,
+            sell_threshold=self._sell_t,
+            weights=self._weights,
+        )
+        if self.quality_gate_enabled:
+            gated = _apply_quality_gate(raw, mom, regime.regime_signal, currently_in=currently_in)
+        else:
+            gated = dict(raw, reason="", gate_fired=False)
+        decision = EntryDecision(
+            flag=gated["flag"],
+            raw_flag=raw["flag"],
+            score=float(raw.get("score", 0.0)),
+            reason=gated.get("reason", ""),
+            gate_fired=gated.get("gate_fired", False),
+        )
+        if currently_in or decision.flag != "BUY":
+            return decision
+        if float(mom.get("cur_rsi", 50.0)) > _RSI_OVERBOUGHT:
             return EntryDecision(
                 flag="HOLD", raw_flag=decision.raw_flag, score=decision.score,
-                reason=f"signal_gate: weak conviction (score={decision.score:.2f}, need >={self.min_signal_score})",
+                reason=f"optimised veto: RSI > {_RSI_OVERBOUGHT:.0f} (overbought entries lose)",
+            )
+        if regime.regime_signal is not None and regime.regime_signal <= _MIN_REGIME_SIGNAL:
+            return EntryDecision(
+                flag="HOLD", raw_flag=decision.raw_flag, score=decision.score,
+                reason="optimised veto: regime_signal <= 0 (no bull-regime confirmation)",
+            )
+        # High-conviction gate: only enter on strong signal score
+        if decision.score < _MIN_SIGNAL_SCORE:
+            return EntryDecision(
+                flag="HOLD", raw_flag=decision.raw_flag, score=decision.score,
+                reason=f"conviction gate: weak signal (score={decision.score:.2f}, need >={_MIN_SIGNAL_SCORE})",
             )
         return decision
 
 
-class OptimisedOptimisedExit(OptimisedExit):
-    """Identical to Optimised exit."""
+class OptimisedOptimisedExit:
+    """Wide stop (8%) and target (30%) with vol-scaled trailing stop.
+
+    Identical shape to TrendExit — the journal's forward-return analysis
+    showed no systematic whipsaw or give-back at these levels, so the exit
+    side was deliberately left unchanged.
+
+    Satisfies ExitStrategyProtocol.
+    """
+
+    _stop: float = 0.08
+    _target: float = 0.30
+    use_kelly: bool = True
+    kelly_lookback: int = 20
+
+    def __init__(self) -> None:
+        self._impl = StandardExitRules(
+            stop_loss_pct=self._stop,
+            trailing_stop=0.0,        # use vol-stop rather than fixed trail
+            vol_stop_mult=2.0,        # 2 × realised-vol trailing stop
+            vol_stop_window=20,
+            profit_stop_scale=0.5,    # tighten trail as profit grows
+            min_stop_pct=0.04,        # floor: never tighter than 4%
+            max_hold_days=0,          # no forced exit — winners ran to 27 days
+            exit_on_macd_cross=False,
+            exit_on_rsi_reversal=False,
+            exit_on_consolidation=False,
+            use_sar_stop=False,
+        )
+
+    @property
+    def stop_loss_pct(self) -> float:
+        """Hard stop-loss fraction (8%)."""
+        return self._stop
+
+    @property
+    def take_profit_pct(self) -> float:
+        """Hard take-profit fraction (30%)."""
+        return self._target
+
+    def check(self, trade: TradeState, bar_data: BarData) -> ExitResult:
+        """Evaluate exit conditions for the current bar."""
+        return self._impl.check(trade, bar_data)

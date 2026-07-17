@@ -208,10 +208,42 @@ def _execute_sell(
 
     try:
         qty = portfolio.positions[ticker]["quantity"]
+
+        perm_id = portfolio.positions[ticker].get("stop_perm_id")
+        if perm_id:
+            try:
+                outcome = broker.cancel_stop_order(perm_id)
+                if outcome == "Filled":
+                    # Stop was already filled; never proceed to market sell.
+                    fill = broker.get_stop_fill(perm_id)
+                    if fill is None:
+                        # Synthesize estimated FillResult from stop price.
+                        stop_price = portfolio.positions[ticker].get("stop_price")
+                        if not stop_price or stop_price <= 0:
+                            # Fall back to last known price
+                            stop_price = portfolio.positions[ticker].get("fill_price", 0)
+                        fill = FillResult(
+                            ticker=ticker, action="SELL", fill_price=stop_price,
+                            quantity=qty, timestamp=""
+                        )
+                        exit_type = "reconciled_stop_loss"
+                    else:
+                        exit_type = "stop_loss"
+                    portfolio.record_exit(ticker, fill, exit_type=exit_type)
+                    portfolio.clear_stop_order(ticker)
+                    return True, fill, ""
+                elif outcome == "Error":
+                    # Cancel failed — the stop may still be live at the broker.
+                    # Keep the perm_id so tracking is retained; do NOT market sell.
+                    return False, None, f"Could not cancel protective stop for {ticker}; position left open"
+                portfolio.clear_stop_order(ticker)
+            except Exception as e:
+                logger.warning(f"{ticker}: error cancelling protective stop: {e}")
+
         fill = _place_order_with_retry(broker, OrderRequest(ticker, "SELL", qty), logger)
         if fill is None:
             return False, None, f"Order not filled for {ticker}"
-        portfolio.record_exit(ticker, fill)
+        portfolio.record_exit(ticker, fill, exit_type="strategy_exit")
         return True, fill, ""
     except Exception as e:
         return False, None, str(e)
@@ -235,11 +267,45 @@ def _execute_sell_all(
     for ticker in list(portfolio.positions.keys()):
         try:
             qty = portfolio.positions[ticker]["quantity"]
+
+            perm_id = portfolio.positions[ticker].get("stop_perm_id")
+            if perm_id:
+                try:
+                    outcome = broker.cancel_stop_order(perm_id)
+                    if outcome == "Filled":
+                        # Stop was already filled; never proceed to market sell.
+                        fill = broker.get_stop_fill(perm_id)
+                        if fill is None:
+                            # Synthesize estimated FillResult from stop price.
+                            stop_price = portfolio.positions[ticker].get("stop_price")
+                            if not stop_price or stop_price <= 0:
+                                # Fall back to entry price
+                                stop_price = portfolio.positions[ticker].get("fill_price", 0)
+                            fill = FillResult(
+                                ticker=ticker, action="SELL", fill_price=stop_price,
+                                quantity=qty, timestamp=""
+                            )
+                            exit_type = "reconciled_stop_loss"
+                        else:
+                            exit_type = "stop_loss"
+                        portfolio.record_exit(ticker, fill, exit_type=exit_type)
+                        portfolio.clear_stop_order(ticker)
+                        fills.append(fill)
+                        continue
+                    elif outcome == "Error":
+                        # Cancel failed — the stop may still be live at the broker.
+                        # Keep the perm_id so tracking is retained; skip market sell.
+                        errors.append(f"{ticker}: could not cancel protective stop")
+                        continue
+                    portfolio.clear_stop_order(ticker)
+                except Exception as e:
+                    logger.warning(f"{ticker}: error cancelling protective stop: {e}")
+
             fill = _place_order_with_retry(broker, OrderRequest(ticker, "SELL", qty), logger)
             if fill is None:
                 errors.append(f"{ticker}: order not filled")
                 continue
-            portfolio.record_exit(ticker, fill)
+            portfolio.record_exit(ticker, fill, exit_type="strategy_exit")
             fills.append(fill)
         except Exception as e:
             errors.append(f"{ticker}: {str(e)}")

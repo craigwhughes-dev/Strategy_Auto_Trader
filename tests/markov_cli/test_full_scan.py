@@ -467,6 +467,53 @@ class TestWorkersValidation:
             full_scan.main(["--workers", "-1", "--tickers", "AAA"])
 
 
+class TestDataCutoff:
+    """scan_ticker's data_cutoff drops bars dated on or after the cutoff.
+
+    Uses scan_ticker's fetch_fn/vol_profile_fn/backtest_fn DI seams — no
+    monkeypatching."""
+
+    @staticmethod
+    def _di_kwargs(df, backtest_fn=None):
+        return {
+            "fetch_fn": lambda t, period="730d": df,
+            "vol_profile_fn": lambda t: None,
+            "backtest_fn": backtest_fn or (lambda frame, **kw: {"detail": pd.DataFrame()}),
+        }
+
+    def test_truncates_bars_at_cutoff(self):
+        df = _price_df(72)  # 2026-01-05 09:00 .. 2026-01-08 08:00 (hourly)
+        seen = {}
+
+        def fake_backtest(frame, **kwargs):
+            seen["last"] = frame.index[-1]
+            return {"detail": pd.DataFrame()}
+
+        cutoff = pd.Timestamp("2026-01-07").date()
+        row = full_scan.scan_ticker("TEST", "default", sentiment=False, data_cutoff=cutoff,
+                                    **self._di_kwargs(df, fake_backtest))
+        assert seen["last"].date() < cutoff
+        assert row["bars_fetched"] < 72
+        assert row["last_bar"].startswith("2026-01-06")
+
+    def test_no_cutoff_keeps_all_bars(self):
+        df = _price_df(72)
+        row = full_scan.scan_ticker("TEST", "default", sentiment=False, **self._di_kwargs(df))
+        assert row["bars_fetched"] == 72
+
+    def test_cutoff_before_history_gives_no_data(self):
+        df = _price_df(24)
+        cutoff = pd.Timestamp("2020-01-01").date()
+        row = full_scan.scan_ticker("TEST", "default", sentiment=False, data_cutoff=cutoff,
+                                    **self._di_kwargs(df))
+        assert row["status"] == "no_data"
+        assert "data_cutoff" in row["note"]
+
+    def test_cli_rejects_bad_cutoff(self):
+        with pytest.raises(SystemExit):
+            full_scan.main(["--tickers", "AAA", "--data-cutoff", "not-a-date"])
+
+
 class TestScanTickerWorkerError:
     """Tests for _scan_ticker_worker error handling and payload structure."""
 

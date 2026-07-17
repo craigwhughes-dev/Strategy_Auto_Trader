@@ -55,6 +55,9 @@ class PortfolioManager:
                         "buys": 0,
                         "sells": 0,
                     })
+                    for pos in data.get("positions", {}).values():
+                        pos.setdefault("stop_perm_id", None)
+                        pos.setdefault("stop_price", None)
                     return data
             except Exception:
                 pass
@@ -129,6 +132,8 @@ class PortfolioManager:
             "kelly_fraction": kelly_fraction,
             "stop_level": stop_level,
             "target_level": target_level,
+            "stop_perm_id": None,
+            "stop_price": None,
         }
         self._state["trade_log"].append({
             "ticker": ticker,
@@ -140,12 +145,16 @@ class PortfolioManager:
             "slippage_bps": slippage_bps(signal_price, fill.fill_price, "BUY"),
         })
 
-    def record_exit(self, ticker: str, fill: FillResult, signal_price: float = 0.0) -> None:
-        """Remove position and log realised P&L after a SELL fill."""
+    def record_exit(self, ticker: str, fill: FillResult, signal_price: float = 0.0,
+                    exit_type: str = "strategy_exit") -> None:
+        """Remove position and log realised P&L after a SELL fill.
+
+        exit_type: 'strategy_exit' | 'stop_loss' | 'reconciled_stop_loss'
+        """
         pos = self._state["positions"].pop(ticker, None)
         entry_price = pos["fill_price"] if pos else 0.0
         pl = round((fill.fill_price - entry_price) * fill.quantity, 2)
-        self._state["trade_log"].append({
+        log_entry = {
             "ticker": ticker,
             "action": "SELL",
             "date": datetime.now(timezone.utc).date().isoformat(),
@@ -154,4 +163,20 @@ class PortfolioManager:
             "pl": pl,
             "signal_price": signal_price,
             "slippage_bps": slippage_bps(signal_price, fill.fill_price, "SELL"),
-        })
+            "exit_type": exit_type,
+        }
+        if exit_type != "strategy_exit" and pos:
+            log_entry["stop_price"] = pos.get("stop_price")
+        self._state["trade_log"].append(log_entry)
+
+    def set_stop_order(self, ticker: str, perm_id: int, stop_price: float) -> None:
+        """Record a placed protective stop order for an open position."""
+        if ticker in self._state["positions"]:
+            self._state["positions"][ticker]["stop_perm_id"] = perm_id
+            self._state["positions"][ticker]["stop_price"] = stop_price
+
+    def clear_stop_order(self, ticker: str) -> None:
+        """Clear stop order tracking for a position (when it's cancelled or executed)."""
+        if ticker in self._state["positions"]:
+            self._state["positions"][ticker]["stop_perm_id"] = None
+            self._state["positions"][ticker]["stop_price"] = None

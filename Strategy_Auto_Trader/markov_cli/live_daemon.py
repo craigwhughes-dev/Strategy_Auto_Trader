@@ -546,6 +546,8 @@ def execute_signals_with_retry(
     max_retries: int = 3,
     market_currency: str = "",
     daemon_state: dict | None = None,
+    protective_stops: bool = False,
+    stop_buffer_pct: float = 1.5,
     *,
     execute_signals: Callable | None = None,
     save_state: Callable | None = None,
@@ -574,6 +576,8 @@ def execute_signals_with_retry(
                 daily_buy_limit, daily_sell_limit,
                 market_name=market_name,
                 market_currency=market_currency,
+                protective_stops=protective_stops,
+                stop_buffer_pct=stop_buffer_pct,
             )
         except ExecutionInterrupted as exc:
             # exc.unresolved always contains at least the ticker that was being
@@ -670,6 +674,8 @@ def process_cycle(
     broker: object,
     logger: logging.Logger,
     last_cycle_hour: dict | None = None,
+    protective_stops: bool = False,
+    stop_buffer_pct: float = 1.5,
 ) -> int:
     """Run one market cycle: prioritize open positions, then round-robin through candidates.
 
@@ -790,6 +796,8 @@ def process_cycle(
                     daily_buy_limit, daily_sell_limit, logger,
                     market_currency=market_currency,
                     daemon_state=daemon_state,
+                    protective_stops=protective_stops,
+                    stop_buffer_pct=stop_buffer_pct,
                 )
                 logger.info(f"  BUY:  {len(buys)}, SELL: {len(sells)}, Skipped: {len(skipped)}")
                 for b in buys:
@@ -835,6 +843,70 @@ def check_overnight_screening(
             logger.error(f"Error in overnight screening: {e}")
 
 
+def check_protective_stops(
+    portfolio: object,
+    broker: object,
+    logger: logging.Logger,
+    stop_buffer_pct: float = 1.5,
+) -> None:
+    """Invariant check: every open position has a live protective stop.
+
+    Re-places missing stops, journals vanished-stop-with-fill as stop_loss,
+    and cancels orphan stops with no matching position.
+    """
+    try:
+        open_stops = broker.get_open_stop_orders()
+    except Exception as e:
+        logger.warning(f"check_protective_stops: could not fetch open stops: {e}")
+        return
+
+    for ticker, pos in list(portfolio.positions.items()):
+        perm_id = pos.get("stop_perm_id")
+        if perm_id and perm_id in open_stops:
+            continue
+
+        if perm_id:
+            try:
+                fill = broker.get_stop_fill(perm_id)
+                if fill is not None:
+                    logger.warning(f"{ticker}: protective stop FILLED @ {fill.fill_price}")
+                    portfolio.record_exit(ticker, fill, exit_type="stop_loss")
+                    portfolio.clear_stop_order(ticker)
+                    portfolio.save()
+                    continue
+            except Exception as e:
+                logger.warning(f"{ticker}: error checking stop fill: {e}")
+
+            logger.warning(f"{ticker}: stop {perm_id} vanished without execution — re-placing")
+
+        from ..broker.types import StopOrderRequest
+        try:
+            buffered_stop = pos.get("stop_level", 0) * (1 - stop_buffer_pct / 100)
+            if not buffered_stop or buffered_stop <= 0:
+                buffered_stop = pos.get("stop_price")
+            if not buffered_stop or buffered_stop <= 0:
+                logger.warning(f"{ticker}: cannot determine stop price, skipping re-place")
+                continue
+
+            req = StopOrderRequest(ticker, pos["quantity"], buffered_stop)
+            result = broker.place_stop_order(req)
+            if result:
+                portfolio.set_stop_order(ticker, result.perm_id, result.stop_price)
+                portfolio.save()
+            else:
+                logger.warning(f"{ticker}: stop re-place rejected")
+        except Exception as e:
+            logger.warning(f"{ticker}: error re-placing stop: {e}")
+
+    for perm_id, info in open_stops.items():
+        if info.ticker not in portfolio.positions:
+            logger.warning(f"Orphan stop {perm_id} on {info.ticker} — cancelling")
+            try:
+                broker.cancel_stop_order(perm_id)
+            except Exception as e:
+                logger.warning(f"Error cancelling orphan stop {perm_id}: {e}")
+
+
 def run_reconciliation(
     portfolio: object,
     broker: object,
@@ -870,6 +942,15 @@ def run_reconciliation(
         return "error"
 
     logger.info(f"Reconciliation: comparing {len(portfolio.positions)} internal position(s) against broker...")
+    from ..broker.reconcile import check_stop_fills_for_missing_positions
+    resolved_stops = check_stop_fills_for_missing_positions(
+        portfolio.positions, broker_positions, broker, portfolio
+    )
+    if resolved_stops:
+        portfolio.save()
+        for resolution in resolved_stops:
+            logger.info(f"  {resolution}")
+
     discrepancies = reconcile_positions(portfolio.positions, broker_positions)
 
     if discrepancies:
@@ -977,6 +1058,8 @@ def check_nightly_reconciliation(
     portfolio: object,
     broker: object,
     logger: logging.Logger,
+    protective_stops: bool = False,
+    stop_buffer_pct: float = 1.5,
     *,
     run_recon: Callable | None = None,
     save_state: Callable | None = None,
@@ -999,6 +1082,8 @@ def check_nightly_reconciliation(
     if now.hour == run_hour and now.minute >= run_minute:
         logger.info("Running nightly position reconciliation...")
         outcome = run_recon(portfolio, broker, daemon_state, logger)
+        if protective_stops:
+            check_protective_stops(portfolio, broker, logger, stop_buffer_pct)
         # A broker fetch error is not a daily result — leave the date unset so
         # it retries on the next poll within the run window.
         if outcome in ("clean", "mismatch"):
@@ -1055,6 +1140,12 @@ def main(argv: list[str] | None = None) -> int:
         "--takeover", action="store_true",
         help="Kill any running daemon instance and take over the lock "
              "(used by the Task Scheduler start command)")
+    parser.add_argument(
+        "--protective-stops", action="store_true", default=False,
+        help="Enable protective stop orders (default: off)")
+    parser.add_argument(
+        "--stop-buffer-pct", type=float, default=1.5,
+        help="Stop buffer percentage above strategy stop (default: 1.5)")
     args = parser.parse_args(argv)
 
     logger = setup_logging()
@@ -1147,12 +1238,20 @@ def main(argv: list[str] | None = None) -> int:
                     if run_startup_reconciliation(daemon_state, portfolio, broker, logger):
                         startup_reconciliation_done = True
                         logger.info("Startup reconciliation complete — resuming normal entry evaluation")
+                        if args.protective_stops:
+                            check_protective_stops(portfolio, broker, logger, args.stop_buffer_pct)
 
                 # Nightly broker/state reconciliation (real broker only)
                 if not dry_run:
                     check_nightly_reconciliation(
-                        config, daemon_state, portfolio, broker, logger
+                        config, daemon_state, portfolio, broker, logger,
+                        protective_stops=args.protective_stops,
+                        stop_buffer_pct=args.stop_buffer_pct,
                     )
+
+                # Check protective stops (before ticker processing)
+                if args.protective_stops and not dry_run and startup_reconciliation_done:
+                    check_protective_stops(portfolio, broker, logger, args.stop_buffer_pct)
 
                 # Process manual sell commands from mobile app
                 process_manual_commands_wrapper(config, portfolio, broker, logger, daemon_state)
@@ -1175,6 +1274,8 @@ def main(argv: list[str] | None = None) -> int:
                             market_name, market_cfg, config,
                             daemon_state, portfolio, broker, logger,
                             last_cycle_hour=last_cycle_hour,
+                            protective_stops=args.protective_stops,
+                            stop_buffer_pct=args.stop_buffer_pct,
                         )
 
                         last_cycle_hour[market_name] = current_hour

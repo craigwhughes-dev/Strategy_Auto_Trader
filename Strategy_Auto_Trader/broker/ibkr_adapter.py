@@ -155,3 +155,138 @@ class IBKRAdapter:
             for pos in self._ib.positions()
             if hasattr(pos.contract, "symbol") and pos.position != 0
         }
+
+    def place_stop_order(self, req):
+        """Place a resting GTC stop-sell order. Returns StopOrderResult with permId on acceptance, None if rejected."""
+        if not self.is_connected():
+            raise ConnectionError(
+                f"Socket disconnect: not connected to {self._host}:{self._port}"
+            )
+
+        try:
+            from ib_insync import Stock, StopOrder
+            contract = Stock(*ibkr_contract_params(req.ticker))
+            self._ib.qualifyContracts(contract)
+            order = StopOrder("SELL", req.quantity, req.stop_price, tif="GTC")
+            trade = self._ib.placeOrder(contract, order)
+            self._ib.waitOnUpdate(timeout=self._timeout)
+
+            order_status = trade.orderStatus.status
+            if order_status not in ("PreSubmitted", "Submitted"):
+                logger.warning(
+                    f"Stop order not accepted for {req.ticker}: status={order_status}"
+                )
+                return None
+
+            perm_id = trade.order.permId
+            if not perm_id:
+                for _ in range(5):
+                    self._ib.waitOnUpdate(timeout=1.0)
+                    perm_id = trade.order.permId
+                    if perm_id:
+                        break
+
+            if not perm_id:
+                logger.warning(
+                    f"Stop order for {req.ticker} accepted but permId never populated"
+                )
+                return None
+
+            from .types import StopOrderResult
+            return StopOrderResult(
+                perm_id=perm_id,
+                stop_price=req.stop_price,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception as e:
+            if not self.is_connected():
+                raise ConnectionError(
+                    f"Socket disconnect during stop order placement: {e}"
+                ) from e
+            raise
+
+    def get_open_stop_orders(self) -> dict:
+        """Return {permId: OpenOrderInfo} for open SELL STP orders using reqAllOpenOrders."""
+        if not self.is_connected():
+            raise ConnectionError(
+                f"Socket disconnect: not connected to {self._host}:{self._port}"
+            )
+
+        try:
+            from .types import OpenOrderInfo
+            self._ib.reqAllOpenOrders()
+            self._ib.waitOnUpdate(timeout=2.0)
+
+            result = {}
+            for trade in self._ib.trades():
+                if (trade.contract and hasattr(trade.order, 'action') and
+                    trade.order.action == "SELL" and
+                    hasattr(trade.order, 'orderType') and
+                    trade.order.orderType == "STP" and
+                    trade.order.permId and
+                    trade.orderStatus.status in ("PreSubmitted", "Submitted", "Acknowledged")):
+                    try:
+                        ticker_key = yfinance_ticker(
+                            trade.contract.symbol, trade.contract.currency
+                        )
+                        result[trade.order.permId] = OpenOrderInfo(
+                            ticker=ticker_key,
+                            quantity=int(trade.order.totalQuantity),
+                            stop_price=float(trade.order.auxPrice or 0.0),
+                            perm_id=trade.order.permId,
+                        )
+                    except Exception:
+                        pass
+            return result
+        except ConnectionError:
+            raise
+        except Exception as e:
+            logger.warning(f"Error retrieving open stop orders: {e}")
+            raise
+
+    def cancel_stop_order(self, perm_id: int) -> str:
+        """Cancel a stop order by permId. Returns 'Cancelled' | 'Filled' | 'NotFound' | 'Error'."""
+        if not self.is_connected():
+            # Disconnected is not "not found" — callers treat NotFound as
+            # safe-to-proceed with a market sell, which is unsafe here.
+            return "Error"
+
+        try:
+            for trade in self._ib.trades():
+                if trade.order.permId == perm_id:
+                    if trade.orderStatus.status == "Filled":
+                        return "Filled"
+                    self._ib.cancelOrder(trade.order)
+                    for _ in range(10):
+                        self._ib.waitOnUpdate(timeout=0.5)
+                        if trade.orderStatus.status in ("Cancelled", "Filled"):
+                            return trade.orderStatus.status
+                    return "Cancelled"
+            return "NotFound"
+        except Exception as e:
+            logger.warning(f"Error cancelling stop order {perm_id}: {e}")
+            return "Error"
+
+    def get_stop_fill(self, perm_id: int):
+        """Look up execution for a stop order by permId. Returns FillResult or None."""
+        if not self.is_connected():
+            return None
+
+        try:
+            fills_list = self._ib.fills()
+            for fill in fills_list:
+                if fill.execution.permId == perm_id:
+                    from .types import FillResult
+                    return FillResult(
+                        ticker=yfinance_ticker(
+                            fill.contract.symbol, fill.contract.currency
+                        ),
+                        action="SELL",
+                        fill_price=float(fill.execution.price or 0.0),
+                        quantity=int(fill.execution.shares or 0),
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                    )
+            return None
+        except Exception as e:
+            logger.warning(f"Error retrieving stop fill for {perm_id}: {e}")
+            return None

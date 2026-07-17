@@ -88,7 +88,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import asdict
 from dataclasses import fields as dc_fields
-from datetime import datetime
+from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
 
@@ -541,12 +541,23 @@ def _append_summary_row(row: dict) -> None:
 
 def scan_ticker(
     ticker: str, strategy_name: str, *, trade_cost: float = 10.0, sentiment: bool = True,
-    vix_data: dict | None = None,
+    vix_data: dict | None = None, data_cutoff: date | None = None,
+    fetch_fn=None, vol_profile_fn=None, backtest_fn=None,
 ) -> dict:
     """Run one ticker end-to-end; returns its summary row. Never skips on vol.
 
     Called by both single-threaded and multiprocessing paths. vix_data is optional
-    and provided by parent when sentiment is enabled in a worker pool."""
+    and provided by parent when sentiment is enabled in a worker pool.
+
+    data_cutoff drops bars dated on or after it (exchange-local date), so
+    multi-strategy passes minutes apart all see the same frozen history even
+    while a market is open — cross-strategy diffs stay data-drift-free.
+
+    fetch_fn/vol_profile_fn/backtest_fn are DI seams (default: the module-level
+    fetch_hourly_cached / volatility_profile_cached / consolidated_backtest)."""
+    fetch = fetch_fn if fetch_fn is not None else fetch_hourly_cached
+    vol_profile = vol_profile_fn if vol_profile_fn is not None else volatility_profile_cached
+    backtest = backtest_fn if backtest_fn is not None else consolidated_backtest
     started = time.time()
     row: dict = {
         "ticker": ticker,
@@ -556,17 +567,23 @@ def scan_ticker(
         "note": "",
     }
 
-    prof = volatility_profile_cached(ticker)
+    prof = vol_profile(ticker)
     for k in _VOL_PROFILE_KEYS:
         row[k] = prof.get(k) if prof else None
 
-    df = fetch_hourly_cached(ticker, period="730d")
+    df = fetch(ticker, period="730d")
     if df is None or df.empty:
         row["status"] = "no_data"
         return row
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     df = df.dropna(subset=["Close"])
+    if data_cutoff is not None:
+        df = df[df.index.date < data_cutoff]
+        if df.empty:
+            row["status"] = "no_data"
+            row["note"] = f"no bars before data_cutoff {data_cutoff.isoformat()}"
+            return row
 
     row["first_bar"] = str(df.index[0])
     row["last_bar"] = str(df.index[-1])
@@ -579,7 +596,7 @@ def scan_ticker(
         HMM_CACHE_DIR / f"{safe}.pkl", dates=df.index, closes=df["Close"].values,
     )
 
-    bt = consolidated_backtest(
+    bt = backtest(
         df,
         regime_model=regime_model,
         entry_strategy=entry_s,
@@ -645,6 +662,7 @@ def scan_ticker(
 
 def _scan_ticker_worker(
     ticker: str, strategy_name: str, trade_cost: float, sentiment: bool,
+    data_cutoff: date | None = None,
 ) -> dict:
     """Top-level module worker function for ProcessPoolExecutor.
 
@@ -657,6 +675,7 @@ def _scan_ticker_worker(
         row = scan_ticker(
             ticker, strategy_name,
             trade_cost=trade_cost, sentiment=sentiment, vix_data=vix_data,
+            data_cutoff=data_cutoff,
         )
         return {"row": row, "traceback": None}
     except Exception as exc:
@@ -739,10 +758,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-sentiment", action="store_true",
                         help="Skip options/VIX/insider/short-interest fetches (faster; "
                              "sentiment columns are mostly empty anyway for non-US tickers)")
+    parser.add_argument("--data-cutoff", default=None, metavar="YYYY-MM-DD",
+                        help="Drop bars dated on or after this date (exchange-local). "
+                             "'today' excludes the current (possibly still-forming) session "
+                             "so comparison/reconciliation runs are immune to data drift. "
+                             "Default: no cutoff.")
     args = parser.parse_args(argv)
 
     if args.workers < 1:
         parser.error("--workers must be >= 1")
+
+    data_cutoff: date | None = None
+    if args.data_cutoff:
+        if args.data_cutoff.lower() == "today":
+            data_cutoff = date.today()
+        else:
+            try:
+                data_cutoff = date.fromisoformat(args.data_cutoff)
+            except ValueError:
+                parser.error(f"--data-cutoff must be YYYY-MM-DD or 'today', got {args.data_cutoff!r}")
 
     if args.build_universe or (args.tickers is None and not UNIVERSE_FILE.exists()):
         print("Building universe...")
@@ -753,7 +787,8 @@ def main(argv: list[str] | None = None) -> int:
         tickers = tickers[: args.limit]
 
     print(f"Full scan: {len(tickers)} tickers, strategy={args.strategy}, "
-          f"no vol screening, max hourly history (730d)")
+          f"no vol screening, max hourly history (730d)"
+          + (f", data cutoff {data_cutoff.isoformat()}" if data_cutoff else ""))
     print(f"  outputs: {SCAN_DIR}  journals: {JOURNAL_DIR}")
     print(f"  workers: {args.workers} (rows land in completion order)\n", flush=True)
 
@@ -782,7 +817,7 @@ def main(argv: list[str] | None = None) -> int:
                 row = scan_ticker(
                     ticker, args.strategy,
                     trade_cost=args.trade_cost, sentiment=not args.no_sentiment,
-                    vix_data=vix_data,
+                    vix_data=vix_data, data_cutoff=data_cutoff,
                 )
             except Exception as exc:
                 row = {
@@ -808,7 +843,7 @@ def main(argv: list[str] | None = None) -> int:
                 executor.submit(
                     _scan_ticker_worker,
                     ticker, args.strategy,
-                    args.trade_cost, not args.no_sentiment,
+                    args.trade_cost, not args.no_sentiment, data_cutoff,
                 ): ticker
                 for ticker in tasks_to_run
             }

@@ -106,3 +106,29 @@ class TestMainLoop:
             assert "--workers" in argv
             # Default should be 2
             assert argv[argv.index("--workers") + 1] == "2"
+
+
+class TestDataCutoffForwarding:
+    """Uses fsa.main's scan_main DI seam — no monkeypatching."""
+
+    def test_default_cutoff_is_today_same_for_every_strategy(self):
+        from datetime import date
+        calls = []
+        fsa.main([], scan_main=calls.append)
+        cutoffs = {argv[argv.index("--data-cutoff") + 1] for argv in calls}
+        assert cutoffs == {date.today().isoformat()}
+
+    def test_explicit_date_forwarded(self):
+        calls = []
+        fsa.main(["--data-cutoff", "2026-07-01"], scan_main=calls.append)
+        for argv in calls:
+            assert argv[argv.index("--data-cutoff") + 1] == "2026-07-01"
+
+    def test_none_disables_cutoff(self):
+        calls = []
+        fsa.main(["--data-cutoff", "none"], scan_main=calls.append)
+        assert all("--data-cutoff" not in argv for argv in calls)
+
+    def test_bad_cutoff_rejected(self):
+        with pytest.raises(SystemExit):
+            fsa.main(["--data-cutoff", "yesterday-ish"], scan_main=lambda argv: None)

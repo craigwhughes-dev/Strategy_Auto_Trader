@@ -33,6 +33,11 @@ from ..optimised_aggressive_optimised import (
     OptimisedAggressiveOptimisedExit,
 )
 from ..optimised_optimised import OptimisedOptimisedEntry, OptimisedOptimisedExit
+from ..optimised_pbull import OptimisedPbullEntry, OptimisedPbullExit
+from ..optimised_regime import OptimisedRegimeEntry, OptimisedRegimeExit
+from ..optimised_rsi import OptimisedRsiEntry, OptimisedRsiExit
+from ..optimised_score7 import OptimisedScore7Entry, OptimisedScore7Exit
+from ..optimised_volume import OptimisedVolumeEntry, OptimisedVolumeExit
 from ..trend_follow import TrendEntry, TrendExit
 from ..trend_optimised import TrendOptimisedEntry, TrendOptimisedExit
 
@@ -92,6 +97,26 @@ STRATEGY_REGISTRY: dict[str, dict[str, type]] = {
     "optimised_optimised": {
         "entry": OptimisedOptimisedEntry,
         "exit":  OptimisedOptimisedExit,
+    },
+    "optimised_pbull": {
+        "entry": OptimisedPbullEntry,
+        "exit":  OptimisedPbullExit,
+    },
+    "optimised_regime": {
+        "entry": OptimisedRegimeEntry,
+        "exit":  OptimisedRegimeExit,
+    },
+    "optimised_rsi": {
+        "entry": OptimisedRsiEntry,
+        "exit":  OptimisedRsiExit,
+    },
+    "optimised_score7": {
+        "entry": OptimisedScore7Entry,
+        "exit":  OptimisedScore7Exit,
+    },
+    "optimised_volume": {
+        "entry": OptimisedVolumeEntry,
+        "exit":  OptimisedVolumeExit,
     },
     "trend": {
         "entry": TrendEntry,

@@ -4,19 +4,59 @@
 Base choppy_vol strategy is decisively negative (199/203 losers).
 This variant adds regime gate for potential future research, not live use.
 
-Differentiator: Winners r=0.530, losers r=-0.319.
+What this strategy is trying to do
+------------------------------------
+Choppy-Vol (mean reversion) strategy is designed to trade low-trend-quality
+tickers the trend strategies veto. However, backtesting showed it is decisively
+negative (199/203 tickers lost money). This variant adds a relaxed regime gate
+(P_Bull > 0.5) to filter entries to slightly stronger regimes — for potential
+future research only, not live use.
+
+Analysis shows Winners r=0.530, losers r=-0.319.
 Gate: Only enter if HMM P(Bull) > 0.5 (relaxed vs other strategies).
+
+Entry
+-----
+Same as Choppy-Vol: RSI < 35 AND consolidation (Bollinger squeeze + low ATR),
+PLUS weak bull regime gate: **P(Bull) > 0.5**.
+
+Exit
+----
+Identical to Choppy-Vol: RSI reversion (>= 50), 4% stop-loss, 6% take-profit,
+40-bar max hold.
 """
 
 from __future__ import annotations
 
-from ..plugins.types import EntryDecision, RegimeState
-from .choppy_vol import ChoppyVolEntry as BaseChoppyVolEntry
-from .choppy_vol import ChoppyVolExit
+from ..plugins.exit_rules import StandardExitRules
+from ..plugins.types import BarData, EntryDecision, ExitResult, RegimeState, TradeState
+
+_RSI_OVERSOLD = 35.0
+_RSI_REVERSION = 50.0
 
 
-class ChoppyVolOptimisedEntry(BaseChoppyVolEntry):
-    """Choppy-Vol entry with weak bull regime gate."""
+class ChoppyVolOptimisedEntry:
+    """Mean-reversion entry with weak bull regime gate.
+
+    Satisfies EntryStrategyProtocol. This strategy exists specifically to trade
+    tickers the trend strategies veto for being choppy, so this variant adds
+    a relaxed regime gate (P_Bull > 0.5) for research purposes.
+    """
+
+    #: Not used for scoring (this strategy bypasses composite_signal
+    #: entirely) — declared only so consolidated_backtest's skip_unused_
+    #: indicators optimisation knows the HMM regime model isn't needed here.
+    _weights: dict[str, float] = {"hmm": 0.0, "rsi": 1.0}
+    #: Documentation-only — this strategy never calls _apply_quality_gate.
+    quality_gate_enabled: bool = False
+    #: Trades the low-trend-quality names the default vol_screen vetoes —
+    #: overnight_scope.py's stage-1 screen inverts to keep those tickers
+    #: instead of excluding them when the market's strategy sets this.
+    wants_low_trend_quality: bool = True
+
+    def __init__(self, vol_filter_ok: bool = True) -> None:
+        """vol_filter_ok is accepted only for registry constructor-signature
+        compatibility and otherwise unused."""
 
     def evaluate(
         self,
@@ -25,14 +65,90 @@ class ChoppyVolOptimisedEntry(BaseChoppyVolEntry):
         _volume_ratio: float,
         currently_in: bool = False,
     ) -> EntryDecision:
+        """Score a bar. While in a position, check for RSI reversion exit
+        (cur_rsi >= 50). If reversion conditions met, return SELL; otherwise
+        hold. The RSI-reversion exit fires via this path (min_hold_bars=0
+        allows it immediately). Stop-loss/take-profit/max-hold backstops
+        are enforced in ChoppyVolOptimisedExit.check().
+
+        Regime gate (entry-only): only allow new entry if P_Bull > 0.5.
+        """
+        if currently_in:
+            cur_rsi = mom.get("cur_rsi")
+            if cur_rsi is not None and cur_rsi >= _RSI_REVERSION:
+                return EntryDecision(
+                    flag="SELL", raw_flag="SELL", score=1.0,
+                    reason="choppy_vol: RSI reversion (RSI>=50)",
+                )
+            return EntryDecision(flag="HOLD", raw_flag="HOLD", score=0.0, reason="")
+
+        # Entry regime gate: relaxed to P_Bull > 0.5 (vs 0.6 for other strategies)
         p_bull = regime.p_bull if regime.p_bull is not None else 0.0
-        if not currently_in and p_bull <= 0.5:
+        if p_bull <= 0.5:
             return EntryDecision(
                 flag="HOLD", raw_flag="HOLD", score=0.0,
                 reason=f"regime_gate: weak bull (P_Bull={p_bull:.2f}, need >0.5)",
             )
-        return super().evaluate(regime, mom, _volume_ratio, currently_in)
+
+        cur_rsi = mom.get("cur_rsi")
+        consolidating = mom.get("consolidation", False)
+
+        if cur_rsi is None:
+            return EntryDecision(flag="HOLD", raw_flag="HOLD", score=0.0,
+                                 reason="choppy_vol: insufficient data")
+
+        if cur_rsi < _RSI_OVERSOLD and consolidating:
+            return EntryDecision(
+                flag="BUY", raw_flag="BUY", score=1.0,
+                reason="choppy_vol: oversold + consolidation",
+            )
+        return EntryDecision(flag="HOLD", raw_flag="HOLD", score=0.0, reason="")
 
 
-class ChoppyVolOptimisedExit(ChoppyVolExit):
-    """Identical to Choppy-Vol exit."""
+class ChoppyVolOptimisedExit:
+    """Tight stop/target/max-hold backstop.
+
+    RSI-reversion exit has been moved to ChoppyVolOptimisedEntry.evaluate()'s
+    currently_in=True path, which fires immediately (min_hold_bars=0).
+    This class now handles only the hard stop (-4%), hard take-profit (+6%),
+    and max-hold-bars (40) backstop — the safety bounds for the trade.
+
+    Satisfies ExitStrategyProtocol.
+    """
+
+    _stop: float = 0.04
+    _target: float = 0.06
+    _max_hold_bars: int = 40
+    min_hold_bars: int = 0  # Allow signal-based SELL immediately (no hold gate)
+    use_kelly: bool = True
+    kelly_lookback: int = 20
+
+    def __init__(self) -> None:
+        self._impl = StandardExitRules(
+            stop_loss_pct=self._stop,
+            trailing_stop=0.0,
+            vol_stop_mult=0.0,
+            vol_stop_window=20,
+            profit_stop_scale=0.0,
+            min_stop_pct=self._stop,
+            max_hold_days=self._max_hold_bars,
+            exit_on_macd_cross=False,
+            exit_on_rsi_reversal=False,
+            exit_on_consolidation=False,
+            use_sar_stop=False,
+        )
+
+    @property
+    def stop_loss_pct(self) -> float:
+        """Hard stop-loss fraction (4%)."""
+        return self._stop
+
+    @property
+    def take_profit_pct(self) -> float:
+        """Hard take-profit fraction (6%)."""
+        return self._target
+
+    def check(self, trade: TradeState, bar_data: BarData) -> ExitResult:
+        """Delegate to the stop/target/max-hold backstop. RSI reversion exit
+        is now handled by ChoppyVolOptimisedEntry.evaluate()'s currently_in=True path."""
+        return self._impl.check(trade, bar_data)

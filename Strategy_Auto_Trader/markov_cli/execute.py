@@ -94,6 +94,8 @@ def execute_signals(
     market_name: str = "",
     market_currency: str = "",
     marker_path: Path | None = None,
+    protective_stops: bool = False,
+    stop_buffer_pct: float = 1.5,
 ) -> tuple[list[str], list[str], list[str]]:
     """Execute BUY/SELL signals for the given tickers.
 
@@ -103,7 +105,7 @@ def execute_signals(
     from ..broker.in_flight_marker import write_marker, clear_marker
     from ..broker.signal_reader import read_latest_signal
     from ..broker.symbols import sizing_price
-    from ..broker.types import FillResult, OrderRequest
+    from ..broker.types import FillResult, OrderRequest, StopOrderRequest
 
     if marker_path is None:
         marker_path = STATE_DIR / "order_in_flight.json"
@@ -205,7 +207,8 @@ def execute_signals(
                     quantity=fill.quantity, timestamp=fill.timestamp,
                 )
                 portfolio.record_exit(
-                    ticker, exit_fill, signal_price=signal["close"]
+                    ticker, exit_fill, signal_price=signal["close"],
+                    exit_type="strategy_exit"
                 )
                 # Log as entry but flag the severe slippage condition
                 slippage_note = (f" (SEVERE SLIPPAGE: stopped out on entry, "
@@ -214,6 +217,18 @@ def execute_signals(
             else:
                 buys.append(f"{ticker} x{qty} @ {fill.fill_price:.2f}"
                             f"{_slippage_tag(signal['close'], fill.fill_price, 'BUY')}")
+                if protective_stops:
+                    resting_stop = adjusted_stop * (1 - stop_buffer_pct / 100)
+                    req = StopOrderRequest(ticker, qty, resting_stop)
+                    try:
+                        result = broker.place_stop_order(req)
+                        if result is not None:
+                            portfolio.set_stop_order(ticker, result.perm_id, result.stop_price)
+                            logger.info(f"{ticker}: protective stop placed @ {result.stop_price}")
+                        else:
+                            logger.warning(f"{ticker}: resting stop rejected — will retry next poll")
+                    except Exception as e:
+                        logger.warning(f"{ticker}: stop placement error: {e}")
             resolved.add(ticker)
         except Exception as e:
             raise ExecutionInterrupted(
@@ -232,6 +247,40 @@ def execute_signals(
                 resolved.add(ticker)
                 continue
             qty = portfolio.positions[ticker]["quantity"]
+
+            if protective_stops:
+                perm_id = portfolio.positions[ticker].get("stop_perm_id")
+                if perm_id:
+                    outcome = broker.cancel_stop_order(perm_id)
+                    if outcome == "Filled":
+                        fill = broker.get_stop_fill(perm_id)
+                        if fill is None:
+                            # Broker returned "Filled" but fill lookup failed; synthesize
+                            # an estimated FillResult from the position's recorded stop price.
+                            stop_price = portfolio.positions[ticker].get("stop_price")
+                            if not stop_price or stop_price <= 0:
+                                # Fall back to signal close as last resort
+                                stop_price = signal["close"]
+                            fill = FillResult(
+                                ticker=ticker, action="SELL", fill_price=stop_price,
+                                quantity=qty, timestamp=""
+                            )
+                            exit_type = "reconciled_stop_loss"
+                        else:
+                            exit_type = "stop_loss"
+                        portfolio.record_exit(ticker, fill, signal_price=signal["close"],
+                                            exit_type=exit_type)
+                        portfolio.clear_stop_order(ticker)
+                        sells.append(f"{ticker} x{qty} @ {fill.fill_price:.2f} (stop_loss)")
+                        resolved.add(ticker)
+                        continue
+                    elif outcome == "Error":
+                        # Cancel failed; do not attempt market sell
+                        skipped.append(f"{ticker}(stop cancel error)")
+                        resolved.add(ticker)
+                        continue
+                    portfolio.clear_stop_order(ticker)
+
             logger.info(f"About to place order: SELL {qty}x {ticker} — marker written")
             write_marker(marker_path, ticker, "SELL", qty)
             try:
@@ -255,7 +304,8 @@ def execute_signals(
                 resolved.add(ticker)
                 continue
 
-            portfolio.record_exit(ticker, fill, signal_price=signal["close"])
+            portfolio.record_exit(ticker, fill, signal_price=signal["close"],
+                                exit_type="strategy_exit")
             limit_tracker.record_sell()
             sells.append(f"{ticker} x{qty} @ {fill.fill_price:.2f}"
                          f"{_slippage_tag(signal['close'], fill.fill_price, 'SELL')}")
