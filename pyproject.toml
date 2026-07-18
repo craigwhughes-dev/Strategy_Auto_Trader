@@ -10,6 +10,7 @@ dependencies = [
     "scikit-learn>=1.4",
     "matplotlib>=3.8",
     "psutil>=7.2.2",
+    "arch>=8.0.0",
 ]
 
 [project.optional-dependencies]

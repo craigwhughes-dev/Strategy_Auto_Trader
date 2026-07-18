@@ -17,8 +17,24 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..broker.symbols import PENCE_PER_POUND, normalize_fill_price
 from ..broker.types import FillResult, OrderRequest
 from ..core.atomic_io import atomic_write_json
+
+
+def _normalize_sell_fill(ticker: str, fill: FillResult, pos: dict) -> FillResult:
+    """Normalize an LSE sell fill to pot currency (pounds).
+
+    IBKR LSE fill prices arrive inconsistently in pence or pounds; the
+    position's stored entry price is pot currency, so x100 gives the pence
+    reference needed to disambiguate.
+    """
+    ref_pence = float(pos.get("fill_price", 0.0) or 0.0) * PENCE_PER_POUND
+    return FillResult(
+        ticker=fill.ticker, action=fill.action,
+        fill_price=normalize_fill_price(ticker, fill.fill_price, ref_pence),
+        quantity=fill.quantity, timestamp=fill.timestamp,
+    )
 
 
 def _place_order_with_retry(
@@ -228,6 +244,7 @@ def _execute_sell(
                         )
                         exit_type = "reconciled_stop_loss"
                     else:
+                        fill = _normalize_sell_fill(ticker, fill, portfolio.positions[ticker])
                         exit_type = "stop_loss"
                     portfolio.record_exit(ticker, fill, exit_type=exit_type)
                     portfolio.clear_stop_order(ticker)
@@ -240,9 +257,11 @@ def _execute_sell(
             except Exception as e:
                 logger.warning(f"{ticker}: error cancelling protective stop: {e}")
 
+        pos = dict(portfolio.positions[ticker])
         fill = _place_order_with_retry(broker, OrderRequest(ticker, "SELL", qty), logger)
         if fill is None:
             return False, None, f"Order not filled for {ticker}"
+        fill = _normalize_sell_fill(ticker, fill, pos)
         portfolio.record_exit(ticker, fill, exit_type="strategy_exit")
         return True, fill, ""
     except Exception as e:
@@ -287,6 +306,7 @@ def _execute_sell_all(
                             )
                             exit_type = "reconciled_stop_loss"
                         else:
+                            fill = _normalize_sell_fill(ticker, fill, portfolio.positions[ticker])
                             exit_type = "stop_loss"
                         portfolio.record_exit(ticker, fill, exit_type=exit_type)
                         portfolio.clear_stop_order(ticker)
@@ -301,10 +321,12 @@ def _execute_sell_all(
                 except Exception as e:
                     logger.warning(f"{ticker}: error cancelling protective stop: {e}")
 
+            pos = dict(portfolio.positions[ticker])
             fill = _place_order_with_retry(broker, OrderRequest(ticker, "SELL", qty), logger)
             if fill is None:
                 errors.append(f"{ticker}: order not filled")
                 continue
+            fill = _normalize_sell_fill(ticker, fill, pos)
             portfolio.record_exit(ticker, fill, exit_type="strategy_exit")
             fills.append(fill)
         except Exception as e:

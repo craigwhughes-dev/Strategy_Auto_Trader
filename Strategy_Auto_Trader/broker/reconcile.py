@@ -93,6 +93,17 @@ def check_stop_fills_for_missing_positions(
         try:
             fill = broker.get_stop_fill(perm_id)
             if fill is not None:
+                from .symbols import PENCE_PER_POUND, normalize_fill_price
+                from .types import FillResult
+                # Stop fills for LSE arrive in ambiguous units (pence or
+                # pounds) — disambiguate against the stored stop price
+                # (pot currency, so x100 gives the pence reference).
+                ref_pence = float(pos.get("stop_price") or 0.0) * PENCE_PER_POUND
+                fill = FillResult(
+                    ticker=fill.ticker, action=fill.action,
+                    fill_price=normalize_fill_price(ticker, fill.fill_price, ref_pence),
+                    quantity=fill.quantity, timestamp=fill.timestamp,
+                )
                 portfolio.record_exit(ticker, fill, exit_type="stop_loss")
                 resolved.append(
                     f"{ticker}: protective stop filled @ {fill.fill_price}, "

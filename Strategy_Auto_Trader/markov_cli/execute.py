@@ -104,7 +104,7 @@ def execute_signals(
     """
     from ..broker.in_flight_marker import write_marker, clear_marker
     from ..broker.signal_reader import read_latest_signal
-    from ..broker.symbols import sizing_price
+    from ..broker.symbols import normalize_fill_price, sizing_price
     from ..broker.types import FillResult, OrderRequest, StopOrderRequest
 
     if marker_path is None:
@@ -124,6 +124,12 @@ def execute_signals(
             skipped.append(ticker)
             resolved.add(ticker)
             continue
+        # Normalize signal prices to pot currency (pounds for .L) once, here.
+        # quote_close keeps the original exchange-units close as the reference
+        # for disambiguating IBKR's inconsistent LSE fill-price units.
+        signal["quote_close"] = signal["close"]
+        for key in ("close", "stop_level", "target_level"):
+            signal[key] = sizing_price(ticker, signal.get(key, 0.0) or 0.0)
         if signal["flag"] == "BUY":
             buy_signals.append((ticker, signal))
         elif signal["flag"] == "SELL":
@@ -142,7 +148,7 @@ def execute_signals(
                 resolved.add(ticker)
                 continue
             qty = portfolio.compute_quantity(
-                signal["kelly_fraction"], sizing_price(ticker, signal["close"])
+                signal["kelly_fraction"], signal["close"]
             )
             if qty < 1:
                 skipped.append(f"{ticker}(qty=0)")
@@ -170,6 +176,12 @@ def execute_signals(
                 skipped.append(f"{ticker}(order not filled)")
                 resolved.add(ticker)
                 continue
+
+            fill = FillResult(
+                ticker=fill.ticker, action=fill.action,
+                fill_price=normalize_fill_price(ticker, fill.fill_price, signal["quote_close"]),
+                quantity=fill.quantity, timestamp=fill.timestamp,
+            )
 
             # Recompute stop/target based on fill price, not signal close.
             # Derive the percentage distances used by the signal:
@@ -254,6 +266,13 @@ def execute_signals(
                     outcome = broker.cancel_stop_order(perm_id)
                     if outcome == "Filled":
                         fill = broker.get_stop_fill(perm_id)
+                        if fill is not None:
+                            fill = FillResult(
+                                ticker=fill.ticker, action=fill.action,
+                                fill_price=normalize_fill_price(
+                                    ticker, fill.fill_price, signal["quote_close"]),
+                                quantity=fill.quantity, timestamp=fill.timestamp,
+                            )
                         if fill is None:
                             # Broker returned "Filled" but fill lookup failed; synthesize
                             # an estimated FillResult from the position's recorded stop price.
@@ -304,6 +323,11 @@ def execute_signals(
                 resolved.add(ticker)
                 continue
 
+            fill = FillResult(
+                ticker=fill.ticker, action=fill.action,
+                fill_price=normalize_fill_price(ticker, fill.fill_price, signal["quote_close"]),
+                quantity=fill.quantity, timestamp=fill.timestamp,
+            )
             portfolio.record_exit(ticker, fill, signal_price=signal["close"],
                                 exit_type="strategy_exit")
             limit_tracker.record_sell()

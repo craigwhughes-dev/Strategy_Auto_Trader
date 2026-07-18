@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from .symbols import ibkr_contract_params, yfinance_ticker
+from .symbols import PENCE_PER_POUND, ibkr_contract_params, yfinance_ticker
 from .types import FillResult, OrderRequest
 
 logger = logging.getLogger(__name__)
@@ -167,7 +167,11 @@ class IBKRAdapter:
             from ib_insync import Stock, StopOrder
             contract = Stock(*ibkr_contract_params(req.ticker))
             self._ib.qualifyContracts(contract)
-            order = StopOrder("SELL", req.quantity, req.stop_price, tif="GTC")
+            # req.stop_price is pot currency (pounds); LSE orders quote in pence.
+            exchange_stop = req.stop_price
+            if req.ticker.upper().endswith(".L"):
+                exchange_stop = req.stop_price * PENCE_PER_POUND
+            order = StopOrder("SELL", req.quantity, exchange_stop, tif="GTC")
             trade = self._ib.placeOrder(contract, order)
             self._ib.waitOnUpdate(timeout=self._timeout)
 
@@ -229,10 +233,15 @@ class IBKRAdapter:
                         ticker_key = yfinance_ticker(
                             trade.contract.symbol, trade.contract.currency
                         )
+                        stop_price = float(trade.order.auxPrice or 0.0)
+                        # auxPrice is exchange units (pence for LSE) — report
+                        # pot currency to match internal state.
+                        if ticker_key.upper().endswith(".L"):
+                            stop_price /= PENCE_PER_POUND
                         result[trade.order.permId] = OpenOrderInfo(
                             ticker=ticker_key,
                             quantity=int(trade.order.totalQuantity),
-                            stop_price=float(trade.order.auxPrice or 0.0),
+                            stop_price=stop_price,
                             perm_id=trade.order.permId,
                         )
                     except Exception:

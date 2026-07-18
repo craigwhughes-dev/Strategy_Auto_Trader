@@ -41,3 +41,26 @@ def sizing_price(ticker: str, price: float) -> float:
     if ticker.upper().endswith(".L"):
         return price / PENCE_PER_POUND
     return price
+
+
+def normalize_fill_price(ticker: str, fill_price: float, reference_pence: float) -> float:
+    """Normalize a broker fill price to pot currency (pounds for LSE).
+
+    IBKR returns LSE execution prices inconsistently — sometimes pence
+    (HSBA.L filled as 1462.0), sometimes pounds (VOD.L filled as 1.139) —
+    so a fixed conversion mis-prices one case or the other. Disambiguate
+    against a pence reference price from local context (signal close, stop
+    level x 100): a pence-scale fill sits near the reference, a pounds-scale
+    fill sits ~100x below it. Cut at 20% of reference — 5x margin against
+    both intraday moves and the 100x unit gap.
+
+    Non-LSE tickers and non-positive inputs pass through unchanged. With no
+    usable reference, assume exchange units (pence) and convert.
+    """
+    if not ticker.upper().endswith(".L") or fill_price <= 0:
+        return fill_price
+    if reference_pence and reference_pence > 0:
+        if fill_price / reference_pence > 0.2:
+            return fill_price / PENCE_PER_POUND   # pence-scale fill
+        return fill_price                          # already pounds
+    return fill_price / PENCE_PER_POUND
