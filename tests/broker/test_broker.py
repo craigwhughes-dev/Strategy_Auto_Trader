@@ -89,7 +89,8 @@ class TestBroker:
         pm.record_exit("MSFT", sell)
         assert "MSFT" not in pm.positions
         assert pm.trade_log[-1]["action"] == "SELL"
-        assert pm.trade_log[-1]["pl"] == pytest.approx(300.0)  # (330-300)*10
+        assert pm.trade_log[-1]["gross_pl"] == pytest.approx(300.0)  # (330-300)*10
+        assert pm.trade_log[-1]["pl"] == pytest.approx(296.85)  # gross minus IBKR commission both legs
 
     def test_portfolio_save_and_reload(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
@@ -933,7 +934,7 @@ class TestBroker:
         pm.record_entry("AAPL", buy, 0.10, 95.0, 105.0)
         sell = FillResult("AAPL", "SELL", 0.0, 10, "2026-07-02T00:00:00+00:00")
         pm.record_exit("AAPL", sell)
-        pl = pm.trade_log[-1]["pl"]
+        pl = pm.trade_log[-1]["gross_pl"]
         assert pl == pytest.approx(-1000.0)
 
     def test_bva_record_exit_negative_price(self, tmp_path):
@@ -944,7 +945,7 @@ class TestBroker:
         pm.record_entry("AAPL", buy, 0.10, 95.0, 105.0)
         sell = FillResult("AAPL", "SELL", -50.0, 10, "2026-07-02T00:00:00+00:00")
         pm.record_exit("AAPL", sell)
-        pl = pm.trade_log[-1]["pl"]
+        pl = pm.trade_log[-1]["gross_pl"]
         assert pl == pytest.approx(-1500.0)
 
     def test_bva_record_exit_huge_profit(self, tmp_path):
@@ -955,7 +956,7 @@ class TestBroker:
         pm.record_entry("AAPL", buy, 0.10, 95.0, 105.0)
         sell = FillResult("AAPL", "SELL", 10_000.0, 10, "2026-07-02T00:00:00+00:00")
         pm.record_exit("AAPL", sell)
-        pl = pm.trade_log[-1]["pl"]
+        pl = pm.trade_log[-1]["gross_pl"]
         assert pl == pytest.approx(99_000.0)
 
     def test_bva_record_exit_one_share(self, tmp_path):
@@ -966,7 +967,7 @@ class TestBroker:
         pm.record_entry("AAPL", buy, 0.10, 95.0, 105.0)
         sell = FillResult("AAPL", "SELL", 110.0, 1, "2026-07-02T00:00:00+00:00")
         pm.record_exit("AAPL", sell)
-        pl = pm.trade_log[-1]["pl"]
+        pl = pm.trade_log[-1]["gross_pl"]
         assert pl == pytest.approx(10.0)
 
     def test_bva_record_exit_many_shares(self, tmp_path):
@@ -977,7 +978,7 @@ class TestBroker:
         pm.record_entry("AAPL", buy, 0.10, 95.0, 105.0)
         sell = FillResult("AAPL", "SELL", 101.0, 100_000, "2026-07-02T00:00:00+00:00")
         pm.record_exit("AAPL", sell)
-        pl = pm.trade_log[-1]["pl"]
+        pl = pm.trade_log[-1]["gross_pl"]
         assert pl == pytest.approx(100_000.0)
 
     # -- BVA: Decimal Precision & Scale -----
@@ -1020,7 +1021,7 @@ class TestBroker:
         pm.record_entry("AAPL", buy, 0.10, 185.0, 224.0)
         sell = FillResult("AAPL", "SELL", 200.123, 3, "2026-07-02T00:00:00+00:00")
         pm.record_exit("AAPL", sell)
-        pl = pm.trade_log[-1]["pl"]
+        pl = pm.trade_log[-1]["gross_pl"]
         expected_pl = (200.123 - 195.555) * 3
         assert pl == pytest.approx(expected_pl, abs=0.01)
 
@@ -1164,7 +1165,7 @@ class TestBroker:
         pm.record_entry("AAPL", buy, 0.10, 95.0, 110.0)
         sell = FillResult("AAPL", "SELL", 100.456, 7, "2026-07-02T00:00:00+00:00")
         pm.record_exit("AAPL", sell)
-        pl = pm.trade_log[-1]["pl"]
+        pl = pm.trade_log[-1]["gross_pl"]
         expected = round((100.456 - 100.123) * 7, 2)
         assert pl == expected
 
@@ -1204,6 +1205,49 @@ class TestBroker:
         pm.record_entry("AAPL", fill, 0.10, 100.0, 150.0, market="sp500", currency="USD")
         pos = pm.positions["AAPL"]
         assert pos["cost_value"] == pytest.approx(123.45 * 17)
+
+    # -- Commission wiring: record_entry/record_exit net real IBKR fees against pl -----
+
+    def test_record_entry_stores_entry_cost_us_ticker(self, tmp_path):
+        """US ticker routes to the USD tier: trade value 1000 -> below the
+        USD 1.70 min, so entry_cost is the converted USD minimum."""
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.types import FillResult
+        from Strategy_Auto_Trader.plugins.costs import USD_GBP
+        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        fill = FillResult("AAPL", "BUY", 100.0, 10, "2026-07-01T00:00:00+00:00")
+        pm.record_entry("AAPL", fill, 0.10, 95.0, 105.0)
+        assert pm.positions["AAPL"]["entry_cost"] == pytest.approx(1.70 * USD_GBP)
+        assert pm.trade_log[-1]["cost"] == pytest.approx(1.70 * USD_GBP, abs=0.01)
+
+    def test_record_entry_stores_entry_cost_uk_ticker_includes_stamp_duty(self, tmp_path):
+        """UK ticker BUY adds 0.5% stamp duty on top of the tiered commission."""
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.types import FillResult
+        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        fill = FillResult("LLOY.L", "BUY", 450.0, 10, "2026-07-01T00:00:00+00:00")
+        pm.record_entry("LLOY.L", fill, 0.12, 425.0, 515.0, market="ftse", currency="GBP")
+        trade_value = 450.0 * 10
+        expected_cost = max(1.00, 0.0005 * trade_value) + 0.005 * trade_value
+        assert pm.positions["LLOY.L"]["entry_cost"] == pytest.approx(expected_cost)
+
+    def test_record_exit_nets_commission_off_both_legs(self, tmp_path):
+        """pl is net of entry + exit commission; gross_pl keeps the raw
+        (fill - entry) * qty figure for audit."""
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.types import FillResult
+        from Strategy_Auto_Trader.plugins.costs import IbkrTieredCost
+        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        buy = FillResult("AAPL", "BUY", 300.0, 10, "2026-07-01T00:00:00+00:00")
+        pm.record_entry("AAPL", buy, 0.10, 285.0, 345.0)
+        sell = FillResult("AAPL", "SELL", 330.0, 10, "2026-07-10T00:00:00+00:00")
+        pm.record_exit("AAPL", sell)
+        entry_cost = IbkrTieredCost("AAPL").cost(3000.0, is_buy=True)
+        exit_cost = IbkrTieredCost("AAPL").cost(3300.0, is_buy=False)
+        last = pm.trade_log[-1]
+        assert last["gross_pl"] == pytest.approx(300.0)
+        assert last["cost"] == pytest.approx(entry_cost + exit_cost)
+        assert last["pl"] == pytest.approx(300.0 - entry_cost - exit_cost)
 
     def test_portfolio_record_entry_empty_market_currency_allowed(self, tmp_path):
         """record_entry works with empty market/currency (for backward compat)."""
@@ -1288,7 +1332,7 @@ class TestBroker:
         last = portfolio.trade_log[-1]
         assert last["action"] == "SELL"
         assert last["pl"] < 0.0
-        assert last["pl"] == pytest.approx((95.0 * 0.95 - 95.0) * last["quantity"])
+        assert last["gross_pl"] == pytest.approx((95.0 * 0.95 - 95.0) * last["quantity"])
 
     def test_execute_signals_slippage_below_stop_triggers_immediate_stopout(self, tmp_path, monkeypatch):
         """Fill price well below the original stop_level (severe slippage):
@@ -1312,7 +1356,7 @@ class TestBroker:
         last = portfolio.trade_log[-1]
         assert last["action"] == "SELL"
         assert last["pl"] < 0.0
-        assert last["pl"] == pytest.approx((90.0 * 0.95 - 90.0) * last["quantity"])
+        assert last["gross_pl"] == pytest.approx((90.0 * 0.95 - 90.0) * last["quantity"])
 
     def test_execute_signals_mild_slippage_above_stop_stays_open(self, tmp_path, monkeypatch):
         """Fill price is below signal close (negative slippage) but still

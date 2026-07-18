@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .types import FillResult
 from ..core.atomic_io import atomic_write_json
+from ..plugins.costs import IbkrTieredCost
 
 
 def slippage_bps(signal_price: float, fill_price: float, action: str) -> float | None:
@@ -122,11 +123,13 @@ class PortfolioManager:
         """Record a new open position after a BUY fill."""
         today = datetime.now(timezone.utc).date().isoformat()
         cost_value = fill.fill_price * fill.quantity
+        entry_cost = IbkrTieredCost(ticker).cost(cost_value, is_buy=True)
         self._state["positions"][ticker] = {
             "entry_date": today,
             "fill_price": fill.fill_price,
             "quantity": fill.quantity,
             "cost_value": cost_value,
+            "entry_cost": entry_cost,
             "market": market,
             "currency": currency,
             "kelly_fraction": kelly_fraction,
@@ -143,6 +146,7 @@ class PortfolioManager:
             "quantity": fill.quantity,
             "signal_price": signal_price,
             "slippage_bps": slippage_bps(signal_price, fill.fill_price, "BUY"),
+            "cost": round(entry_cost, 2),
         })
 
     def record_exit(self, ticker: str, fill: FillResult, signal_price: float = 0.0,
@@ -153,7 +157,11 @@ class PortfolioManager:
         """
         pos = self._state["positions"].pop(ticker, None)
         entry_price = pos["fill_price"] if pos else 0.0
-        pl = round((fill.fill_price - entry_price) * fill.quantity, 2)
+        entry_cost = pos.get("entry_cost", 0.0) if pos else 0.0
+        exit_value = fill.fill_price * fill.quantity
+        exit_cost = IbkrTieredCost(ticker).cost(exit_value, is_buy=False)
+        gross_pl = (fill.fill_price - entry_price) * fill.quantity
+        pl = round(gross_pl - entry_cost - exit_cost, 2)
         log_entry = {
             "ticker": ticker,
             "action": "SELL",
@@ -161,6 +169,8 @@ class PortfolioManager:
             "fill_price": fill.fill_price,
             "quantity": fill.quantity,
             "pl": pl,
+            "gross_pl": round(gross_pl, 2),
+            "cost": round(entry_cost + exit_cost, 2),
             "signal_price": signal_price,
             "slippage_bps": slippage_bps(signal_price, fill.fill_price, "SELL"),
             "exit_type": exit_type,
