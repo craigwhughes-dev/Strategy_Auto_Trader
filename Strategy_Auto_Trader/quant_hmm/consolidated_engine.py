@@ -270,6 +270,7 @@ def consolidated_backtest(
     hmm_refit_bars: int = 500,
     initial_cash: float = 20_000.0,
     trade_cost: float = 10.0,
+    cost_model=None,
     use_kelly: bool = True,
     kelly_lookback: int = 20,
     sentiment_score: float = 0.0,
@@ -648,10 +649,12 @@ def consolidated_backtest(
     detail["strategy_equity"] = strat_equity
     detail["bh_equity"]       = bh_equity
 
-    portfolio_values = _simulate_portfolio_value(detail, initial_cash, trade_cost)
+    portfolio_values, total_costs = _simulate_portfolio_value(
+        detail, initial_cash, trade_cost, cost_model=cost_model)
     detail["portfolio_value"] = portfolio_values
 
     return _build_quant_backtest_stats(
         detail, strat_ret, bh_ret, strat_equity, bh_equity, initial_cash,
         portfolio_values, sizer_plugin.trade_results, sizer_plugin.current_kelly,
+        transaction_costs_total=total_costs,
     )

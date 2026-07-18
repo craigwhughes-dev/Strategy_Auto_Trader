@@ -309,17 +309,36 @@ def _max_dd(eq: np.ndarray) -> float:
     return float(((eq - peak) / peak).min()) if len(eq) else float("nan")
 
 
-def _simulate_portfolio_value(detail: pd.DataFrame, initial_cash: float, trade_cost: float) -> list:
-    """Cash P&L simulation: deduct trade_cost on each BUY/SELL, then compound
-    through that bar's strategy_return."""
+def _simulate_portfolio_value(
+    detail: pd.DataFrame,
+    initial_cash: float,
+    trade_cost: float,
+    cost_model=None,
+) -> tuple[list, float]:
+    """Cash P&L simulation: deduct a per-side cost on each BUY/SELL, then
+    compound through that bar's strategy_return.
+
+    cost_model (plugins.costs, `cost(trade_value, is_buy) -> float`) prices
+    each side off the Kelly-sized stake at that bar; None keeps the exact
+    historical flat trade_cost/side arithmetic (the parity baseline).
+
+    Returns (portfolio_values, total_costs).
+    """
     cash = initial_cash
     portfolio_values = []
+    total_costs = 0.0
     for _, row in detail.iterrows():
         if row["trade_event"] in ("BUY", "SELL"):
-            cash -= trade_cost
+            if cost_model is None:
+                fee = trade_cost
+            else:
+                stake = float(row.get("kelly_fraction", 0.0) or 0.0) * cash
+                fee = cost_model.cost(stake, row["trade_event"] == "BUY")
+            cash -= fee
+            total_costs += fee
         cash *= (1 + float(row["strategy_return"]))
         portfolio_values.append(round(cash, 2))
-    return portfolio_values
+    return portfolio_values, total_costs
 
 
 def _build_quant_backtest_stats(
@@ -332,6 +351,7 @@ def _build_quant_backtest_stats(
     portfolio_values: list,
     trade_results: list,
     current_kelly: float,
+    transaction_costs_total: float = 0.0,
 ) -> dict:
     n_buys = (detail["trade_event"] == "BUY").sum()
     n_sells = (detail["trade_event"] == "SELL").sum()
@@ -358,6 +378,7 @@ def _build_quant_backtest_stats(
         "n_sells": int(n_sells),
         "trade_results": trade_results,
         "final_kelly": current_kelly,
+        "transaction_costs_total": round(transaction_costs_total, 2),
         "detail": detail,
         "n_bars": len(detail),
     }
@@ -538,12 +559,13 @@ def quant_backtest(
     detail["bh_equity"] = bh_equity
 
     # Portfolio simulation
-    portfolio_values = _simulate_portfolio_value(detail, initial_cash, trade_cost)
+    portfolio_values, total_costs = _simulate_portfolio_value(detail, initial_cash, trade_cost)
     detail["portfolio_value"] = portfolio_values
 
     return _build_quant_backtest_stats(
         detail, strat_ret, bh_ret, strat_equity, bh_equity, initial_cash,
         portfolio_values, trade_results, current_kelly,
+        transaction_costs_total=total_costs,
     )
 
 
@@ -558,5 +580,6 @@ def _empty_result(initial_cash):
         "max_drawdown_strategy": float("nan"), "max_drawdown_bh": float("nan"),
         "initial_cash": initial_cash, "final_portfolio": initial_cash, "total_pl": 0,
         "n_buys": 0, "n_sells": 0, "trade_results": [], "final_kelly": 0,
+        "transaction_costs_total": 0.0,
         "detail": pd.DataFrame(), "n_bars": 0,
     }

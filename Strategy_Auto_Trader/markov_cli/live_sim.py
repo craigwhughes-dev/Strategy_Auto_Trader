@@ -32,6 +32,7 @@ import pandas as pd
 
 from ..output.journal import LIVE_JOURNAL, TradeRecord, append_trades, extract_trades_from_detail
 from ..plugins.context_adjuster import SentimentAdjuster
+from ..plugins.costs import COST_MODEL_CHOICES, make_cost_model
 from ..quant_hmm.consolidated_engine import consolidated_backtest
 from ..quant_hmm.data_cache import fetch_hourly_cached
 from ..quant_hmm.vol_screen import screen_tickers
@@ -123,6 +124,7 @@ def simulate_strategy(
     max_trades_per_day: int,
     vol_filter_tag: str = "suitable",
     vol_filter_ok: bool = True,
+    cost_model_name: str = "flat",
 ) -> list[TradeRecord]:
     """Run one strategy across all tickers with a shared capital pool. Returns executed TradeRecords."""
     print(f"\n{'='*64}\n Strategy: {strategy_name}  (vol_filter={vol_filter_tag})\n{'='*64}")
@@ -177,19 +179,26 @@ def simulate_strategy(
                 alloc = cand.kelly_fraction * cash
             else:
                 alloc = min(kelly_fallback, cash)
-            alloc = min(alloc, cash - trade_cost)
+
+            if cost_model_name == "flat":
+                entry_fee = exit_fee = trade_cost
+            else:
+                model = make_cost_model(cost_model_name, cand.record.ticker, trade_cost)
+                entry_fee = model.cost(alloc, True)
+                exit_fee = model.cost(alloc * (1 + cand.return_pct), False)
+            alloc = min(alloc, cash - entry_fee)
             if alloc <= 0:
                 continue
 
-            cash -= (alloc + trade_cost)
-            exit_proceeds = alloc * (1 + cand.return_pct) - trade_cost
+            cash -= (alloc + entry_fee)
+            exit_proceeds = alloc * (1 + cand.return_pct) - exit_fee
             open_positions.append({
                 "date_closed": cand.date_closed.tz_localize(None).normalize(),
                 "exit_proceeds": exit_proceeds,
             })
 
             rec = cand.record
-            rec.pnl_usd = exit_proceeds - alloc - trade_cost
+            rec.pnl_usd = exit_proceeds - alloc - entry_fee
             executed.append(rec)
             taken += 1
 
@@ -236,6 +245,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--start-date", default="2026-01-12")
     parser.add_argument("--initial-cash", type=float, default=10_000.0)
     parser.add_argument("--trade-cost", type=float, default=1.0)
+    parser.add_argument("--cost-model", default="flat", choices=COST_MODEL_CHOICES,
+                        help="Transaction cost model for the capital sim: 'flat' = "
+                             "--trade-cost/side; 'ibkr_tiered' = IBKR UK tiered commission "
+                             "+ SDRT on .L buys; 'ibkr_tiered_spread' adds a half-spread "
+                             "estimate per side. Default: flat (unchanged behaviour).")
     parser.add_argument("--kelly-fallback", type=float, default=100.0)
     parser.add_argument("--max-trades-per-day", type=int, default=1)
     parser.add_argument("--min-trend-quality", type=float, default=0.0,
@@ -288,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
             # tickers_for_strategy is already screened (or the strategy is exempt) —
             # pass True explicitly so the strategy's own veto doesn't re-check.
             vol_filter_ok=True,
+            cost_model_name=args.cost_model,
         )
         all_executed.extend(executed)
 

@@ -103,6 +103,7 @@ from ..core.momentum import (
     compute_sma,
 )
 from ..output.journal import TradeRecord, extract_trades_from_detail
+from ..plugins.costs import COST_MODEL_CHOICES, make_cost_model
 from ..plugins.persistent_hmm import PersistentHMMRegimeModel
 from ..quant_hmm import sentiment as sentiment_mod
 from ..quant_hmm.consolidated_engine import consolidated_backtest
@@ -183,7 +184,13 @@ def _trade_aggregates(trades: list, bt: dict, trade_cost: float, days_covered: i
     n = len(trades)
     agg = {k: (0.0 if k != "n_trades_total" else 0) for k in _TRADE_AGG_KEYS}
     agg["n_trades_total"] = n
-    agg["transaction_costs_total"] = trade_cost * (bt.get("n_buys", 0) + bt.get("n_sells", 0))
+    # Engine reports actual accumulated costs (cost-model aware); fall back to
+    # the flat estimate only for pre-cost-model bt dicts (e.g. old fakes).
+    actual = bt.get("transaction_costs_total")
+    agg["transaction_costs_total"] = (
+        actual if actual is not None
+        else trade_cost * (bt.get("n_buys", 0) + bt.get("n_sells", 0))
+    )
     if n == 0:
         return agg
 
@@ -540,7 +547,8 @@ def _append_summary_row(row: dict) -> None:
 
 
 def scan_ticker(
-    ticker: str, strategy_name: str, *, trade_cost: float = 10.0, sentiment: bool = True,
+    ticker: str, strategy_name: str, *, trade_cost: float = 10.0,
+    cost_model_name: str = "flat", sentiment: bool = True,
     vix_data: dict | None = None, data_cutoff: date | None = None,
     fetch_fn=None, vol_profile_fn=None, backtest_fn=None,
 ) -> dict:
@@ -565,6 +573,7 @@ def scan_ticker(
         "scanned_at": datetime.now().isoformat(timespec="seconds"),
         "status": "ok",
         "note": "",
+        "cost_model": cost_model_name,
     }
 
     prof = vol_profile(ticker)
@@ -602,6 +611,7 @@ def scan_ticker(
         entry_strategy=entry_s,
         exit_strategy=exit_s,
         trade_cost=trade_cost,
+        cost_model=make_cost_model(cost_model_name, ticker, trade_cost),
         skip_unused_indicators=False,   # research scan: compute everything
     )
     regime_model.save()
@@ -662,7 +672,7 @@ def scan_ticker(
 
 def _scan_ticker_worker(
     ticker: str, strategy_name: str, trade_cost: float, sentiment: bool,
-    data_cutoff: date | None = None,
+    data_cutoff: date | None = None, cost_model_name: str = "flat",
 ) -> dict:
     """Top-level module worker function for ProcessPoolExecutor.
 
@@ -674,7 +684,8 @@ def _scan_ticker_worker(
         vix_data = _vix_once() if sentiment else None
         row = scan_ticker(
             ticker, strategy_name,
-            trade_cost=trade_cost, sentiment=sentiment, vix_data=vix_data,
+            trade_cost=trade_cost, cost_model_name=cost_model_name,
+            sentiment=sentiment, vix_data=vix_data,
             data_cutoff=data_cutoff,
         )
         return {"row": row, "traceback": None}
@@ -751,7 +762,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=0,
                         help="Stop after N tickers (0 = all)")
     parser.add_argument("--trade-cost", type=float, default=10.0,
-                        help="Per-trade cost used for transaction_costs_total (default: 10.0)")
+                        help="Per-trade cost for the flat cost model (default: 10.0)")
+    parser.add_argument("--cost-model", default="flat", choices=COST_MODEL_CHOICES,
+                        help="Transaction cost model: 'flat' = historical --trade-cost/side; "
+                             "'ibkr_tiered' = IBKR UK tiered commission + 0.5%% SDRT on .L buys; "
+                             "'ibkr_tiered_spread' adds a per-side half-spread estimate "
+                             "(15bps FTSE / 5bps US). Default: flat (unchanged behaviour).")
     parser.add_argument("--workers", type=int, default=2,
                         help="Worker processes for parallel ticker scans (1 = sequential, default: 2). "
                              "Rows land in completion order, not ticker order; use sort_summary() if needed.")
@@ -787,7 +803,7 @@ def main(argv: list[str] | None = None) -> int:
         tickers = tickers[: args.limit]
 
     print(f"Full scan: {len(tickers)} tickers, strategy={args.strategy}, "
-          f"no vol screening, max hourly history (730d)"
+          f"no vol screening, max hourly history (730d), cost model {args.cost_model}"
           + (f", data cutoff {data_cutoff.isoformat()}" if data_cutoff else ""))
     print(f"  outputs: {SCAN_DIR}  journals: {JOURNAL_DIR}")
     print(f"  workers: {args.workers} (rows land in completion order)\n", flush=True)
@@ -816,7 +832,8 @@ def main(argv: list[str] | None = None) -> int:
                 vix_data = _vix_once() if not args.no_sentiment else None
                 row = scan_ticker(
                     ticker, args.strategy,
-                    trade_cost=args.trade_cost, sentiment=not args.no_sentiment,
+                    trade_cost=args.trade_cost, cost_model_name=args.cost_model,
+                    sentiment=not args.no_sentiment,
                     vix_data=vix_data, data_cutoff=data_cutoff,
                 )
             except Exception as exc:
@@ -844,6 +861,7 @@ def main(argv: list[str] | None = None) -> int:
                     _scan_ticker_worker,
                     ticker, args.strategy,
                     args.trade_cost, not args.no_sentiment, data_cutoff,
+                    args.cost_model,
                 ): ticker
                 for ticker in tasks_to_run
             }

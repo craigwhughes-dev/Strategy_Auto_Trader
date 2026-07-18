@@ -22,6 +22,7 @@ from ..core.quality_gate import _apply_quality_gate  # noqa: F401 — available 
 from ..core.momentum import composite_signal, exit_indicators, momentum_signals
 from ..output.charting import plot_backtest
 from ..output.report import write_daily_summary
+from ..plugins.costs import COST_MODEL_CHOICES, make_cost_model
 from ..plugins.kelly_sizer import FixedSizer, KellySizer
 from ..plugins.quality_gate import NullQualityGate, QualityGatePlugin
 from ..plugins.context_adjuster import NullAdjuster, SentimentAdjuster
@@ -90,6 +91,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     # Capital / costs
     parser.add_argument("--initial-cash", type=float, default=20_000.0)
     parser.add_argument("--transaction-cost", type=float, default=10.0)
+    parser.add_argument("--cost-model", default="flat", choices=COST_MODEL_CHOICES,
+                        help="Transaction cost model: 'flat' = --transaction-cost/side; "
+                             "'ibkr_tiered' = IBKR UK tiered commission + SDRT on .L buys; "
+                             "'ibkr_tiered_spread' adds a half-spread estimate per side. "
+                             "Default: flat (unchanged behaviour).")
 
     # Kelly
     parser.add_argument("--no-kelly", dest="use_kelly", action="store_false", default=True,
@@ -260,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         volume_min_ratio=args.volume_min_ratio,
         initial_cash=args.initial_cash,
         trade_cost=args.transaction_cost,
+        cost_model=make_cost_model(args.cost_model, args.ticker, args.transaction_cost),
         use_kelly=args.use_kelly,
         regime_smooth=args.regime_smooth,
         min_hold_bars=args.min_hold_bars,
