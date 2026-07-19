@@ -61,6 +61,10 @@ class NullBroker:
     def get_open_positions(self) -> dict[str, int]:
         return dict(self._positions)
 
+    def get_open_orders(self) -> list[dict]:
+        """Dry-run fills synchronously — nothing is ever left working."""
+        return []
+
     def place_stop_order(self, req: StopOrderRequest) -> StopOrderResult | None:
         """Stub: place and track a stop order with an incrementing permId."""
         perm_id = self._next_perm_id

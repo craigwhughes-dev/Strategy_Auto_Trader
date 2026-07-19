@@ -209,6 +209,47 @@ class IBKRAdapter:
                 ) from e
             raise
 
+    def get_open_orders(self) -> list[dict]:
+        """Return still-working orders of any type/action (not yet filled/cancelled).
+
+        Position-only reconciliation can miss an order that was accepted by
+        IBKR right before the client's socket dropped: the position comparison
+        looks clean (order hasn't filled yet) but the order is still live and
+        could fill any time after startup, creating an untracked position.
+        Startup reconciliation checks this for the in-flight marker's ticker
+        before clearing the marker.
+        """
+        if not self.is_connected():
+            raise ConnectionError(
+                f"Socket disconnect: not connected to {self._host}:{self._port}"
+            )
+
+        try:
+            self._ib.reqAllOpenOrders()
+            self._ib.waitOnUpdate(timeout=2.0)
+
+            orders = []
+            for trade in self._ib.trades():
+                if (trade.contract and hasattr(trade.contract, "symbol") and
+                    trade.orderStatus.status in
+                        ("PendingSubmit", "PreSubmitted", "Submitted", "Acknowledged")):
+                    try:
+                        orders.append({
+                            "ticker": yfinance_ticker(
+                                trade.contract.symbol, trade.contract.currency
+                            ),
+                            "action": trade.order.action,
+                            "status": trade.orderStatus.status,
+                        })
+                    except Exception:
+                        pass
+            return orders
+        except ConnectionError:
+            raise
+        except Exception as e:
+            logger.warning(f"Error retrieving open orders: {e}")
+            raise
+
     def get_open_stop_orders(self) -> dict:
         """Return {permId: OpenOrderInfo} for open SELL STP orders using reqAllOpenOrders."""
         if not self.is_connected():

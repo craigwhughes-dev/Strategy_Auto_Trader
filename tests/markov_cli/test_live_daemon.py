@@ -826,7 +826,7 @@ class TestReconciliation:
         assert alerted[0]["unresolved"] == ["SPY"]
 
     def test_run_startup_reconciliation_clears_marker_on_clean(self, tmp_path):
-        """reconciliation clean + marker present → marker cleared."""
+        """reconciliation clean + marker present + no stale broker order → marker cleared."""
         from Strategy_Auto_Trader.broker.in_flight_marker import write_marker, read_marker
 
         daemon_state = {}
@@ -834,10 +834,67 @@ class TestReconciliation:
         write_marker(marker_path, "SPY", "BUY", 10)
         assert read_marker(marker_path) is not None
 
+        broker = self._broker({"SPY": 10})
+        broker.get_open_orders.return_value = []
         outcome = live_daemon.run_startup_reconciliation(
             daemon_state,
             self._portfolio({"SPY": {"quantity": 10}}),
-            self._broker({"SPY": 10}),
+            broker,
+            mock.Mock(),
+            run_recon=lambda *a, **k: "clean",
+            save_state=lambda s: None,
+            marker_path=marker_path,
+        )
+        assert outcome is True
+        assert read_marker(marker_path) is None
+
+    def test_run_startup_reconciliation_keeps_marker_if_order_still_live(self, tmp_path):
+        """reconciliation clean but the marker's order is still working at the
+        broker (the GSK.L-style gap: order accepted right before a disconnect,
+        not filled yet so positions compare clean) → halt stays, marker kept."""
+        from Strategy_Auto_Trader.broker.in_flight_marker import write_marker, read_marker
+
+        alerted = []
+        daemon_state = {}
+        marker_path = tmp_path / "marker.json"
+        write_marker(marker_path, "GSK.L", "BUY", 10)
+
+        broker = self._broker({})
+        broker.get_open_orders.return_value = [
+            {"ticker": "GSK.L", "action": "BUY", "status": "PreSubmitted"}
+        ]
+        outcome = live_daemon.run_startup_reconciliation(
+            daemon_state,
+            self._portfolio({}),
+            broker,
+            mock.Mock(),
+            run_recon=lambda *a, **k: "clean",
+            save_state=lambda s: None,
+            send_interrupt_alert=lambda *a: alerted.append(a),
+            marker_path=marker_path,
+        )
+        assert outcome is True
+        assert daemon_state["halt_new_entries"] is True
+        assert read_marker(marker_path) is not None
+        assert len(alerted) == 1
+
+    def test_run_startup_reconciliation_clears_marker_ignores_other_ticker_orders(self, tmp_path):
+        """A live order for an unrelated ticker must not block clearing the
+        marker for the ticker that was actually interrupted."""
+        from Strategy_Auto_Trader.broker.in_flight_marker import write_marker, read_marker
+
+        daemon_state = {}
+        marker_path = tmp_path / "marker.json"
+        write_marker(marker_path, "SPY", "BUY", 10)
+
+        broker = self._broker({"SPY": 10})
+        broker.get_open_orders.return_value = [
+            {"ticker": "AAPL", "action": "SELL", "status": "Submitted"}
+        ]
+        outcome = live_daemon.run_startup_reconciliation(
+            daemon_state,
+            self._portfolio({"SPY": {"quantity": 10}}),
+            broker,
             mock.Mock(),
             run_recon=lambda *a, **k: "clean",
             save_state=lambda s: None,

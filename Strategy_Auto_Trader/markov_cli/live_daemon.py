@@ -1045,7 +1045,48 @@ def run_startup_reconciliation(
         return False
 
     logger.info(f"Startup reconciliation resolved: {outcome} — halt {'remains set' if outcome == 'mismatch' else 'cleared'}")
+
     if marker is not None:
+        # A market order can be accepted by IBKR moments before the client's
+        # socket drops — the fill confirmation never arrives, but the order
+        # itself is still live server-side and can complete any time after
+        # this reconciliation pass. Position comparison alone can't catch
+        # that (it hasn't filled yet), so check the broker's still-working
+        # orders for this exact ticker before trusting the marker away.
+        stale_order = None
+        try:
+            for order in broker.get_open_orders():
+                if order["ticker"] == marker["ticker"]:
+                    stale_order = order
+                    break
+        except Exception as e:
+            logger.error(f"Startup reconciliation: could not check open orders for in-flight marker: {e}")
+            daemon_state["halt_new_entries"] = True
+            return True
+
+        if stale_order is not None:
+            logger.critical(
+                f"In-flight marker for {marker['ticker']} still has a live order at the "
+                f"broker (status={stale_order['status']}) — halt stays set, marker kept "
+                f"for manual resolution."
+            )
+            daemon_state["halt_new_entries"] = True
+            try:
+                if send_interrupt_alert is None:
+                    from ..output.emailer import send_execution_interrupted_alert
+                    send_interrupt_alert = send_execution_interrupted_alert
+                send_interrupt_alert(
+                    "startup",
+                    RuntimeError(
+                        f"in-flight order for {marker['ticker']} is still live at the broker "
+                        f"(status={stale_order['status']}) after a client disconnect"
+                    ),
+                    [], [], [marker["ticker"]]
+                )
+            except Exception as e:
+                logger.error(f"Startup reconciliation: stale-order alert email failed: {e}")
+            return True
+
         logger.info("In-flight marker cleared after reconciliation completed")
         marker_path.unlink(missing_ok=True)
 
