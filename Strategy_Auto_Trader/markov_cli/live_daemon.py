@@ -506,32 +506,50 @@ def get_open_positions(market_name: str, all_tickers: list[str], logger: logging
 def next_round_robin_slice(
     market_name: str,
     in_scope: list[str],
-    max_items: int,
     daemon_state: dict,
     logger: logging.Logger,
-) -> list[str]:
-    """Get next slice of round-robin tickers.
+) -> tuple[list[str], int]:
+    """Get remaining round-robin candidates starting from the persisted cursor.
 
-    Updates cursor in daemon_state. Wraps daily.
+    Does NOT advance the cursor — the caller may not get through the whole
+    slice within its time budget, so the cursor is only advanced afterwards
+    via advance_round_robin_cursor(), by however many tickers were actually
+    attempted. Returns (candidates, cursor_start).
     """
     if not in_scope:
-        return []
+        return [], 0
 
     cursors = daemon_state.setdefault("cursors", {})
     today = datetime.now().date().isoformat()
     key = f"{market_name}:{today}"
 
     cursor = cursors.get(key, 0)
-    slice_end = min(cursor + max_items, len(in_scope))
-    slice_tickers = in_scope[cursor:slice_end]
+    if cursor >= len(in_scope):
+        cursor = 0
 
-    if slice_end >= len(in_scope):
-        cursors[key] = 0
+    return in_scope[cursor:], cursor
+
+
+def advance_round_robin_cursor(
+    market_name: str,
+    in_scope_len: int,
+    cursor_start: int,
+    n_attempted: int,
+    daemon_state: dict,
+    logger: logging.Logger,
+) -> None:
+    """Persist how far the round-robin actually got this cycle, so the next
+    cycle resumes there instead of restarting from the top of the list.
+    """
+    cursors = daemon_state.setdefault("cursors", {})
+    today = datetime.now().date().isoformat()
+    key = f"{market_name}:{today}"
+
+    new_cursor = cursor_start + n_attempted
+    if new_cursor >= in_scope_len:
+        new_cursor = 0
         logger.debug(f"  {market_name}: round-robin wrapped")
-    else:
-        cursors[key] = slice_end
-
-    return slice_tickers
+    cursors[key] = new_cursor
 
 
 def execute_signals_with_retry(
@@ -738,15 +756,16 @@ def process_cycle(
     buffer_secs = config.get("daytime", {}).get("cycle_buffer_minutes", 5) * 60
     if remaining_budget > buffer_secs:
         remaining_budget -= buffer_secs
-        candidates = next_round_robin_slice(
+        round_robin_universe = [t for t in in_scope if t not in must_run]
+        candidates, cursor_start = next_round_robin_slice(
             market_name,
-            [t for t in in_scope if t not in must_run],
-            len(in_scope),
+            round_robin_universe,
             daemon_state,
             logger,
         )
 
         logger.info(f"[{market_name}] Round-robin ({len(candidates)} candidates, {remaining_budget:.0f}s budget):")
+        n_attempted = 0
         for ticker in candidates:
             now_remaining = max_seconds - (time.time() - cycle_start)
             if now_remaining <= buffer_secs:
@@ -763,6 +782,11 @@ def process_cycle(
             if not str(result.get("status", "")).startswith("OK"):
                 logger.warning(f"[{market_name}] {ticker} processing failed: {result.get('status')}")
             processed.append(result)
+            n_attempted += 1
+
+        advance_round_robin_cursor(
+            market_name, len(round_robin_universe), cursor_start, n_attempted, daemon_state, logger
+        )
 
     # Execute signals once for all processed tickers this cycle
     if processed:

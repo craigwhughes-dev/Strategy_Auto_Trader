@@ -109,8 +109,9 @@ def test_is_trading_hours_weekend():
     assert result is False
 
 
-def test_next_round_robin_slice_advances_cursor():
-    """Round-robin cursor advances and wraps correctly."""
+def test_next_round_robin_slice_resumes_from_actual_progress():
+    """Round-robin resumes from however far the previous cycle actually got
+    (not a fixed batch size), and wraps once the full list has been covered."""
     in_scope = ["A", "B", "C", "D", "E"]
     daemon_state = {"cursors": {}}
     logger = mock.Mock()
@@ -118,18 +119,29 @@ def test_next_round_robin_slice_advances_cursor():
     with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
         mock_dt.now.return_value = mock.Mock(date=mock.Mock(return_value=mock.Mock(isoformat=mock.Mock(return_value="2026-07-03"))))
 
-        slice1 = live_daemon.next_round_robin_slice("test", in_scope, 2, daemon_state, logger)
-        assert slice1 == ["A", "B"]
+        # First cycle: full remaining list offered, but budget only allows 2.
+        candidates1, cursor1 = live_daemon.next_round_robin_slice("test", in_scope, daemon_state, logger)
+        assert candidates1 == ["A", "B", "C", "D", "E"]
+        assert cursor1 == 0
+        live_daemon.advance_round_robin_cursor("test", len(in_scope), cursor1, 2, daemon_state, logger)
 
-        slice2 = live_daemon.next_round_robin_slice("test", in_scope, 2, daemon_state, logger)
-        assert slice2 == ["C", "D"]
+        # Second cycle: resumes at C (not back at A), budget allows 2 more.
+        candidates2, cursor2 = live_daemon.next_round_robin_slice("test", in_scope, daemon_state, logger)
+        assert candidates2 == ["C", "D", "E"]
+        assert cursor2 == 2
+        live_daemon.advance_round_robin_cursor("test", len(in_scope), cursor2, 2, daemon_state, logger)
 
-        slice3 = live_daemon.next_round_robin_slice("test", in_scope, 2, daemon_state, logger)
-        assert slice3 == ["E"]
-
-        slice4 = live_daemon.next_round_robin_slice("test", in_scope, 2, daemon_state, logger)
-        assert slice4 == ["A", "B"]
+        # Third cycle: resumes at E, processes the last one, wraps.
+        candidates3, cursor3 = live_daemon.next_round_robin_slice("test", in_scope, daemon_state, logger)
+        assert candidates3 == ["E"]
+        assert cursor3 == 4
+        live_daemon.advance_round_robin_cursor("test", len(in_scope), cursor3, 1, daemon_state, logger)
         logger.debug.assert_called_with("  test: round-robin wrapped")
+
+        # Fourth cycle: back at the top.
+        candidates4, cursor4 = live_daemon.next_round_robin_slice("test", in_scope, daemon_state, logger)
+        assert candidates4 == ["A", "B", "C", "D", "E"]
+        assert cursor4 == 0
 
 
 def test_next_round_robin_empty_in_scope():
@@ -137,8 +149,9 @@ def test_next_round_robin_empty_in_scope():
     daemon_state = {"cursors": {}}
     logger = mock.Mock()
 
-    slice_result = live_daemon.next_round_robin_slice("test", [], 5, daemon_state, logger)
-    assert slice_result == []
+    candidates, cursor = live_daemon.next_round_robin_slice("test", [], daemon_state, logger)
+    assert candidates == []
+    assert cursor == 0
 
 
 def test_get_open_positions_filters_by_market_tickers():
@@ -299,7 +312,7 @@ def test_process_cycle_checks_manual_commands_between_round_robin_tickers(monkey
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL", "MSFT", "GOOGL"])
     monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
     monkeypatch.setattr(live_daemon, "next_round_robin_slice",
-                         lambda market_name, candidates, total, daemon_state, logger: candidates)
+                         lambda market_name, candidates, daemon_state, logger: (candidates, 0))
 
     config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
     live_daemon.process_cycle(
@@ -307,6 +320,55 @@ def test_process_cycle_checks_manual_commands_between_round_robin_tickers(monkey
         portfolio=None, broker=None, logger=mock.Mock(),
     )
     assert len(calls) == 3  # once before each round-robin candidate
+
+
+def test_process_cycle_persists_partial_round_robin_progress_across_budget_cutoff(monkeypatch):
+    """Regression test for the cursor-always-resets-to-0 bug: when the time
+    budget cuts the round-robin loop off partway through, the next cycle must
+    resume where it stopped, not restart from the top of the list (real
+    next_round_robin_slice / advance_round_robin_cursor, not mocked)."""
+    from Strategy_Auto_Trader.markov_cli import batch
+
+    processed_tickers = []
+
+    def fake_process_ticker(ticker_cfg, defaults, send_email):
+        processed_tickers.append(ticker_cfg["ticker"])
+        # FAIL status keeps process_cycle away from the execution stage
+        return {"ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0}
+
+    monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL", "MSFT", "GOOGL"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+    monkeypatch.setattr(live_daemon, "process_manual_commands_wrapper", lambda *a, **k: None)
+
+    config = {"daytime": {"max_seconds_per_cycle": 10, "cycle_buffer_minutes": 0}}
+    daemon_state = {"cursors": {}}
+    today_key = f"test_market:{datetime.now().date().isoformat()}"
+
+    # time.time() call order in process_cycle: cycle_start, pre-loop remaining
+    # check, then one now_remaining check per ticker attempted, then the final
+    # elapsed-time log line. Budget runs out right before GOOGL is reached.
+    fake_times = iter([0, 1, 2, 3, 11, 12])
+    monkeypatch.setattr(live_daemon.time, "time", lambda: next(fake_times))
+
+    live_daemon.process_cycle(
+        "test_market", {}, config, daemon_state,
+        portfolio=None, broker=None, logger=mock.Mock(),
+    )
+
+    assert processed_tickers == ["AAPL", "MSFT"]
+    assert daemon_state["cursors"][today_key] == 2  # stopped after 2, not reset to 0
+
+    # Next cycle: plenty of budget, cursor should resume at GOOGL only.
+    fake_times = iter([0, 1, 2, 3])
+    monkeypatch.setattr(live_daemon.time, "time", lambda: next(fake_times))
+    live_daemon.process_cycle(
+        "test_market", {}, config, daemon_state,
+        portfolio=None, broker=None, logger=mock.Mock(),
+    )
+
+    assert processed_tickers == ["AAPL", "MSFT", "GOOGL"]
+    assert daemon_state["cursors"][today_key] == 0  # wrapped after covering the full list
 
 
 # -- heartbeat fix: interleaved app_status.json snapshots -------------------
@@ -348,7 +410,7 @@ def test_process_cycle_writes_status_snapshot_between_round_robin_tickers(monkey
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL", "MSFT", "GOOGL"])
     monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
     monkeypatch.setattr(live_daemon, "next_round_robin_slice",
-                         lambda market_name, candidates, total, daemon_state, logger: candidates)
+                         lambda market_name, candidates, daemon_state, logger: (candidates, 0))
 
     config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
     live_daemon.process_cycle(
@@ -1912,7 +1974,7 @@ def test_process_cycle_merges_overrides_into_round_robin_ticker_cfg(monkeypatch)
     overrides_data = {"MSFT": {"strategy": "conservative"}}
     monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: overrides_data)
     monkeypatch.setattr(live_daemon, "next_round_robin_slice",
-                       lambda market_name, candidates, total, daemon_state, logger: ["MSFT"])
+                       lambda market_name, candidates, daemon_state, logger: (["MSFT"], 0))
 
     config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
     live_daemon.process_cycle(
@@ -1973,7 +2035,7 @@ def test_process_cycle_no_pin_in_round_robin_stage(monkeypatch):
     overrides_data = {"MSFT": {"strategy": "conservative"}}
     monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: overrides_data)
     monkeypatch.setattr(live_daemon, "next_round_robin_slice",
-                       lambda market_name, candidates, total, daemon_state, logger: ["MSFT"])
+                       lambda market_name, candidates, daemon_state, logger: (["MSFT"], 0))
     # get_open_strategy should never be called for round-robin candidates
     monkeypatch.setattr(trade_state, "get_open_strategy", lambda t: "should_not_be_used")
 
@@ -2024,7 +2086,7 @@ def test_process_cycle_logs_warning_on_round_robin_fail_status(monkeypatch):
     monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
     monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: {})
     monkeypatch.setattr(live_daemon, "next_round_robin_slice",
-                       lambda market_name, candidates, total, daemon_state, logger: ["MSFT"])
+                       lambda market_name, candidates, daemon_state, logger: (["MSFT"], 0))
 
     logger = mock.Mock()
     config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
