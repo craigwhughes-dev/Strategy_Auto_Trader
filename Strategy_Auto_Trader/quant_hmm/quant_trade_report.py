@@ -582,6 +582,8 @@ def main() -> int:
                 sent_data = None
 
         try:
+            # Infer currency from ticker (.L = GBP, else USD)
+            currency = "GBP" if ticker.endswith(".L") else "USD"
             bt = quant_backtest(
                 df,
                 entry_prob=args.entry_prob,
@@ -596,6 +598,7 @@ def main() -> int:
                 vix_signal=vix_sig,
                 regime_smooth=args.regime_smooth,
                 min_hold_bars=args.min_hold,
+                currency=currency,
             )
         except Exception as e:
             print(f"    {ticker}: backtest failed: {e}")

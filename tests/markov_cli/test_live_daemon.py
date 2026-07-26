@@ -390,6 +390,8 @@ class TestReconciliation:
     def _portfolio(self, positions):
         p = mock.Mock()
         p.positions = positions
+        p.accrue_daily_interest.return_value = 0.0
+        p.save = mock.Mock()
         return p
 
     def _broker(self, positions):
@@ -496,11 +498,15 @@ class TestReconciliation:
         config = {"overnight_timezone": "Europe/London",
                   "reconciliation_run_time": "21:30"}
         run_mock = mock.Mock(return_value=outcome)
+        # Set up portfolio mock with interest accrual
+        portfolio_mock = mock.Mock()
+        portfolio_mock.accrue_daily_interest.return_value = 0.0
+        portfolio_mock.save = mock.Mock()
         with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(
                 2026, 7, day, at_hour, at_minute, tzinfo=ZoneInfo("Europe/London"))
             live_daemon.check_nightly_reconciliation(
-                config, daemon_state, mock.Mock(), mock.Mock(), mock.Mock(),
+                config, daemon_state, portfolio_mock, mock.Mock(), mock.Mock(),
                 run_recon=run_mock, save_state=lambda s: None)
         return run_mock
 
@@ -584,18 +590,24 @@ class TestReconciliation:
         run_mock_error = mock.Mock(return_value="error")
         run_mock_clean = mock.Mock(return_value="clean")
 
+        def _portfolio_mock():
+            p = mock.Mock()
+            p.accrue_daily_interest.return_value = 0.0
+            p.save = mock.Mock()
+            return p
+
         with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(
                 2026, 7, 6, 21, 30, tzinfo=ZoneInfo("Europe/London"))
             live_daemon.check_nightly_reconciliation(
-                config, daemon_state, mock.Mock(), mock.Mock(), mock.Mock(),
+                config, daemon_state, _portfolio_mock(), mock.Mock(), mock.Mock(),
                 run_recon=run_mock_error, save_state=lambda s: None, send_alert=lambda d: None)
 
         with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(
                 2026, 7, 7, 21, 30, tzinfo=ZoneInfo("Europe/London"))
             live_daemon.check_nightly_reconciliation(
-                config, daemon_state, mock.Mock(), mock.Mock(), mock.Mock(),
+                config, daemon_state, _portfolio_mock(), mock.Mock(), mock.Mock(),
                 run_recon=run_mock_error, save_state=lambda s: None, send_alert=lambda d: None)
         assert daemon_state["reconciliation_consecutive_error_days"] == 2
 
@@ -603,7 +615,7 @@ class TestReconciliation:
             mock_dt.now.return_value = datetime(
                 2026, 7, 8, 21, 30, tzinfo=ZoneInfo("Europe/London"))
             live_daemon.check_nightly_reconciliation(
-                config, daemon_state, mock.Mock(), mock.Mock(), mock.Mock(),
+                config, daemon_state, _portfolio_mock(), mock.Mock(), mock.Mock(),
                 run_recon=run_mock_clean, save_state=lambda s: None, send_alert=lambda d: None)
         assert daemon_state["reconciliation_consecutive_error_days"] == 0
         assert daemon_state["reconciliation_alert_sent"] is False

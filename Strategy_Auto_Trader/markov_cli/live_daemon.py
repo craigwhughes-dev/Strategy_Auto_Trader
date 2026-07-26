@@ -413,6 +413,7 @@ def write_app_status_snapshot(
         "reconciliation_discrepancies": daemon_state.get("reconciliation_discrepancies", []),
         "last_reconcile_date": daemon_state.get("last_reconcile_date", ""),
         "trades_today": trades_today,
+        "interest_accrued": portfolio.interest_accrued,
         "markets": markets_status,
         "positions": positions_snapshot,
     }
@@ -1128,6 +1129,11 @@ def check_nightly_reconciliation(
         # A broker fetch error is not a daily result — leave the date unset so
         # it retries on the next poll within the run window.
         if outcome in ("clean", "mismatch"):
+            # Accrue daily interest on uninvested cash
+            interest = portfolio.accrue_daily_interest()
+            if interest > 0.01:
+                logger.info(f"Daily interest accrued: {interest:.2f}")
+            portfolio.save()
             daemon_state["last_reconcile_date"] = today
             daemon_state["reconciliation_consecutive_error_days"] = 0
             daemon_state["reconciliation_alert_sent"] = False
@@ -1243,7 +1249,10 @@ def main(argv: list[str] | None = None) -> int:
     state_path = STATE_DIR / "execution_state.json"
     capital_pot = float(exec_cfg.get("capital_pot", 20000))
     max_positions = int(exec_cfg.get("max_positions", 5))
-    portfolio = PortfolioManager(capital_pot, max_positions, state_path)
+    # Determine primary market currency (from first market in config)
+    primary_market = next(iter(config.get("markets", {}).keys()), "ftse")
+    currency = get_market_currency(primary_market, config)
+    portfolio = PortfolioManager(capital_pot, max_positions, state_path, currency=currency)
 
     # Broker connection is async and can hang; skip it here and let it fail gracefully
     # when trades are attempted. Daemon can still process tickers and generate signals.

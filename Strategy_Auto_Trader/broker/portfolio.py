@@ -10,6 +10,7 @@ from pathlib import Path
 from .types import FillResult
 from ..core.atomic_io import atomic_write_json
 from ..plugins.costs import IbkrTieredCost
+from ..plugins.interest import IbkrTieredInterest
 
 
 def slippage_bps(signal_price: float, fill_price: float, action: str) -> float | None:
@@ -36,10 +37,13 @@ class PortfolioManager:
         capital_pot: float,
         max_positions: int,
         state_path: Path,
+        currency: str = "GBP",
     ) -> None:
         self._capital_pot = capital_pot
         self._max_positions = max_positions
         self._path = state_path
+        self._currency = currency
+        self._interest = IbkrTieredInterest(currency)
         self._state: dict = self._load()
 
     # -- Persistence --------------------------------------------------------
@@ -51,6 +55,7 @@ class PortfolioManager:
                 if isinstance(data, dict):
                     data.setdefault("positions", {})
                     data.setdefault("trade_log", [])
+                    data.setdefault("interest_accrued", 0.0)
                     data.setdefault("trades_today", {
                         "date": datetime.now(timezone.utc).date().isoformat(),
                         "buys": 0,
@@ -65,6 +70,7 @@ class PortfolioManager:
         return {
             "positions": {},
             "trade_log": [],
+            "interest_accrued": 0.0,
             "trades_today": {
                 "date": datetime.now(timezone.utc).date().isoformat(),
                 "buys": 0,
@@ -85,6 +91,17 @@ class PortfolioManager:
     @property
     def trade_log(self) -> list[dict]:
         return self._state["trade_log"]
+
+    @property
+    def interest_accrued(self) -> float:
+        """Total interest earned to date."""
+        return self._state.get("interest_accrued", 0.0)
+
+    @property
+    def available_cash(self) -> float:
+        """Cash not deployed in open positions."""
+        deployed = sum(pos.get("cost_value", 0.0) for pos in self.positions.values())
+        return self._capital_pot - deployed
 
     def get_limit_tracker(self) -> DailyLimitTracker:
         """Return a DailyLimitTracker for this portfolio's state."""
@@ -190,3 +207,9 @@ class PortfolioManager:
         if ticker in self._state["positions"]:
             self._state["positions"][ticker]["stop_perm_id"] = None
             self._state["positions"][ticker]["stop_price"] = None
+
+    def accrue_daily_interest(self) -> float:
+        """Accrue one day of interest on available cash. Returns interest earned."""
+        accrual = self._interest.daily_accrual(self.available_cash)
+        self._state["interest_accrued"] = round(self._state.get("interest_accrued", 0.0) + accrual, 2)
+        return accrual

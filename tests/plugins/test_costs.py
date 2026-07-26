@@ -112,16 +112,17 @@ class TestEngineParity:
     def test_flat_model_matches_no_model_path(self):
         from Strategy_Auto_Trader.quant_hmm.quant_engine import _simulate_portfolio_value
         detail = self._detail()
-        vals_none, costs_none = _simulate_portfolio_value(detail, 1000.0, 10.0)
-        vals_flat, costs_flat = _simulate_portfolio_value(
+        vals_none, costs_none, interest_none = _simulate_portfolio_value(detail, 1000.0, 10.0)
+        vals_flat, costs_flat, interest_flat = _simulate_portfolio_value(
             detail, 1000.0, 10.0, cost_model=FlatCost(10.0))
         assert vals_none == vals_flat
         assert costs_none == costs_flat == 40.0
+        assert interest_none == interest_flat == 0.0
 
     def test_ibkr_model_scales_with_stake(self):
         from Strategy_Auto_Trader.quant_hmm.quant_engine import _simulate_portfolio_value
         detail = self._detail()
-        _, costs = _simulate_portfolio_value(
+        _, costs, _ = _simulate_portfolio_value(
             detail, 1000.0, 10.0, cost_model=IbkrTieredCost("AAPL"))
         # 4 events, stakes ~100-200 -> min fee 1.70*FX each side
         assert costs == pytest.approx(4 * 1.70 * USD_GBP, rel=1e-6)
@@ -133,12 +134,12 @@ class TestEngineParity:
             _simulate_portfolio_value,
         )
         detail = self._detail()
-        vals, costs = _simulate_portfolio_value(
+        vals, costs, interest = _simulate_portfolio_value(
             detail, 1000.0, 10.0, cost_model=IbkrTieredCost("SHEL.L"))
         ret = np.zeros(len(detail))
         eq = np.ones(len(detail))
         stats = _build_quant_backtest_stats(
             detail, ret, ret, eq, eq, 1000.0, vals, [], 0.1,
-            transaction_costs_total=costs,
+            transaction_costs_total=costs, interest_earned=interest,
         )
         assert stats["transaction_costs_total"] == pytest.approx(round(costs, 2))

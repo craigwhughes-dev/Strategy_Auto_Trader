@@ -381,7 +381,9 @@ def main(argv: list[str] | None = None) -> int:
     tickers = [t["ticker"] for t in watchlist.get("tickers", [])]
 
     state_path = Path(args.state_dir) / "execution_state.json"
-    portfolio = PortfolioManager(capital_pot, max_positions, state_path)
+    # Infer currency from tickers (all FTSE if .L suffix, else USD)
+    currency = "GBP" if any(t.endswith(".L") for t in tickers) else "USD"
+    portfolio = PortfolioManager(capital_pot, max_positions, state_path, currency=currency)
     limit_tracker = portfolio.get_limit_tracker()
 
     if args.dry_run:

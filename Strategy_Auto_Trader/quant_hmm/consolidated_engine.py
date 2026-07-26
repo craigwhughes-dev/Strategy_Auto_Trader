@@ -311,6 +311,7 @@ def consolidated_backtest(
     entry_strategy: EntryStrategyProtocol | None = None,
     exit_strategy: ExitStrategyProtocol | None = None,
     skip_unused_indicators: bool = True,
+    currency: str = "GBP",
 ) -> dict:
     """Walk-forward consolidated backtest on hourly data.
 
@@ -649,12 +650,12 @@ def consolidated_backtest(
     detail["strategy_equity"] = strat_equity
     detail["bh_equity"]       = bh_equity
 
-    portfolio_values, total_costs = _simulate_portfolio_value(
-        detail, initial_cash, trade_cost, cost_model=cost_model)
+    portfolio_values, total_costs, total_interest = _simulate_portfolio_value(
+        detail, initial_cash, trade_cost, cost_model=cost_model, currency=currency)
     detail["portfolio_value"] = portfolio_values
 
     return _build_quant_backtest_stats(
         detail, strat_ret, bh_ret, strat_equity, bh_equity, initial_cash,
         portfolio_values, sizer_plugin.trade_results, sizer_plugin.current_kelly,
-        transaction_costs_total=total_costs,
+        transaction_costs_total=total_costs, interest_earned=total_interest,
     )

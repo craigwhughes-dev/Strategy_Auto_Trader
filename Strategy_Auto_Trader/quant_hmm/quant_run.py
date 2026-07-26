@@ -196,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
               f"confidence: {sent_data['confidence']}/4")
 
     print(f"\n  Running backtest...")
+    # Infer currency from ticker (.L = GBP, else USD)
+    currency = "GBP" if args.ticker.endswith(".L") else "USD"
     bt = quant_backtest(
         df,
         entry_prob=args.entry_prob,
@@ -210,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         vix_signal=vix_sig,
         regime_smooth=args.regime_smooth,
         min_hold_bars=args.min_hold,
+        currency=currency,
     )
 
     elapsed = time.time() - t0

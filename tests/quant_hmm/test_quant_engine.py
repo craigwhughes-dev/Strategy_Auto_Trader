@@ -486,11 +486,12 @@ class TestQuantEngine:
             "trade_event": ["BUY", "", "SELL"],
             "strategy_return": [0.0, 0.10, 0.0],
         })
-        values, total_costs = _simulate_portfolio_value(detail, initial_cash=1000.0, trade_cost=10.0)
+        values, total_costs, total_interest = _simulate_portfolio_value(detail, initial_cash=1000.0, trade_cost=10.0)
         assert values[0] == 990.0
         assert values[1] == 1089.0
         assert values[2] == 1079.0
         assert total_costs == 20.0
+        assert total_interest == 0.0  # No date index, so no interest accrual
 
     # -- _build_quant_backtest_stats ---------------------------------------------
 

@@ -15,6 +15,8 @@ import logging
 import numpy as np
 import pandas as pd
 
+from ..plugins.interest import IbkrTieredInterest
+
 _log = logging.getLogger(__name__)
 
 
@@ -314,20 +316,37 @@ def _simulate_portfolio_value(
     initial_cash: float,
     trade_cost: float,
     cost_model=None,
-) -> tuple[list, float]:
-    """Cash P&L simulation: deduct a per-side cost on each BUY/SELL, then
-    compound through that bar's strategy_return.
+    currency: str = "GBP",
+) -> tuple[list, float, float]:
+    """Cash P&L simulation: deduct a per-side cost on each BUY/SELL, accrue
+    daily interest on cash, then compound through that bar's strategy_return.
 
     cost_model (plugins.costs, `cost(trade_value, is_buy) -> float`) prices
     each side off the Kelly-sized stake at that bar; None keeps the exact
     historical flat trade_cost/side arithmetic (the parity baseline).
 
-    Returns (portfolio_values, total_costs).
+    currency: currency for interest rate lookup (GBP or USD). Accrues daily
+    on cash balance (after costs, including position P&L).
+
+    Returns (portfolio_values, total_costs, total_interest).
     """
+    interest_model = IbkrTieredInterest(currency)
     cash = initial_cash
     portfolio_values = []
     total_costs = 0.0
-    for _, row in detail.iterrows():
+    total_interest = 0.0
+    current_date = None
+
+    for idx, row in detail.iterrows():
+        # Accrue daily interest on first bar of new day
+        bar_date = idx.date() if hasattr(idx, 'date') else None
+        if bar_date and bar_date != current_date:
+            if current_date is not None:  # Skip first day
+                daily_interest = interest_model.daily_accrual(cash)
+                cash += daily_interest
+                total_interest += daily_interest
+            current_date = bar_date
+
         if row["trade_event"] in ("BUY", "SELL"):
             if cost_model is None:
                 fee = trade_cost
@@ -336,9 +355,11 @@ def _simulate_portfolio_value(
                 fee = cost_model.cost(stake, row["trade_event"] == "BUY")
             cash -= fee
             total_costs += fee
+
         cash *= (1 + float(row["strategy_return"]))
         portfolio_values.append(round(cash, 2))
-    return portfolio_values, total_costs
+
+    return portfolio_values, total_costs, round(total_interest, 2)
 
 
 def _build_quant_backtest_stats(
@@ -352,6 +373,7 @@ def _build_quant_backtest_stats(
     trade_results: list,
     current_kelly: float,
     transaction_costs_total: float = 0.0,
+    interest_earned: float = 0.0,
 ) -> dict:
     n_buys = (detail["trade_event"] == "BUY").sum()
     n_sells = (detail["trade_event"] == "SELL").sum()
@@ -379,6 +401,7 @@ def _build_quant_backtest_stats(
         "trade_results": trade_results,
         "final_kelly": current_kelly,
         "transaction_costs_total": round(transaction_costs_total, 2),
+        "interest_earned": interest_earned,
         "detail": detail,
         "n_bars": len(detail),
     }
@@ -402,6 +425,7 @@ def quant_backtest(
     vix_signal: int = 0,
     regime_smooth: int = 24,
     min_hold_bars: int = 48,
+    currency: str = "GBP",
 ) -> dict:
     """Walk-forward backtest using HMM regime probabilities on hourly data.
 
@@ -558,14 +582,16 @@ def quant_backtest(
     detail["strategy_equity"] = strat_equity
     detail["bh_equity"] = bh_equity
 
-    # Portfolio simulation
-    portfolio_values, total_costs = _simulate_portfolio_value(detail, initial_cash, trade_cost)
+    # Portfolio simulation with interest accrual
+    portfolio_values, total_costs, total_interest = _simulate_portfolio_value(
+        detail, initial_cash, trade_cost, currency=currency
+    )
     detail["portfolio_value"] = portfolio_values
 
     return _build_quant_backtest_stats(
         detail, strat_ret, bh_ret, strat_equity, bh_equity, initial_cash,
         portfolio_values, trade_results, current_kelly,
-        transaction_costs_total=total_costs,
+        transaction_costs_total=total_costs, interest_earned=total_interest,
     )
 
 
