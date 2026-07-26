@@ -33,6 +33,7 @@ import pandas as pd
 from ..output.journal import LIVE_JOURNAL, TradeRecord, append_trades, extract_trades_from_detail
 from ..plugins.context_adjuster import SentimentAdjuster
 from ..plugins.costs import COST_MODEL_CHOICES, make_cost_model
+from ..plugins.interest import IbkrTieredInterest
 from ..quant_hmm.consolidated_engine import consolidated_backtest
 from ..quant_hmm.data_cache import fetch_hourly_cached
 from ..quant_hmm.vol_screen import screen_tickers
@@ -125,6 +126,7 @@ def simulate_strategy(
     vol_filter_tag: str = "suitable",
     vol_filter_ok: bool = True,
     cost_model_name: str = "flat",
+    currency: str = "GBP",
 ) -> list[TradeRecord]:
     """Run one strategy across all tickers with a shared capital pool. Returns executed TradeRecords."""
     print(f"\n{'='*64}\n Strategy: {strategy_name}  (vol_filter={vol_filter_tag})\n{'='*64}")
@@ -155,8 +157,22 @@ def simulate_strategy(
     cash = initial_cash
     open_positions: list[dict] = []  # {date_closed, exit_proceeds}
     executed: list[TradeRecord] = []
+    interest_model = IbkrTieredInterest(currency)
+    total_interest = 0.0
+    prev_day = None
 
     for day in all_days:
+        # Accrue interest on idle cash for the gap since the last active day
+        # (all_days is sparse — only days with opens/closes — so scale by the
+        # actual elapsed days rather than once per list entry).
+        if prev_day is not None:
+            days_elapsed = (day - prev_day).days
+            if days_elapsed > 0:
+                interest = interest_model.daily_accrual(cash) * days_elapsed
+                cash += interest
+                total_interest += interest
+        prev_day = day
+
         # 1. release cash for positions closing on/before this day
         still_open = []
         for pos in open_positions:
@@ -211,7 +227,8 @@ def simulate_strategy(
 
     total_pnl = sum(r.pnl_usd for r in executed)
     print(f"\n  {strategy_name}: {len(executed)} trade(s) executed, "
-          f"final pot £{final_cash:,.2f} (P&L £{total_pnl:+,.2f} on £{initial_cash:,.0f} start)")
+          f"final pot £{final_cash:,.2f} (P&L £{total_pnl:+,.2f} on £{initial_cash:,.0f} start, "
+          f"£{total_interest:,.2f} interest on idle cash)")
 
     return executed
 
@@ -245,11 +262,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--start-date", default="2026-01-12")
     parser.add_argument("--initial-cash", type=float, default=10_000.0)
     parser.add_argument("--trade-cost", type=float, default=1.0)
-    parser.add_argument("--cost-model", default="flat", choices=COST_MODEL_CHOICES,
+    parser.add_argument("--cost-model", default="ibkr_tiered_spread", choices=COST_MODEL_CHOICES,
                         help="Transaction cost model for the capital sim: 'flat' = "
-                             "--trade-cost/side; 'ibkr_tiered' = IBKR UK tiered commission "
+                             "--trade-cost/side (~10x real fees at typical stake sizes); "
+                             "'ibkr_tiered' = IBKR UK tiered commission "
                              "+ SDRT on .L buys; 'ibkr_tiered_spread' adds a half-spread "
-                             "estimate per side. Default: flat (unchanged behaviour).")
+                             "estimate per side. Default: ibkr_tiered_spread.")
     parser.add_argument("--kelly-fallback", type=float, default=100.0)
     parser.add_argument("--max-trades-per-day", type=int, default=1)
     parser.add_argument("--min-trend-quality", type=float, default=0.0,

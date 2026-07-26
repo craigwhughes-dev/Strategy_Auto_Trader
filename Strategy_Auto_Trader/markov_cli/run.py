@@ -91,11 +91,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     # Capital / costs
     parser.add_argument("--initial-cash", type=float, default=20_000.0)
     parser.add_argument("--transaction-cost", type=float, default=10.0)
-    parser.add_argument("--cost-model", default="flat", choices=COST_MODEL_CHOICES,
-                        help="Transaction cost model: 'flat' = --transaction-cost/side; "
+    parser.add_argument("--cost-model", default="ibkr_tiered_spread", choices=COST_MODEL_CHOICES,
+                        help="Transaction cost model: 'flat' = --transaction-cost/side "
+                             "(historical, ~10x real fees at typical stake sizes); "
                              "'ibkr_tiered' = IBKR UK tiered commission + SDRT on .L buys; "
                              "'ibkr_tiered_spread' adds a half-spread estimate per side. "
-                             "Default: flat (unchanged behaviour).")
+                             "Default: ibkr_tiered_spread.")
 
     # Kelly
     parser.add_argument("--no-kelly", dest="use_kelly", action="store_false", default=True,

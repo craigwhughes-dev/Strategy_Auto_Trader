@@ -763,11 +763,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="Stop after N tickers (0 = all)")
     parser.add_argument("--trade-cost", type=float, default=10.0,
                         help="Per-trade cost for the flat cost model (default: 10.0)")
-    parser.add_argument("--cost-model", default="flat", choices=COST_MODEL_CHOICES,
-                        help="Transaction cost model: 'flat' = historical --trade-cost/side; "
+    parser.add_argument("--cost-model", default="ibkr_tiered_spread", choices=COST_MODEL_CHOICES,
+                        help="Transaction cost model: 'flat' = historical --trade-cost/side "
+                             "(~10x real fees at typical stake sizes); "
                              "'ibkr_tiered' = IBKR UK tiered commission + 0.5%% SDRT on .L buys; "
                              "'ibkr_tiered_spread' adds a per-side half-spread estimate "
-                             "(15bps FTSE / 5bps US). Default: flat (unchanged behaviour).")
+                             "(15bps FTSE / 5bps US). Default: ibkr_tiered_spread.")
     parser.add_argument("--workers", type=int, default=2,
                         help="Worker processes for parallel ticker scans (1 = sequential, default: 2). "
                              "Rows land in completion order, not ticker order; use sort_summary() if needed.")
