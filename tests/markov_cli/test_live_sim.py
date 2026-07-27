@@ -720,6 +720,15 @@ _EMPTY_ARBITRATE_RESULT = {
 
 class TestMainCLI:
 
+    @pytest.fixture(autouse=True)
+    def _no_real_position_summary_writes(self):
+        """main() always writes a position_summary CSV to data/journals/ when
+        summary_rows is non-empty (one SUMMARY row per strategy/pot-size, even
+        with empty candidates) — mock the writer so these CLI-wiring tests
+        never touch the real filesystem."""
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._write_position_summary") as m:
+            yield m
+
     def test_main_requires_exactly_one_of_tickers_or_universe(self):
         from Strategy_Auto_Trader.markov_cli.live_sim import main
 
