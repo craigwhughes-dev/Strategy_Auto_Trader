@@ -550,6 +550,7 @@ def scan_ticker(
     ticker: str, strategy_name: str, *, trade_cost: float = 10.0,
     cost_model_name: str = "flat", sentiment: bool = True,
     vix_data: dict | None = None, data_cutoff: date | None = None,
+    initial_cash: float = 20_000.0,
     fetch_fn=None, vol_profile_fn=None, backtest_fn=None,
 ) -> dict:
     """Run one ticker end-to-end; returns its summary row. Never skips on vol.
@@ -612,6 +613,7 @@ def scan_ticker(
         exit_strategy=exit_s,
         trade_cost=trade_cost,
         cost_model=make_cost_model(cost_model_name, ticker, trade_cost),
+        initial_cash=initial_cash,
         skip_unused_indicators=False,   # research scan: compute everything
     )
     regime_model.save()
@@ -673,6 +675,7 @@ def scan_ticker(
 def _scan_ticker_worker(
     ticker: str, strategy_name: str, trade_cost: float, sentiment: bool,
     data_cutoff: date | None = None, cost_model_name: str = "flat",
+    initial_cash: float = 20_000.0,
 ) -> dict:
     """Top-level module worker function for ProcessPoolExecutor.
 
@@ -686,7 +689,7 @@ def _scan_ticker_worker(
             ticker, strategy_name,
             trade_cost=trade_cost, cost_model_name=cost_model_name,
             sentiment=sentiment, vix_data=vix_data,
-            data_cutoff=data_cutoff,
+            data_cutoff=data_cutoff, initial_cash=initial_cash,
         )
         return {"row": row, "traceback": None}
     except Exception as exc:
@@ -763,6 +766,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Stop after N tickers (0 = all)")
     parser.add_argument("--trade-cost", type=float, default=10.0,
                         help="Per-trade cost for the flat cost model (default: 10.0)")
+    parser.add_argument("--initial-cash", type=float, default=20_000.0,
+                        help="Starting capital per ticker's isolated backtest (default: 20000.0)")
     parser.add_argument("--cost-model", default="ibkr_tiered_spread", choices=COST_MODEL_CHOICES,
                         help="Transaction cost model: 'flat' = historical --trade-cost/side "
                              "(~10x real fees at typical stake sizes); "
@@ -836,6 +841,7 @@ def main(argv: list[str] | None = None) -> int:
                     trade_cost=args.trade_cost, cost_model_name=args.cost_model,
                     sentiment=not args.no_sentiment,
                     vix_data=vix_data, data_cutoff=data_cutoff,
+                    initial_cash=args.initial_cash,
                 )
             except Exception as exc:
                 row = {
@@ -862,7 +868,7 @@ def main(argv: list[str] | None = None) -> int:
                     _scan_ticker_worker,
                     ticker, args.strategy,
                     args.trade_cost, not args.no_sentiment, data_cutoff,
-                    args.cost_model,
+                    args.cost_model, args.initial_cash,
                 ): ticker
                 for ticker in tasks_to_run
             }

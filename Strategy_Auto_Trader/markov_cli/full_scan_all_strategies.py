@@ -47,6 +47,9 @@ def main(argv: list[str] | None = None, scan_main=None) -> int:
     parser.add_argument("--cost-model", default="ibkr_tiered_spread",
                         help="Transaction cost model passed to each full_scan pass "
                              "(flat | ibkr_tiered | ibkr_tiered_spread; default ibkr_tiered_spread)")
+    parser.add_argument("--initial-cash", type=float, default=20_000.0,
+                        help="Starting capital per ticker's isolated backtest, passed to each "
+                             "full_scan pass (default: 20000.0)")
     parser.add_argument("--data-cutoff", default="today", metavar="YYYY-MM-DD|today|none",
                         help="Freeze data across strategy passes: drop bars dated on or after "
                              "this date (exchange-local). Default 'today' — the current session "
@@ -89,7 +92,8 @@ def main(argv: list[str] | None = None, scan_main=None) -> int:
     for i, strategy in enumerate(strategies, 1):
         print(f"\n{'='*64}\n [{i}/{len(strategies)}] strategy: {strategy}\n{'='*64}", flush=True)
         scan_argv = ["--tickers", *tickers, "--strategy", strategy, "--no-sentiment",
-                     "--workers", str(args.workers), "--cost-model", args.cost_model]
+                     "--workers", str(args.workers), "--cost-model", args.cost_model,
+                     "--initial-cash", str(args.initial_cash)]
         if data_cutoff:
             scan_argv.extend(["--data-cutoff", data_cutoff])
         if args.force:
