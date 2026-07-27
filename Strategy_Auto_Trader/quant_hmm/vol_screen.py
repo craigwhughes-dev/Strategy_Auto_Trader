@@ -24,6 +24,26 @@ import numpy as np
 import pandas as pd
 
 
+def _trend_quality_score(
+    efficiency_ratio: float | pd.Series,
+    autocorr: float | pd.Series,
+    ann_vol: float | pd.Series,
+    sign_change_freq: float | pd.Series,
+):
+    """Composite trend-quality score, weighted by empirical correlation strength
+    (see module docstring). Normalised so 0 = typical FTSE name, positive = more
+    trend-friendly. Shared by volatility_profile() (single snapshot) and
+    rolling_trend_quality() (time series) so the two can't drift apart —
+    operates element-wise on either plain floats or aligned pandas Series.
+    """
+    return (
+        1.5 * (efficiency_ratio - 0.07) / 0.05
+        + 1.5 * (autocorr - 0.0) / 0.04
+        - 1.0 * (ann_vol - 0.25) / 0.05
+        - 1.0 * (sign_change_freq - 0.52) / 0.03
+    )
+
+
 def volatility_profile(ticker: str, period: str = "2y") -> dict | None:
     """Compute volatility-character metrics for a ticker from daily data.
 
@@ -81,14 +101,7 @@ def volatility_profile(ticker: str, period: str = "2y") -> dict | None:
     signs = np.sign(returns)
     sign_change_freq = float((signs != signs.shift()).sum() / len(signs))
 
-    # Composite trend-quality score, weighted by empirical correlation strength.
-    # Normalised so 0 = typical FTSE name, positive = more trend-friendly.
-    trend_quality = (
-        1.5 * (efficiency_ratio - 0.07) / 0.05
-        + 1.5 * (autocorr - 0.0) / 0.04
-        - 1.0 * (ann_vol - 0.25) / 0.05
-        - 1.0 * (sign_change_freq - 0.52) / 0.03
-    )
+    trend_quality = _trend_quality_score(efficiency_ratio, autocorr, ann_vol, sign_change_freq)
 
     return {
         "ticker": ticker,
@@ -100,6 +113,59 @@ def volatility_profile(ticker: str, period: str = "2y") -> dict | None:
         "sign_change_freq": round(sign_change_freq, 4),
         "trend_quality": round(float(trend_quality), 3),
     }
+
+
+def rolling_trend_quality(
+    daily_ohlc: pd.DataFrame, window: int = 504, min_periods: int = 100
+) -> pd.Series:
+    """Trend-quality as a daily time series, computed with a trailing rolling
+    window ending at each date — for matching live trading's daily overnight
+    rescreen (overnight_scope.py) inside a historical backtest, where a single
+    "as of today" volatility_profile() snapshot would apply hindsight (a
+    ticker choppy today isn't necessarily choppy two years ago).
+
+    Every component is a vectorized pandas rolling op, not .apply() — cheap
+    even for hundreds of tickers x years of daily bars. window=504 trading
+    days approximates volatility_profile()'s default period="2y". Below
+    min_periods (matching volatility_profile()'s own len(close) < 100 cutoff)
+    there isn't enough trailing history for a lookahead-free score; those
+    entries are NaN — callers should treat NaN as "no verdict" (permissive),
+    matching resolve_strategy()'s documented default when no ticker context
+    is available.
+
+    The whole series is shifted 1 day: real screening runs overnight using
+    data through yesterday's close and trades on that today, so day-t's score
+    must not depend on day-t's own bar.
+
+    daily_ohlc must have High/Low/Close columns, ascending date index.
+    """
+    high = daily_ohlc["High"]
+    low = daily_ohlc["Low"]
+    close = daily_ohlc["Close"]
+
+    returns = close.pct_change()
+    ann_vol = returns.rolling(window, min_periods=min_periods).std() * np.sqrt(252)
+    downside_sq = returns.clip(upper=0.0) ** 2
+
+    net_change = (close - close.shift(window)).abs()
+    path_length = close.diff().abs().rolling(window, min_periods=min_periods).sum()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        efficiency_ratio = (net_change / path_length).where(path_length > 0, 0.0)
+
+    autocorr = returns.rolling(window, min_periods=min_periods).corr(returns.shift(1))
+
+    signs = np.sign(returns)
+    sign_change_freq = (signs != signs.shift()).rolling(window, min_periods=min_periods).mean()
+
+    trend_quality = _trend_quality_score(efficiency_ratio, autocorr, ann_vol, sign_change_freq)
+
+    # Enough total history at all (min_periods bars), independent of the
+    # per-component rolling windows above, which can each be non-NaN slightly
+    # differently at the boundary — align on ann_vol's mask as the anchor
+    # since std() is the strictest (needs >= 2 non-null returns per window).
+    trend_quality = trend_quality.where(ann_vol.notna())
+
+    return trend_quality.shift(1)
 
 
 def screen_tickers(

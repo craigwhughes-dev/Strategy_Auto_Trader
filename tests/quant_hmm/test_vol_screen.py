@@ -112,3 +112,96 @@ class TestVolScreen:
         assert "DELISTED" not in kept
         assert len(kept) == 2
         assert len(profiles) == 2
+
+
+class TestRollingTrendQuality:
+    """rolling_trend_quality() — the daily-rescreen equivalent of
+    volatility_profile()'s single snapshot, used by live_sim.py so a
+    historical backtest can match live trading's actual daily overnight
+    rescreen (overnight_scope.py) instead of applying today's trend_quality
+    across the whole simulated window."""
+
+    def _daily_ohlc(self, close, spread=1.0, start="2022-01-01"):
+        close = np.asarray(close, dtype=float)
+        n = len(close)
+        idx = pd.date_range(start, periods=n, freq="D")
+        return pd.DataFrame({"High": close + spread, "Low": close - spread, "Close": close}, index=idx)
+
+    def test_nan_before_min_periods(self):
+        from Strategy_Auto_Trader.quant_hmm.vol_screen import rolling_trend_quality
+        close = np.linspace(100.0, 200.0, 150)
+        df = self._daily_ohlc(close)
+        series = rolling_trend_quality(df, window=100, min_periods=100)
+        # Fewer than min_periods bars of history -> no score yet.
+        assert series.iloc[:99].isna().all()
+
+    def test_score_available_after_min_periods(self):
+        from Strategy_Auto_Trader.quant_hmm.vol_screen import rolling_trend_quality
+        close = np.linspace(100.0, 200.0, 150)
+        df = self._daily_ohlc(close)
+        series = rolling_trend_quality(df, window=100, min_periods=100)
+        assert series.iloc[105:].notna().all()
+
+    def test_tracks_a_regime_shift_trending_then_choppy(self):
+        """The whole point of a rolling (not single-snapshot) score: it should
+        track a real change in character partway through the series, which a
+        single 'as of today' volatility_profile() call could never see for a
+        historical date."""
+        from Strategy_Auto_Trader.quant_hmm.vol_screen import rolling_trend_quality
+        n_trend, n_chop = 200, 200
+        trending = np.linspace(100.0, 200.0, n_trend)
+        choppy = 150.0 + 10.0 * np.sin(np.arange(n_chop) * (np.pi / 2))
+        close = np.concatenate([trending, choppy])
+        df = self._daily_ohlc(close)
+
+        series = rolling_trend_quality(df, window=100, min_periods=100)
+
+        # Deep into the trending regime (window fully inside trending data).
+        mid_trend_score = series.iloc[180]
+        # Deep into the choppy regime (window fully inside choppy data).
+        mid_chop_score = series.iloc[390]
+
+        assert mid_trend_score > mid_chop_score
+
+    def test_no_lookahead_score_unaffected_by_future_prices(self):
+        """Day t's score must not change if data after day t is altered —
+        the daemon screens overnight using only data through yesterday's
+        close; a lookahead-contaminated score would replay the exact bug
+        being fixed (applying information from outside the historical window
+        available at that point in the simulation)."""
+        from Strategy_Auto_Trader.quant_hmm.vol_screen import rolling_trend_quality
+        close_a = np.concatenate([np.linspace(100.0, 150.0, 150), np.full(50, 150.0)])
+        close_b = np.concatenate([np.linspace(100.0, 150.0, 150), np.linspace(150.0, 50.0, 50)])
+        df_a = self._daily_ohlc(close_a)
+        df_b = self._daily_ohlc(close_b)
+
+        series_a = rolling_trend_quality(df_a, window=100, min_periods=100)
+        series_b = rolling_trend_quality(df_b, window=100, min_periods=100)
+
+        # Both series are identical through day 149 (the point where the two
+        # price paths diverge) — a later change cannot retroactively alter it.
+        pd.testing.assert_series_equal(
+            series_a.iloc[:149], series_b.iloc[:149], check_names=False,
+        )
+
+    def test_shifted_by_one_day_no_same_day_lookahead(self):
+        """The returned series is deliberately 1-day-shifted: day t's score
+        must depend on data through day t-1 only. Changing the close on the
+        LAST day must not move the last day's own score (it's masked out by
+        the shift), but changing the close on the SECOND-TO-LAST day must —
+        that's the day the last row's shifted score actually reads from."""
+        from Strategy_Auto_Trader.quant_hmm.vol_screen import rolling_trend_quality
+        base_close = np.linspace(100.0, 200.0, 150)
+
+        df_base = self._daily_ohlc(base_close)
+        series_base = rolling_trend_quality(df_base, window=100, min_periods=100)
+
+        close_last_changed = base_close.copy()
+        close_last_changed[-1] = base_close[-1] * 1.5
+        series_last_changed = rolling_trend_quality(self._daily_ohlc(close_last_changed), window=100, min_periods=100)
+        assert series_last_changed.iloc[-1] == pytest.approx(series_base.iloc[-1])
+
+        close_prev_changed = base_close.copy()
+        close_prev_changed[-2] = base_close[-2] * 1.5
+        series_prev_changed = rolling_trend_quality(self._daily_ohlc(close_prev_changed), window=100, min_periods=100)
+        assert series_prev_changed.iloc[-1] != pytest.approx(series_base.iloc[-1])

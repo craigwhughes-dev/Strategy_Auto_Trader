@@ -660,56 +660,111 @@ class TestSimulateStrategy:
         assert pnl_b > 50.0
 
 
-class TestVolFilterTickers:
+class TestFilterCandidatesByDailyTrendQuality:
 
-    def test_vol_filter_tickers_returns_suitable_unsuitable(self):
-        from Strategy_Auto_Trader.markov_cli.live_sim import _vol_filter_tickers
+    def test_no_series_for_ticker_is_permissive(self, ts_base):
+        """A ticker with no trend_quality series at all (e.g. fetch failure)
+        is kept, not dropped — matches resolve_strategy()'s documented
+        'no ticker context -> permissive' default."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import (
+            _filter_candidates_by_daily_trend_quality, _Candidate,
+        )
 
-        profiles = [
-            {"ticker": "GOOD", "trend_quality": 0.8},
-            {"ticker": "BAD", "trend_quality": 0.2},
-            {"ticker": "MEH", "trend_quality": 0.5},
-        ]
+        rec = TradeRecord(date_opened="2026-01-12", ticker="NODATA", strategy="test")
+        cand = _Candidate(ticker="NODATA", date_opened=ts_base, date_closed=ts_base,
+                           entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec)
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.screen_tickers", return_value=(["GOOD", "MEH"], profiles)):
-            suitable, unsuitable, scores = _vol_filter_tickers(["GOOD", "BAD", "MEH"], min_trend_quality=0.3)
+        kept = _filter_candidates_by_daily_trend_quality(
+            [cand], trend_quality_by_ticker={}, min_trend_quality=0.0, wants_low=False,
+        )
+        assert kept == [cand]
 
-        assert "GOOD" in suitable
-        assert "MEH" in suitable
-        assert "BAD" in unsuitable
-        assert scores["GOOD"] == 0.8
-        assert scores["BAD"] == 0.2
+    def test_nan_score_before_min_periods_is_permissive(self, ts_base):
+        from Strategy_Auto_Trader.markov_cli.live_sim import (
+            _filter_candidates_by_daily_trend_quality, _Candidate,
+        )
 
-    def test_vol_filter_tickers_empty(self):
-        from Strategy_Auto_Trader.markov_cli.live_sim import _vol_filter_tickers
+        rec = TradeRecord(date_opened="2026-01-12", ticker="EARLY", strategy="test")
+        cand = _Candidate(ticker="EARLY", date_opened=ts_base, date_closed=ts_base,
+                           entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec)
+        series = pd.Series([float("nan")], index=[ts_base])
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.screen_tickers", return_value=([], [])):
-            suitable, unsuitable, scores = _vol_filter_tickers(["TEST"], min_trend_quality=0.5)
+        kept = _filter_candidates_by_daily_trend_quality(
+            [cand], trend_quality_by_ticker={"EARLY": series}, min_trend_quality=0.0, wants_low=False,
+        )
+        assert kept == [cand]
 
-        assert suitable == []
-        assert "TEST" in unsuitable
+    def test_below_threshold_dropped_above_kept_standard_direction(self, ts_base):
+        from Strategy_Auto_Trader.markov_cli.live_sim import (
+            _filter_candidates_by_daily_trend_quality, _Candidate,
+        )
 
+        rec_choppy = TradeRecord(date_opened="2026-01-12", ticker="CHOPPY", strategy="test")
+        cand_choppy = _Candidate(ticker="CHOPPY", date_opened=ts_base, date_closed=ts_base,
+                                  entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec_choppy)
+        rec_trend = TradeRecord(date_opened="2026-01-12", ticker="TRENDY", strategy="test")
+        cand_trend = _Candidate(ticker="TRENDY", date_opened=ts_base, date_closed=ts_base,
+                                 entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec_trend)
 
-class TestSkipRecords:
+        trend_quality_by_ticker = {
+            "CHOPPY": pd.Series([-1.0], index=[ts_base]),
+            "TRENDY": pd.Series([1.0], index=[ts_base]),
+        }
 
-    def test_skip_records_one_per_unsuitable(self):
-        from Strategy_Auto_Trader.markov_cli.live_sim import _skip_records
+        kept = _filter_candidates_by_daily_trend_quality(
+            [cand_choppy, cand_trend], trend_quality_by_ticker, min_trend_quality=0.0, wants_low=False,
+        )
+        assert kept == [cand_trend]
 
-        records = _skip_records(["BAD1", "BAD2"], "test_strategy", "2026-01-12")
+    def test_wants_low_inverts_direction(self, ts_base):
+        """A choppy_vol-style strategy (wants_low=True) keeps the low-scoring
+        ticker and drops the high-scoring one — inverse of the standard case."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import (
+            _filter_candidates_by_daily_trend_quality, _Candidate,
+        )
 
-        assert len(records) == 2
-        assert records[0].ticker == "BAD1"
-        assert records[1].ticker == "BAD2"
-        assert all(r.vol_filter == "unsuitable" for r in records)
-        assert all(r.strategy == "test_strategy" for r in records)
-        assert all(r.date_opened == "2026-01-12" for r in records)
+        rec_choppy = TradeRecord(date_opened="2026-01-12", ticker="CHOPPY", strategy="test")
+        cand_choppy = _Candidate(ticker="CHOPPY", date_opened=ts_base, date_closed=ts_base,
+                                  entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec_choppy)
+        rec_trend = TradeRecord(date_opened="2026-01-12", ticker="TRENDY", strategy="test")
+        cand_trend = _Candidate(ticker="TRENDY", date_opened=ts_base, date_closed=ts_base,
+                                 entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec_trend)
 
-    def test_skip_records_empty_unsuitable(self):
-        from Strategy_Auto_Trader.markov_cli.live_sim import _skip_records
+        trend_quality_by_ticker = {
+            "CHOPPY": pd.Series([-1.0], index=[ts_base]),
+            "TRENDY": pd.Series([1.0], index=[ts_base]),
+        }
 
-        records = _skip_records([], "test_strategy", "2026-01-12")
+        kept = _filter_candidates_by_daily_trend_quality(
+            [cand_choppy, cand_trend], trend_quality_by_ticker, min_trend_quality=0.0, wants_low=True,
+        )
+        assert kept == [cand_choppy]
 
-        assert records == []
+    def test_same_ticker_different_entry_days_evaluated_independently(self):
+        """The whole point of the daily rescreen: the SAME ticker can be
+        in-scope on one entry day and out-of-scope on another, using only
+        the trend_quality known as of each candidate's own entry day."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import (
+            _filter_candidates_by_daily_trend_quality, _Candidate,
+        )
+
+        day1 = pd.Timestamp("2026-01-01", tz="UTC")
+        day2 = pd.Timestamp("2026-06-01", tz="UTC")
+
+        rec1 = TradeRecord(date_opened="2026-01-01", ticker="SHIFT", strategy="test")
+        cand_early = _Candidate(ticker="SHIFT", date_opened=day1, date_closed=day1,
+                                 entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec1)
+        rec2 = TradeRecord(date_opened="2026-06-01", ticker="SHIFT", strategy="test")
+        cand_late = _Candidate(ticker="SHIFT", date_opened=day2, date_closed=day2,
+                                entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec2)
+
+        # Trending early in the year, choppy by June.
+        series = pd.Series([1.0, -1.0], index=[day1, day2])
+
+        kept = _filter_candidates_by_daily_trend_quality(
+            [cand_early, cand_late], {"SHIFT": series}, min_trend_quality=0.0, wants_low=False,
+        )
+        assert kept == [cand_early]
 
 
 _EMPTY_ARBITRATE_RESULT = {
@@ -743,19 +798,18 @@ class TestMainCLI:
         from Strategy_Auto_Trader.markov_cli.live_sim import main
 
         with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.full_scan.load_sp_ftse_universe", return_value=["U1", "U2"]) as mock_universe:
-            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._vol_filter_tickers", return_value=(["U1", "U2"], [], {})):
-                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {})) as mock_gen:
-                    with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
-                        main(["--universe", "--strategies", "default"])
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {}, {})) as mock_gen:
+                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
+                    main(["--universe", "--strategies", "default"])
 
         mock_universe.assert_called_once()
         assert mock_gen.call_args_list[0][1]["tickers"] == ["U1", "U2"]
 
-    def test_main_no_vol_filter_bypasses_screen_tickers(self):
+    def test_main_no_vol_filter_skips_daily_filtering(self):
         from Strategy_Auto_Trader.markov_cli.live_sim import main
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._vol_filter_tickers") as mock_screen:
-            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {})):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {}, {})):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._filter_candidates_by_daily_trend_quality") as mock_filter:
                 with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
                     main([
                         "--tickers", "TEST1", "TEST2",
@@ -763,25 +817,17 @@ class TestMainCLI:
                         "--no-vol-filter",
                     ])
 
-        # screen_tickers should not have been called
-        mock_screen.assert_not_called()
+        mock_filter.assert_not_called()
 
-    def test_main_with_vol_filter_calls_screen_tickers(self):
+    def test_main_vol_filter_exempt_strategy_all_get_full_ticker_list(self):
+        """Both strategies always get the full ticker list now — the vol veto
+        no longer decides which tickers get backtested (that was the static-
+        snapshot bug being fixed); exempt only means "skip the daily filter
+        step after candidates come back", not "get a different ticker list"."""
         from Strategy_Auto_Trader.markov_cli.live_sim import main
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._vol_filter_tickers", return_value=(["TEST1"], ["TEST2"], {})):
-            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {})):
-                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
-                    main([
-                        "--tickers", "TEST1", "TEST2",
-                        "--strategies", "default",
-                    ])
-
-    def test_main_vol_filter_exempt_strategy(self):
-        from Strategy_Auto_Trader.markov_cli.live_sim import main
-
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._vol_filter_tickers", return_value=(["TEST1"], ["TEST2"], {})):
-            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {})) as mock_gen:
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {}, {})) as mock_gen:
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._filter_candidates_by_daily_trend_quality", return_value=[]) as mock_filter:
                 with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
                     main([
                         "--tickers", "TEST1", "TEST2",
@@ -789,21 +835,22 @@ class TestMainCLI:
                         "--vol-filter-exempt", "exempt_strat",
                     ])
 
-        # exempt_strat should be called with all tickers, default with filtered
         calls = mock_gen.call_args_list
         assert len(calls) == 2
         tickers_by_call = {c[1]["strategy_name"]: c[1]["tickers"] for c in calls}
         assert sorted(tickers_by_call["exempt_strat"]) == ["TEST1", "TEST2"]
-        assert tickers_by_call["default"] == ["TEST1"]
+        assert sorted(tickers_by_call["default"]) == ["TEST1", "TEST2"]
+
+        # Daily filter runs only for the non-exempt strategy.
+        assert mock_filter.call_count == 1
 
     def test_main_default_arguments(self):
         from Strategy_Auto_Trader.markov_cli.live_sim import main
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._vol_filter_tickers", return_value=(["TEST"], [], {})):
-            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {})) as mock_gen:
-                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.arbitrate", return_value=dict(_EMPTY_ARBITRATE_RESULT)) as mock_arb:
-                    with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
-                        main(["--tickers", "TEST"])
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {}, {})) as mock_gen:
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.arbitrate", return_value=dict(_EMPTY_ARBITRATE_RESULT)) as mock_arb:
+                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
+                    main(["--tickers", "TEST"])
 
         gen_kwargs = mock_gen.call_args_list[0][1]
         assert gen_kwargs["workers"] == 2
@@ -817,14 +864,13 @@ class TestMainCLI:
     def test_main_pot_sizes_sweep_calls_arbitrate_once_per_pot_size(self):
         from Strategy_Auto_Trader.markov_cli.live_sim import main
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._vol_filter_tickers", return_value=(["TEST"], [], {})):
-            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {})) as mock_gen:
-                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.arbitrate", return_value=dict(_EMPTY_ARBITRATE_RESULT)) as mock_arb:
-                    with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
-                        main([
-                            "--tickers", "TEST", "--strategies", "default",
-                            "--pot-sizes", "25000", "50000", "100000",
-                        ])
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {}, {})) as mock_gen:
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.arbitrate", return_value=dict(_EMPTY_ARBITRATE_RESULT)) as mock_arb:
+                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
+                    main([
+                        "--tickers", "TEST", "--strategies", "default",
+                        "--pot-sizes", "25000", "50000", "100000",
+                    ])
 
         # generate_candidates runs once per strategy regardless of pot-size count
         assert mock_gen.call_count == 1
@@ -836,14 +882,13 @@ class TestMainCLI:
     def test_main_max_trades_per_day_zero_passed_through_as_unlimited(self):
         from Strategy_Auto_Trader.markov_cli.live_sim import main
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._vol_filter_tickers", return_value=(["TEST"], [], {})):
-            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {})):
-                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.arbitrate", return_value=dict(_EMPTY_ARBITRATE_RESULT)) as mock_arb:
-                    with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
-                        main([
-                            "--tickers", "TEST", "--strategies", "default",
-                            "--max-trades-per-day", "0",
-                        ])
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {}, {})):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.arbitrate", return_value=dict(_EMPTY_ARBITRATE_RESULT)) as mock_arb:
+                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
+                    main([
+                        "--tickers", "TEST", "--strategies", "default",
+                        "--max-trades-per-day", "0",
+                    ])
 
         assert mock_arb.call_args_list[0][1]["max_trades_per_day"] == 0
 
@@ -864,25 +909,27 @@ class TestGenerateCandidates:
                 entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec,
             )
             close = pd.Series([100.0, 101.0], index=[ts_base, ts_base + pd.Timedelta(days=1)])
-            return [cand], close
+            trend_quality = pd.Series([0.5, 0.5], index=[ts_base, ts_base + pd.Timedelta(days=1)])
+            return [cand], close, trend_quality
 
         tickers = ["A", "B", "C"]
 
         with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_extract_and_prices", side_effect=fake_fetch):
-            seq_candidates, seq_prices = generate_candidates(tickers, "test", workers=1)
+            seq_candidates, seq_prices, seq_tq = generate_candidates(tickers, "test", workers=1)
 
         with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_extract_and_prices", side_effect=fake_fetch):
             with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.ProcessPoolExecutor", _ImmediateExecutor):
-                par_candidates, par_prices = generate_candidates(tickers, "test", workers=4)
+                par_candidates, par_prices, par_tq = generate_candidates(tickers, "test", workers=4)
 
         assert {c.ticker for c in seq_candidates} == {c.ticker for c in par_candidates} == set(tickers)
         assert len(seq_candidates) == len(par_candidates) == 3
         assert set(seq_prices.keys()) == set(par_prices.keys()) == set(tickers)
+        assert set(seq_tq.keys()) == set(par_tq.keys()) == set(tickers)
 
     def test_workers_one_does_not_use_process_pool(self):
         from Strategy_Auto_Trader.markov_cli.live_sim import generate_candidates
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_extract_and_prices", return_value=([], None)):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_extract_and_prices", return_value=([], None, None)):
             with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.ProcessPoolExecutor") as mock_pool:
                 generate_candidates(["A"], "test", workers=1)
 

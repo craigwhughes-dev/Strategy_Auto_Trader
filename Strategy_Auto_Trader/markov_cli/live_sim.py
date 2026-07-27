@@ -50,8 +50,8 @@ from ..plugins.interest import IbkrTieredInterest
 from ..plugins.persistent_hmm import PersistentHMMRegimeModel
 from ..quant_hmm.consolidated_engine import consolidated_backtest
 from ..quant_hmm.data_cache import fetch_hourly_cached
-from ..quant_hmm.vol_screen import screen_tickers
-from ..strategy.base.registry import resolve_strategy
+from ..quant_hmm.vol_screen import rolling_trend_quality
+from ..strategy.base.registry import resolve_strategy, wants_low_trend_quality
 
 _HMM_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "state" / "hmm_cache"
 
@@ -70,14 +70,17 @@ class _Candidate:
 
 def _run_ticker_backtest(
     ticker: str, strategy_name: str, vol_filter_ok: bool = True
-) -> tuple[pd.DataFrame | None, pd.Series | None]:
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """Fetch data and run one ticker's full-history backtest.
 
     Shared by _fetch_and_extract (candidates only) and _fetch_extract_and_prices
-    (candidates + close-price series, for mark-to-market valuation) so the fetch
-    + consolidated_backtest call isn't duplicated between the two.
+    (candidates + close-price series + rolling trend_quality, for mark-to-market
+    valuation and daily vol-filter rescreening) so the fetch + consolidated_backtest
+    call isn't duplicated between the two.
 
-    Returns (detail_df, close_series), or (None, None) on missing/insufficient data.
+    Returns (detail_df, hourly_ohlc_df), or (None, None) on missing/insufficient
+    data. The full OHLC frame (not just Close) is returned so callers needing
+    High/Low (e.g. for rolling_trend_quality) don't have to re-fetch.
     """
     df = fetch_hourly_cached(ticker, period="730d")
     if df is None or df.empty:
@@ -105,7 +108,15 @@ def _run_ticker_backtest(
     detail = bt.get("detail", pd.DataFrame())
     if detail.empty:
         return None, None
-    return detail, df["Close"]
+    return detail, df
+
+
+def _daily_ohlc_from_hourly(df: pd.DataFrame) -> pd.DataFrame:
+    """Resample hourly OHLC bars to daily (High=max, Low=min, Close=last),
+    dropping non-trading days — input for rolling_trend_quality(), reusing
+    data already fetched for the backtest rather than a separate daily fetch."""
+    daily = df.resample("1D").agg({"High": "max", "Low": "min", "Close": "last"})
+    return daily.dropna(subset=["Close"])
 
 
 def _candidates_from_detail(
@@ -143,7 +154,7 @@ def _fetch_and_extract(
     (baked into every Entry class) — this is a bool, not a re-lookup, since
     the caller has usually already screened the ticker once (efficiency).
     """
-    detail, _close = _run_ticker_backtest(ticker, strategy_name, vol_filter_ok)
+    detail, _df = _run_ticker_backtest(ticker, strategy_name, vol_filter_ok)
     if detail is None:
         print(f"  {ticker}: no data or insufficient data, skipping")
         return []
@@ -152,14 +163,18 @@ def _fetch_and_extract(
 
 def _fetch_extract_and_prices(
     ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True
-) -> tuple[list[_Candidate], pd.Series | None]:
+) -> tuple[list[_Candidate], pd.Series | None, pd.Series | None]:
     """Like _fetch_and_extract, but also returns the ticker's close-price series
-    (for mark-to-market valuation of open positions during arbitration). Top-level
-    function so it's picklable for ProcessPoolExecutor."""
-    detail, close = _run_ticker_backtest(ticker, strategy_name, vol_filter_ok)
+    (for mark-to-market valuation) and its rolling trend_quality series (for
+    daily vol-filter rescreening — see rolling_trend_quality()'s docstring for
+    why a single "as of today" snapshot can't be used across a historical
+    backtest). Top-level function so it's picklable for ProcessPoolExecutor."""
+    detail, df = _run_ticker_backtest(ticker, strategy_name, vol_filter_ok)
     if detail is None:
-        return [], None
-    return _candidates_from_detail(ticker, detail, strategy_name, vol_filter_tag), close
+        return [], None, None
+    candidates = _candidates_from_detail(ticker, detail, strategy_name, vol_filter_tag)
+    trend_quality = rolling_trend_quality(_daily_ohlc_from_hourly(df))
+    return candidates, df["Close"], trend_quality
 
 
 def generate_candidates(
@@ -168,14 +183,17 @@ def generate_candidates(
     vol_filter_tag: str = "suitable",
     vol_filter_ok: bool = True,
     workers: int = 1,
-) -> tuple[list[_Candidate], dict[str, pd.Series]]:
+) -> tuple[list[_Candidate], dict[str, pd.Series], dict[str, pd.Series]]:
     """Generate one strategy's candidate trades across a ticker list, optionally
-    in parallel, retaining each ticker's close-price series for later
-    mark-to-market valuation. Does not arbitrate against any capital pot —
-    see arbitrate() for that, which can be re-run cheaply per pot size against
-    the same candidate list this returns."""
+    in parallel, retaining each ticker's close-price series (mark-to-market)
+    and rolling trend_quality series (daily vol-filter rescreening — see
+    rolling_trend_quality()). Does not arbitrate against any capital pot, nor
+    apply the vol filter itself — see arbitrate() for capital arbitration
+    (re-runnable cheaply per pot size against the same candidates) and
+    main()'s per-candidate filtering step for the vol gate."""
     all_candidates: list[_Candidate] = []
     price_by_ticker: dict[str, pd.Series] = {}
+    trend_quality_by_ticker: dict[str, pd.Series] = {}
 
     if workers > 1 and len(tickers) > 1:
         with ProcessPoolExecutor(max_workers=workers) as executor:
@@ -185,19 +203,23 @@ def generate_candidates(
             }
             for future in as_completed(futures):
                 ticker = futures[future]
-                cands, close = future.result()
+                cands, close, trend_quality = future.result()
                 all_candidates.extend(cands)
                 if close is not None:
                     price_by_ticker[ticker] = close
+                if trend_quality is not None:
+                    trend_quality_by_ticker[ticker] = trend_quality
     else:
         for ticker in tickers:
-            cands, close = _fetch_extract_and_prices(ticker, strategy_name, vol_filter_tag, vol_filter_ok)
+            cands, close, trend_quality = _fetch_extract_and_prices(ticker, strategy_name, vol_filter_tag, vol_filter_ok)
             all_candidates.extend(cands)
             if close is not None:
                 price_by_ticker[ticker] = close
+            if trend_quality is not None:
+                trend_quality_by_ticker[ticker] = trend_quality
 
     all_candidates.sort(key=lambda c: c.date_opened)
-    return all_candidates, price_by_ticker
+    return all_candidates, price_by_ticker, trend_quality_by_ticker
 
 
 def _position_value(pos: dict, day: pd.Timestamp, price_by_ticker: dict[str, pd.Series] | None) -> float:
@@ -438,26 +460,60 @@ def simulate_strategy(
     return executed
 
 
-def _vol_filter_tickers(
-    tickers: list[str], min_trend_quality: float
-) -> tuple[list[str], list[str], dict[str, float]]:
-    """Screen tickers for trend-friendliness. Returns (suitable, unsuitable, trend_quality_by_ticker)."""
-    print(f"\n{'='*64}\n Volatility filter (min_trend_quality={min_trend_quality})\n{'='*64}")
-    kept, profiles = screen_tickers(tickers, min_trend_quality=min_trend_quality, verbose=False)
-    scores = {p["ticker"]: p["trend_quality"] for p in profiles}
-    unsuitable = [t for t in tickers if t not in kept]
-    for t in tickers:
-        verdict = "suitable" if t in kept else "UNSUITABLE"
-        print(f"  {t:10s}  trend_quality={scores.get(t, float('nan')):>6.2f}  {verdict}")
-    return kept, unsuitable, scores
+def _trend_quality_asof(
+    ticker: str, when: pd.Timestamp, trend_quality_by_ticker: dict[str, pd.Series]
+) -> float | None:
+    """Look up a ticker's rolling trend_quality as of `when` (last known score
+    at/before that moment — the series is already shifted 1 day inside
+    rolling_trend_quality(), so this can't see same-day-or-later data). Returns
+    None if there's no series, or no non-NaN score yet (insufficient trailing
+    history) — callers should treat None as permissive, not exclusionary."""
+    series = trend_quality_by_ticker.get(ticker)
+    if series is None or series.empty:
+        return None
+
+    lookup = when
+    idx_tz = getattr(series.index, "tz", None)
+    if idx_tz is not None and lookup.tzinfo is None:
+        lookup = lookup.tz_localize(idx_tz)
+    elif idx_tz is None and lookup.tzinfo is not None:
+        lookup = lookup.tz_localize(None)
+
+    try:
+        score = series.asof(lookup)
+    except Exception:
+        return None
+    if score is None or (isinstance(score, float) and np.isnan(score)):
+        return None
+    return float(score)
 
 
-def _skip_records(unsuitable: list[str], strategy: str, start_date: str) -> list[TradeRecord]:
-    """One placeholder journal row per unsuitable ticker, for a single strategy."""
-    return [
-        TradeRecord(date_opened=start_date, ticker=ticker, strategy=strategy, vol_filter="unsuitable")
-        for ticker in unsuitable
-    ]
+def _filter_candidates_by_daily_trend_quality(
+    candidates: list[_Candidate],
+    trend_quality_by_ticker: dict[str, pd.Series],
+    min_trend_quality: float,
+    wants_low: bool,
+) -> list[_Candidate]:
+    """Keep only candidates whose ticker's trend_quality, as of their own
+    entry day, passes the threshold — the daily-rescreen equivalent of
+    overnight_scope.py's stage-1 vol screen (screen_market(), which re-runs
+    every night in real trading), applied per candidate instead of once per
+    ticker up front. wants_low inverts the direction for choppy-seeking
+    strategies (wants_low_trend_quality()), mirroring
+    overnight_scope.py:106-135's stage-1 logic exactly. No score yet
+    (insufficient trailing history) is permissive, matching
+    resolve_strategy()'s documented default with no ticker context.
+    """
+    kept = []
+    for c in candidates:
+        score = _trend_quality_asof(c.ticker, c.date_opened, trend_quality_by_ticker)
+        if score is None:
+            kept.append(c)
+            continue
+        passes = (score < min_trend_quality) if wants_low else (score >= min_trend_quality)
+        if passes:
+            kept.append(c)
+    return kept
 
 
 def _write_position_summary(rows: list[dict], path: Path) -> None:
@@ -528,39 +584,43 @@ def main(argv: list[str] | None = None) -> int:
     if args.vol_filter_exempt:
         print(f"  vol-filter-exempt strategies: {', '.join(args.vol_filter_exempt)}")
 
-    if args.no_vol_filter:
-        suitable, unsuitable = list(args.tickers), []
-    else:
-        suitable, unsuitable, _ = _vol_filter_tickers(args.tickers, args.min_trend_quality)
-        if unsuitable:
-            print(f"\n  Excluded {len(unsuitable)}/{len(args.tickers)} ticker(s) as unsuitable: "
-                  f"{', '.join(unsuitable)}")
-
     all_executed: list[TradeRecord] = []
     summary_rows: list[dict] = []
 
     for strategy_name in args.strategies:
         exempt = args.no_vol_filter or strategy_name in args.vol_filter_exempt
-        if exempt:
-            tickers_for_strategy = list(args.tickers)
-            vol_filter_tag = "disabled" if args.no_vol_filter else "exempt"
-        else:
-            tickers_for_strategy = suitable
-            vol_filter_tag = "suitable"
-            all_executed.extend(_skip_records(unsuitable, strategy_name, args.start_date))
+        vol_filter_tag = "disabled" if args.no_vol_filter else ("exempt" if exempt else "daily-rescreened")
 
         print(f"\n{'='*64}\n Strategy: {strategy_name}  (vol_filter={vol_filter_tag})\n{'='*64}")
-        candidates, price_by_ticker = generate_candidates(
-            tickers=tickers_for_strategy,
+        # Full ticker list always — the vol veto no longer decides which
+        # tickers get backtested at all (that baked in today's snapshot for
+        # the whole history); it's applied per-candidate below instead, using
+        # each candidate's own entry-day trend_quality (see
+        # _filter_candidates_by_daily_trend_quality's docstring for why).
+        candidates, price_by_ticker, trend_quality_by_ticker = generate_candidates(
+            tickers=list(args.tickers),
             strategy_name=strategy_name,
             vol_filter_tag=vol_filter_tag,
-            # tickers_for_strategy is already screened (or the strategy is exempt) —
-            # pass True explicitly so the strategy's own veto doesn't re-check.
+            # Always True: the strategy's own built-in single-snapshot veto
+            # must stay off so it doesn't double-gate on top of the daily
+            # rescreen below.
             vol_filter_ok=True,
             workers=args.workers,
         )
+
         cutoff = pd.Timestamp(args.start_date)
         candidates = [c for c in candidates if c.date_opened.tz_localize(None) >= cutoff]
+
+        if not exempt:
+            wants_low = wants_low_trend_quality(strategy_name)
+            n_before = len(candidates)
+            candidates = _filter_candidates_by_daily_trend_quality(
+                candidates, trend_quality_by_ticker, args.min_trend_quality, wants_low,
+            )
+            print(f"  daily vol gate: {len(candidates)}/{n_before} candidates survive "
+                  f"(min_trend_quality={args.min_trend_quality}, "
+                  f"{'inverted (wants choppy)' if wants_low else 'standard'})")
+
         if candidates:
             earliest = min(c.date_opened for c in candidates)
             print(f"  {len(candidates)} candidate trade(s) on/after {args.start_date} "
