@@ -35,10 +35,19 @@ def _send(subject: str, html_body: str, to: str | None = None) -> None:
     msg["To"] = to
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.starttls()
-        server.login(user, password)
-        server.sendmail(user, [to], msg.as_string())
+    if SMTP_PORT == 465:
+        # SSL mode
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
+            server.login(user, password)
+            server.sendmail(user, [to], msg.as_string())
+    else:
+        # TLS mode (port 587)
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(user, password)
+            server.sendmail(user, [to], msg.as_string())
 
 
 _SIG_COLOUR = {"BUY": "#1a7a3f", "SELL": "#a02020", "HOLD": "#5a5a5a"}

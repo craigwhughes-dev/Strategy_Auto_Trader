@@ -1118,6 +1118,38 @@ def run_startup_reconciliation(
     return True
 
 
+def _send_nightly_roundup(config: dict, logger: logging.Logger) -> None:
+    """Collect day's ticker results and send daily roundup email."""
+    from .batch import _collect_results
+    from ..output.emailer import send_daily_roundup
+
+    results = []
+    failed = []
+
+    # Iterate through all configured markets and their tickers
+    for market_name, market_cfg in config.get("markets", {}).items():
+        in_scope = load_in_scope_tickers(market_name, logger)
+        if not in_scope:
+            continue
+
+        for ticker in in_scope:
+            try:
+                result = _collect_results(ticker)
+                if result:
+                    results.append(result)
+                else:
+                    failed.append({"ticker": ticker, "error": "No result data"})
+            except Exception as e:
+                logger.warning(f"Failed to collect results for {ticker}: {e}")
+                failed.append({"ticker": ticker, "error": str(e)})
+
+    if results or failed:
+        logger.info(f"Sending nightly roundup: {len(results)} tickers, {len(failed)} failed")
+        send_daily_roundup(results, failed)
+    else:
+        logger.debug("No ticker results to send in nightly roundup")
+
+
 def check_nightly_reconciliation(
     config: dict,
     daemon_state: dict,
@@ -1162,6 +1194,12 @@ def check_nightly_reconciliation(
             daemon_state["reconciliation_consecutive_error_days"] = 0
             daemon_state["reconciliation_alert_sent"] = False
             save_state(daemon_state)
+
+            # Send nightly roundup email
+            try:
+                _send_nightly_roundup(config, logger)
+            except Exception as e:
+                logger.error(f"Nightly roundup email failed: {e}", exc_info=True)
         elif outcome == "error":
             # Count at most one error per calendar day — the run window can
             # retry every ~60s for 30+ minutes, and that retry storm must not
@@ -1217,12 +1255,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--stop-buffer-pct", type=float, default=1.5,
         help="Stop buffer percentage above strategy stop (default: 1.5)")
+    parser.add_argument(
+        "--send-nightly-roundup", action="store_true",
+        help="Send nightly roundup email with today's results and exit")
     args = parser.parse_args(argv)
 
     logger = setup_logging()
     logger.info("="*64)
     logger.info("Live daemon starting")
     logger.info("="*64)
+
+    # Handle --send-nightly-roundup flag (send email and exit)
+    if args.send_nightly_roundup:
+        logger.info("Sending nightly roundup email...")
+        config = load_config()
+        try:
+            _send_nightly_roundup(config, logger)
+            logger.info("Nightly roundup email sent successfully")
+        except Exception as e:
+            logger.error(f"Failed to send nightly roundup email: {e}", exc_info=True)
+            return 1
+        return 0
 
     # Validate startup environment (fail-fast on configuration issues)
     if not validate_startup_environment(logger):

@@ -13,6 +13,10 @@ taken as-is from the strategy's own (single-ticker, unconstrained) backtest,
 since exit logic is technical/regime-driven and doesn't depend on shared
 capital. Only entry admission (yes/no, and how much capital) is arbitrated.
 
+Each strategy passed via --strategies gets its OWN independent pot (not one
+pot shared across strategies) — --initial-cash/--pot-sizes is the size of
+that per-strategy pot, re-initialized fresh for every strategy.
+
 Usage:
     uv run python -m Strategy_Auto_Trader.markov_cli.live_sim \\
         --tickers SHEL.L BP.L HSBA.L ULVR.L GSK.L RIO.L DGE.L LSEG.L BATS.L VOD.L \\
@@ -20,24 +24,36 @@ Usage:
         --start-date 2026-01-12 \\
         --initial-cash 10000 --trade-cost 1 --kelly-fallback 100 \\
         --max-trades-per-day 1
+
+    # Full S&P500+FTSE100 universe, capital-sweep, unlimited daily admissions:
+    uv run python -m Strategy_Auto_Trader.markov_cli.live_sim \\
+        --universe --strategies conservative default trend optimised \\
+        --pot-sizes 25000 50000 100000 200000 \\
+        --max-trades-per-day 0 --workers 4
 """
 
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
+from . import full_scan
 from ..output.journal import LIVE_JOURNAL, TradeRecord, append_trades, extract_trades_from_detail
 from ..plugins.context_adjuster import SentimentAdjuster
 from ..plugins.costs import COST_MODEL_CHOICES, make_cost_model
 from ..plugins.interest import IbkrTieredInterest
+from ..plugins.persistent_hmm import PersistentHMMRegimeModel
 from ..quant_hmm.consolidated_engine import consolidated_backtest
 from ..quant_hmm.data_cache import fetch_hourly_cached
 from ..quant_hmm.vol_screen import screen_tickers
 from ..strategy.base.registry import resolve_strategy
+
+_HMM_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "state" / "hmm_cache"
 
 
 @dataclass
@@ -52,30 +68,28 @@ class _Candidate:
     record: TradeRecord
 
 
-def _fetch_and_extract(
-    ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True
-) -> list[_Candidate]:
-    """Run one ticker's full-history backtest and extract its round-trip trades.
+def _run_ticker_backtest(
+    ticker: str, strategy_name: str, vol_filter_ok: bool = True
+) -> tuple[pd.DataFrame | None, pd.Series | None]:
+    """Fetch data and run one ticker's full-history backtest.
 
-    vol_filter_ok is passed straight into the strategy's own built-in veto
-    (baked into every Entry class) — this is a bool, not a re-lookup, since
-    the caller has usually already screened the ticker once (efficiency).
+    Shared by _fetch_and_extract (candidates only) and _fetch_extract_and_prices
+    (candidates + close-price series, for mark-to-market valuation) so the fetch
+    + consolidated_backtest call isn't duplicated between the two.
+
+    Returns (detail_df, close_series), or (None, None) on missing/insufficient data.
     """
     df = fetch_hourly_cached(ticker, period="730d")
     if df is None or df.empty:
-        print(f"  {ticker}: no data, skipping")
-        return []
+        return None, None
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
     entry_s, exit_s = resolve_strategy(strategy_name, vol_filter_ok=vol_filter_ok)
 
-    from pathlib import Path
-    from ..plugins.persistent_hmm import PersistentHMMRegimeModel
     safe_ticker = ticker.replace("/", "-").replace("\\", "-")
-    cache_dir = Path(__file__).resolve().parent.parent.parent / "state" / "hmm_cache"
     regime_model = PersistentHMMRegimeModel(
-        cache_dir / f"{safe_ticker}.pkl",
+        _HMM_CACHE_DIR / f"{safe_ticker}.pkl",
         dates=df.index,
         closes=df["Close"].values,
     )
@@ -90,9 +104,14 @@ def _fetch_and_extract(
     regime_model.save()
     detail = bt.get("detail", pd.DataFrame())
     if detail.empty:
-        print(f"  {ticker}: insufficient data, skipping")
-        return []
+        return None, None
+    return detail, df["Close"]
 
+
+def _candidates_from_detail(
+    ticker: str, detail: pd.DataFrame, strategy_name: str, vol_filter_tag: str
+) -> list[_Candidate]:
+    """Extract round-trip trades from a backtest detail frame into _Candidate objects."""
     trades = extract_trades_from_detail(
         ticker, detail.reset_index(), strategy=strategy_name, vol_filter=vol_filter_tag
     )
@@ -115,56 +134,171 @@ def _fetch_and_extract(
     return candidates
 
 
-def simulate_strategy(
+def _fetch_and_extract(
+    ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True
+) -> list[_Candidate]:
+    """Run one ticker's full-history backtest and extract its round-trip trades.
+
+    vol_filter_ok is passed straight into the strategy's own built-in veto
+    (baked into every Entry class) — this is a bool, not a re-lookup, since
+    the caller has usually already screened the ticker once (efficiency).
+    """
+    detail, _close = _run_ticker_backtest(ticker, strategy_name, vol_filter_ok)
+    if detail is None:
+        print(f"  {ticker}: no data or insufficient data, skipping")
+        return []
+    return _candidates_from_detail(ticker, detail, strategy_name, vol_filter_tag)
+
+
+def _fetch_extract_and_prices(
+    ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True
+) -> tuple[list[_Candidate], pd.Series | None]:
+    """Like _fetch_and_extract, but also returns the ticker's close-price series
+    (for mark-to-market valuation of open positions during arbitration). Top-level
+    function so it's picklable for ProcessPoolExecutor."""
+    detail, close = _run_ticker_backtest(ticker, strategy_name, vol_filter_ok)
+    if detail is None:
+        return [], None
+    return _candidates_from_detail(ticker, detail, strategy_name, vol_filter_tag), close
+
+
+def generate_candidates(
     tickers: list[str],
     strategy_name: str,
-    start_date: str,
+    vol_filter_tag: str = "suitable",
+    vol_filter_ok: bool = True,
+    workers: int = 1,
+) -> tuple[list[_Candidate], dict[str, pd.Series]]:
+    """Generate one strategy's candidate trades across a ticker list, optionally
+    in parallel, retaining each ticker's close-price series for later
+    mark-to-market valuation. Does not arbitrate against any capital pot —
+    see arbitrate() for that, which can be re-run cheaply per pot size against
+    the same candidate list this returns."""
+    all_candidates: list[_Candidate] = []
+    price_by_ticker: dict[str, pd.Series] = {}
+
+    if workers > 1 and len(tickers) > 1:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(_fetch_extract_and_prices, t, strategy_name, vol_filter_tag, vol_filter_ok): t
+                for t in tickers
+            }
+            for future in as_completed(futures):
+                ticker = futures[future]
+                cands, close = future.result()
+                all_candidates.extend(cands)
+                if close is not None:
+                    price_by_ticker[ticker] = close
+    else:
+        for ticker in tickers:
+            cands, close = _fetch_extract_and_prices(ticker, strategy_name, vol_filter_tag, vol_filter_ok)
+            all_candidates.extend(cands)
+            if close is not None:
+                price_by_ticker[ticker] = close
+
+    all_candidates.sort(key=lambda c: c.date_opened)
+    return all_candidates, price_by_ticker
+
+
+def _position_value(pos: dict, day: pd.Timestamp, price_by_ticker: dict[str, pd.Series] | None) -> float:
+    """Mark one open position to market as of `day` (last known close at/before
+    day), falling back to its cost basis (alloc) if no price series or entry
+    price is available. price_by_ticker is optional — arbitrate() can be called
+    without it (e.g. from tests, or simulate_strategy's backward-compatible
+    path), in which case every position is valued at cost basis."""
+    entry_price = pos.get("entry_price") or 0.0
+    series = price_by_ticker.get(pos["ticker"]) if price_by_ticker else None
+    if series is None or series.empty or not entry_price:
+        return pos["alloc"]
+
+    lookup_day = day
+    idx_tz = getattr(series.index, "tz", None)
+    if idx_tz is not None and lookup_day.tzinfo is None:
+        lookup_day = lookup_day.tz_localize(idx_tz)
+    elif idx_tz is None and lookup_day.tzinfo is not None:
+        lookup_day = lookup_day.tz_localize(None)
+
+    try:
+        price_now = series.asof(lookup_day)
+    except Exception:
+        return pos["alloc"]
+    if price_now is None or (isinstance(price_now, float) and np.isnan(price_now)):
+        return pos["alloc"]
+    return pos["alloc"] * (float(price_now) / entry_price)
+
+
+def _max_drawdown(values: list[float]) -> float:
+    """Max peak-to-trough drawdown (negative fraction) of a portfolio-value sequence."""
+    if not values:
+        return 0.0
+    peak = values[0]
+    max_dd = 0.0
+    for v in values:
+        peak = max(peak, v)
+        if peak > 0:
+            max_dd = min(max_dd, (v - peak) / peak)
+    return max_dd
+
+
+def arbitrate(
+    candidates: list[_Candidate],
     initial_cash: float,
     trade_cost: float,
     kelly_fallback: float,
     max_trades_per_day: int,
-    vol_filter_tag: str = "suitable",
-    vol_filter_ok: bool = True,
     cost_model_name: str = "flat",
     currency: str = "GBP",
-) -> list[TradeRecord]:
-    """Run one strategy across all tickers with a shared capital pool. Returns executed TradeRecords."""
-    print(f"\n{'='*64}\n Strategy: {strategy_name}  (vol_filter={vol_filter_tag})\n{'='*64}")
+    price_by_ticker: dict[str, pd.Series] | None = None,
+) -> dict:
+    """Walk candidates day-by-day (event days only: opens/closes), arbitrating
+    entries against one shared, mutating cash pot. max_trades_per_day <= 0
+    means unlimited (cash alone gates admission).
 
-    all_candidates: list[_Candidate] = []
-    for ticker in tickers:
-        print(f"  fetching + backtesting {ticker}...")
-        cands = _fetch_and_extract(ticker, strategy_name, vol_filter_tag, vol_filter_ok)
-        cutoff = pd.Timestamp(start_date)
-        # Normalize to naive timestamps for comparison (hourly data is tz-aware)
-        cands = [c for c in cands if c.date_opened.tz_localize(None) >= cutoff]
-        print(f"    {len(cands)} candidate trade(s) on/after {start_date}")
-        all_candidates.extend(cands)
+    Returns a dict: executed (list[TradeRecord]), equity_curve (list[dict],
+    one row per event day — cash, deployed capital mark-to-market if
+    price_by_ticker is given else cost-basis, portfolio_value, cumulative
+    realized P&L, cumulative interest), total_interest, final_cash,
+    n_candidates, n_admitted, n_rejected_cash (candidates that couldn't be
+    sized due to insufficient cash — the diagnostic that actually supports a
+    "capital wasn't the constraint" conclusion, not peak-vs-pot alone).
 
-    all_candidates.sort(key=lambda c: c.date_opened)
+    Note: equity_curve is sampled at trade-event days only, not every calendar
+    day — for strategies with infrequent trades this is a sparse series. Do
+    not treat it as daily-resolution; it's sufficient for max drawdown
+    (well-defined regardless of sampling) but not for an annualized Sharpe,
+    which is why this function doesn't compute one.
+    """
+    candidates = sorted(candidates, key=lambda c: c.date_opened)
+    n_candidates = len(candidates)
 
-    # Group candidate opens by calendar day
+    if not candidates:
+        return {
+            "executed": [], "equity_curve": [], "total_interest": 0.0,
+            "final_cash": initial_cash, "n_candidates": 0, "n_admitted": 0,
+            "n_rejected_cash": 0,
+        }
+
     by_day: dict[pd.Timestamp, list[_Candidate]] = {}
-    for c in all_candidates:
+    for c in candidates:
         day = c.date_opened.tz_localize(None).normalize()
         by_day.setdefault(day, []).append(c)
 
     all_days = sorted(set(
         list(by_day.keys()) +
-        [c.date_closed.tz_localize(None).normalize() for c in all_candidates]
+        [c.date_closed.tz_localize(None).normalize() for c in candidates]
     ))
 
     cash = initial_cash
-    open_positions: list[dict] = []  # {date_closed, exit_proceeds}
+    open_positions: list[dict] = []  # {ticker, entry_price, date_closed, exit_proceeds, alloc}
     executed: list[TradeRecord] = []
+    equity_curve: list[dict] = []
     interest_model = IbkrTieredInterest(currency)
     total_interest = 0.0
+    n_admitted = 0
+    n_rejected_cash = 0
     prev_day = None
 
     for day in all_days:
-        # Accrue interest on idle cash for the gap since the last active day
-        # (all_days is sparse — only days with opens/closes — so scale by the
-        # actual elapsed days rather than once per list entry).
         if prev_day is not None:
             days_elapsed = (day - prev_day).days
             if days_elapsed > 0:
@@ -186,9 +320,10 @@ def simulate_strategy(
         day_candidates = sorted(by_day.get(day, []), key=lambda c: -c.entry_score)
         taken = 0
         for cand in day_candidates:
-            if taken >= max_trades_per_day:
+            if max_trades_per_day > 0 and taken >= max_trades_per_day:
                 break
             if cash <= trade_cost:
+                n_rejected_cash += 1
                 continue
 
             if cand.kelly_fraction and cand.kelly_fraction > 0:
@@ -204,31 +339,101 @@ def simulate_strategy(
                 exit_fee = model.cost(alloc * (1 + cand.return_pct), False)
             alloc = min(alloc, cash - entry_fee)
             if alloc <= 0:
+                n_rejected_cash += 1
                 continue
 
             cash -= (alloc + entry_fee)
             exit_proceeds = alloc * (1 + cand.return_pct) - exit_fee
             open_positions.append({
+                "ticker": cand.ticker,
+                "entry_price": cand.record.entry_price,
                 "date_closed": cand.date_closed.tz_localize(None).normalize(),
                 "exit_proceeds": exit_proceeds,
+                "alloc": alloc,
             })
 
             rec = cand.record
             rec.pnl_usd = exit_proceeds - alloc - entry_fee
             executed.append(rec)
             taken += 1
+            n_admitted += 1
 
         skipped = len(day_candidates) - taken
         if taken or skipped:
             print(f"    {day.date()}: took {taken}, skipped {skipped}  (cash={cash:,.2f})")
 
-    # Any positions still open at the end of the window: add back to cash as unrealised (not sold)
+        deployed = sum(_position_value(pos, day, price_by_ticker) for pos in open_positions)
+        equity_curve.append({
+            "date": day,
+            "cash": cash,
+            "deployed": deployed,
+            "n_open": len(open_positions),
+            "portfolio_value": cash + deployed,
+            "realized_pnl_cum": sum(r.pnl_usd for r in executed),
+            "interest_cum": total_interest,
+        })
+
     final_cash = cash + sum(p["exit_proceeds"] for p in open_positions)
 
+    return {
+        "executed": executed,
+        "equity_curve": equity_curve,
+        "total_interest": total_interest,
+        "final_cash": final_cash,
+        "n_candidates": n_candidates,
+        "n_admitted": n_admitted,
+        "n_rejected_cash": n_rejected_cash,
+    }
+
+
+def simulate_strategy(
+    tickers: list[str],
+    strategy_name: str,
+    start_date: str,
+    initial_cash: float,
+    trade_cost: float,
+    kelly_fallback: float,
+    max_trades_per_day: int,
+    vol_filter_tag: str = "suitable",
+    vol_filter_ok: bool = True,
+    cost_model_name: str = "flat",
+    currency: str = "GBP",
+) -> list[TradeRecord]:
+    """Run one strategy across all tickers with a shared capital pool. Returns executed TradeRecords.
+
+    Kept as a simple, single-pot, sequential entry point (backward compatible)
+    — delegates the actual day-by-day arbitration to arbitrate(). For a
+    parallelized, multi-pot-size, mark-to-market run see generate_candidates()
+    + arbitrate() directly (used by main() for --universe/--pot-sizes runs).
+    """
+    print(f"\n{'='*64}\n Strategy: {strategy_name}  (vol_filter={vol_filter_tag})\n{'='*64}")
+
+    all_candidates: list[_Candidate] = []
+    for ticker in tickers:
+        print(f"  fetching + backtesting {ticker}...")
+        cands = _fetch_and_extract(ticker, strategy_name, vol_filter_tag, vol_filter_ok)
+        cutoff = pd.Timestamp(start_date)
+        # Normalize to naive timestamps for comparison (hourly data is tz-aware)
+        cands = [c for c in cands if c.date_opened.tz_localize(None) >= cutoff]
+        print(f"    {len(cands)} candidate trade(s) on/after {start_date}")
+        all_candidates.extend(cands)
+
+    result = arbitrate(
+        all_candidates,
+        initial_cash=initial_cash,
+        trade_cost=trade_cost,
+        kelly_fallback=kelly_fallback,
+        max_trades_per_day=max_trades_per_day,
+        cost_model_name=cost_model_name,
+        currency=currency,
+        price_by_ticker=None,
+    )
+
+    executed = result["executed"]
     total_pnl = sum(r.pnl_usd for r in executed)
     print(f"\n  {strategy_name}: {len(executed)} trade(s) executed, "
-          f"final pot £{final_cash:,.2f} (P&L £{total_pnl:+,.2f} on £{initial_cash:,.0f} start, "
-          f"£{total_interest:,.2f} interest on idle cash)")
+          f"final pot £{result['final_cash']:,.2f} (P&L £{total_pnl:+,.2f} on £{initial_cash:,.0f} start, "
+          f"£{result['total_interest']:,.2f} interest on idle cash)")
 
     return executed
 
@@ -255,12 +460,29 @@ def _skip_records(unsuitable: list[str], strategy: str, start_date: str) -> list
     ]
 
 
+def _write_position_summary(rows: list[dict], path: Path) -> None:
+    """Write the per-(strategy, pot_size, date) equity-curve rows to a CSV."""
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(path, index=False)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="live-sim")
-    parser.add_argument("--tickers", nargs="+", required=True)
+    parser.add_argument("--tickers", nargs="+", default=None,
+                        help="Explicit ticker list. Mutually exclusive with --universe.")
+    parser.add_argument("--universe", action="store_true",
+                        help="Use the full S&P 500 + FTSE 100 universe (config/universe_sp_ftse.json) "
+                             "instead of --tickers.")
     parser.add_argument("--strategies", nargs="+", default=["default", "conservative", "trend"])
     parser.add_argument("--start-date", default="2026-01-12")
-    parser.add_argument("--initial-cash", type=float, default=10_000.0)
+    parser.add_argument("--initial-cash", type=float, default=10_000.0,
+                        help="Pot size per strategy. Ignored if --pot-sizes is given.")
+    parser.add_argument("--pot-sizes", type=float, nargs="+", default=None,
+                        help="Sweep multiple pot sizes per strategy against the same candidate "
+                             "trades (cheap — only the arbitration step re-runs per size, not the "
+                             "backtest). Default: just --initial-cash, one pot size.")
     parser.add_argument("--trade-cost", type=float, default=1.0)
     parser.add_argument("--cost-model", default="ibkr_tiered_spread", choices=COST_MODEL_CHOICES,
                         help="Transaction cost model for the capital sim: 'flat' = "
@@ -269,7 +491,12 @@ def main(argv: list[str] | None = None) -> int:
                              "+ SDRT on .L buys; 'ibkr_tiered_spread' adds a half-spread "
                              "estimate per side. Default: ibkr_tiered_spread.")
     parser.add_argument("--kelly-fallback", type=float, default=100.0)
-    parser.add_argument("--max-trades-per-day", type=int, default=1)
+    parser.add_argument("--max-trades-per-day", type=int, default=1,
+                        help="Daily cap on new position admissions. 0 (or negative) = unlimited "
+                             "(cash alone gates admission).")
+    parser.add_argument("--workers", type=int, default=2,
+                        help="Worker processes for parallel per-ticker candidate generation "
+                             "(default: 2). 1 = sequential.")
     parser.add_argument("--min-trend-quality", type=float, default=0.0,
                         help="Vol-filter cutoff: exclude tickers below this trend_quality score")
     parser.add_argument("--no-vol-filter", action="store_true",
@@ -279,12 +506,25 @@ def main(argv: list[str] | None = None) -> int:
                              "(other strategies in --strategies still get filtered)")
     parser.add_argument("--journal", default=None,
                         help="Journal CSV to append trades to (default: data/journals/live.csv)")
+    parser.add_argument("--position-summary", default=None,
+                        help="Path to write the per-(strategy,pot_size,date) equity-curve CSV "
+                             "(default: data/journals/live_sim_position_summary_<timestamp>.csv). "
+                             "Additive output — does not change --journal's default path/format.")
     args = parser.parse_args(argv)
 
-    print(f"Live simulation: {len(args.tickers)} tickers x {len(args.strategies)} strategies")
-    print(f"  start={args.start_date}  cash/strategy=£{args.initial_cash:,.0f}  "
+    if bool(args.tickers) == bool(args.universe):
+        parser.error("exactly one of --tickers or --universe is required")
+    if args.universe:
+        args.tickers = full_scan.load_sp_ftse_universe()
+
+    pot_sizes = args.pot_sizes if args.pot_sizes else [args.initial_cash]
+
+    print(f"Live simulation: {len(args.tickers)} tickers x {len(args.strategies)} strategies "
+          f"x {len(pot_sizes)} pot size(s)")
+    print(f"  start={args.start_date}  pot_sizes={pot_sizes}  "
           f"trade_cost=£{args.trade_cost:.2f}  kelly_fallback=£{args.kelly_fallback:.0f}  "
-          f"max_trades/day={args.max_trades_per_day}")
+          f"max_trades/day={'unlimited' if args.max_trades_per_day <= 0 else args.max_trades_per_day}  "
+          f"workers={args.workers}")
     if args.vol_filter_exempt:
         print(f"  vol-filter-exempt strategies: {', '.join(args.vol_filter_exempt)}")
 
@@ -297,6 +537,7 @@ def main(argv: list[str] | None = None) -> int:
                   f"{', '.join(unsuitable)}")
 
     all_executed: list[TradeRecord] = []
+    summary_rows: list[dict] = []
 
     for strategy_name in args.strategies:
         exempt = args.no_vol_filter or strategy_name in args.vol_filter_exempt
@@ -308,25 +549,68 @@ def main(argv: list[str] | None = None) -> int:
             vol_filter_tag = "suitable"
             all_executed.extend(_skip_records(unsuitable, strategy_name, args.start_date))
 
-        executed = simulate_strategy(
+        print(f"\n{'='*64}\n Strategy: {strategy_name}  (vol_filter={vol_filter_tag})\n{'='*64}")
+        candidates, price_by_ticker = generate_candidates(
             tickers=tickers_for_strategy,
             strategy_name=strategy_name,
-            start_date=args.start_date,
-            initial_cash=args.initial_cash,
-            trade_cost=args.trade_cost,
-            kelly_fallback=args.kelly_fallback,
-            max_trades_per_day=args.max_trades_per_day,
             vol_filter_tag=vol_filter_tag,
             # tickers_for_strategy is already screened (or the strategy is exempt) —
             # pass True explicitly so the strategy's own veto doesn't re-check.
             vol_filter_ok=True,
-            cost_model_name=args.cost_model,
+            workers=args.workers,
         )
-        all_executed.extend(executed)
+        cutoff = pd.Timestamp(args.start_date)
+        candidates = [c for c in candidates if c.date_opened.tz_localize(None) >= cutoff]
+        if candidates:
+            earliest = min(c.date_opened for c in candidates)
+            print(f"  {len(candidates)} candidate trade(s) on/after {args.start_date} "
+                  f"(earliest actual: {earliest.date()})")
+
+        for pot_size in pot_sizes:
+            result = arbitrate(
+                candidates,
+                initial_cash=pot_size,
+                trade_cost=args.trade_cost,
+                kelly_fallback=args.kelly_fallback,
+                max_trades_per_day=args.max_trades_per_day,
+                cost_model_name=args.cost_model,
+                currency="GBP",
+                price_by_ticker=price_by_ticker,
+            )
+            all_executed.extend(result["executed"])
+
+            total_pnl = sum(r.pnl_usd for r in result["executed"])
+            peak_deployed = max((row["deployed"] for row in result["equity_curve"]), default=0.0)
+            max_dd = _max_drawdown([row["portfolio_value"] for row in result["equity_curve"]])
+            print(f"  pot £{pot_size:,.0f}: {len(result['executed'])}/{result['n_candidates']} admitted "
+                  f"({result['n_rejected_cash']} rejected for cash), "
+                  f"final £{result['final_cash']:,.2f} (P&L £{total_pnl:+,.2f}, "
+                  f"peak deployed £{peak_deployed:,.2f}, max drawdown {max_dd*100:.1f}%)")
+
+            for row in result["equity_curve"]:
+                summary_rows.append({"strategy": strategy_name, "pot_size": pot_size, **row})
+            summary_rows.append({
+                "strategy": strategy_name, "pot_size": pot_size, "date": "SUMMARY",
+                "cash": result["final_cash"], "deployed": peak_deployed, "n_open": 0,
+                "portfolio_value": result["final_cash"], "realized_pnl_cum": total_pnl,
+                "interest_cum": result["total_interest"],
+                "n_candidates": result["n_candidates"], "n_admitted": result["n_admitted"],
+                "n_rejected_cash": result["n_rejected_cash"], "max_drawdown": max_dd,
+            })
 
     journal_path = Path(args.journal) if args.journal else LIVE_JOURNAL
     n_logged = append_trades(journal_path, all_executed)
     print(f"\n{'='*64}\n {n_logged} trade(s) logged to {journal_path}\n{'='*64}")
+
+    if summary_rows:
+        if args.position_summary:
+            summary_path = Path(args.position_summary)
+        else:
+            ts = pd.Timestamp.now().strftime("%Y%m%dT%H%M%S")
+            summary_path = LIVE_JOURNAL.parent / f"live_sim_position_summary_{ts}.csv"
+        _write_position_summary(summary_rows, summary_path)
+        print(f" position summary written to {summary_path}")
+
     return 0
 
 

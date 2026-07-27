@@ -682,6 +682,43 @@ class TestReconciliation:
         assert daemon_state["reconciliation_consecutive_error_days"] == 0
         assert daemon_state["reconciliation_alert_sent"] is False
 
+    def test_nightly_clean_pass_sends_roundup_email(self, monkeypatch):
+        """Successful reconciliation triggers nightly roundup email."""
+        daemon_state = {}
+        sent_emails = []
+
+        config = {
+            "overnight_timezone": "Europe/London",
+            "reconciliation_run_time": "21:30",
+            "markets": {"ftse": {"defaults": {}}}
+        }
+        run_mock = mock.Mock(return_value="clean")
+
+        def _portfolio_mock():
+            p = mock.Mock()
+            p.accrue_daily_interest.return_value = 0.0
+            p.save = mock.Mock()
+            return p
+
+        # Mock the email sending
+        def fake_roundup(results, failed):
+            sent_emails.append({"results": len(results), "failed": len(failed)})
+
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.markov_cli.live_daemon._send_nightly_roundup",
+            lambda cfg, logger: sent_emails.append({"called": True})
+        )
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(
+                2026, 7, 6, 21, 30, tzinfo=ZoneInfo("Europe/London"))
+            live_daemon.check_nightly_reconciliation(
+                config, daemon_state, _portfolio_mock(), mock.Mock(), mock.Mock(),
+                run_recon=run_mock, save_state=lambda s: None)
+
+        assert len(sent_emails) == 1
+        assert sent_emails[0]["called"] is True
+
     def test_reconciliation_default_wiring_saves_state(self, monkeypatch, tmp_path):
         """run_reconciliation with no injected params uses module-level save_daemon_state."""
         monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
@@ -1122,6 +1159,71 @@ def test_main_startup_reconciliation_retries_until_done(monkeypatch, config, tmp
     assert live_daemon.main([]) == 0
 
     assert len(startup_recon_calls) == 2  # Called twice: fails, retries, succeeds
+
+
+class TestNightlyRoundup:
+    """Nightly roundup email collection and sending."""
+
+    def test_send_nightly_roundup_collects_all_tickers(self, monkeypatch):
+        """Collect results for all in-scope tickers from all markets."""
+        sent = []
+
+        def fake_roundup(results, failed):
+            sent.append({"results": results, "failed": failed})
+
+        def fake_collect(ticker):
+            if ticker == "SPY":
+                return {"ticker": ticker, "current_signal": "BUY", "score": 2.5, "close": 450.0,
+                        "portfolio_value": 21000, "strategy_return": 0.05, "bh_return": 0.03}
+            elif ticker == "QQQ":
+                return {"ticker": ticker, "current_signal": "HOLD", "score": 0.5, "close": 350.0,
+                        "portfolio_value": 20500, "strategy_return": 0.025, "bh_return": 0.04}
+            return None
+
+        config = {
+            "markets": {
+                "us": {"defaults": {}},
+            }
+        }
+
+        monkeypatch.setattr("Strategy_Auto_Trader.markov_cli.live_daemon.load_in_scope_tickers",
+                          lambda market, logger: ["SPY", "QQQ"] if market == "us" else [])
+        monkeypatch.setattr("Strategy_Auto_Trader.markov_cli.batch._collect_results", fake_collect)
+        monkeypatch.setattr("Strategy_Auto_Trader.output.emailer.send_daily_roundup", fake_roundup)
+
+        live_daemon._send_nightly_roundup(config, mock.Mock())
+
+        assert len(sent) == 1
+        assert len(sent[0]["results"]) == 2
+        assert sent[0]["results"][0]["ticker"] == "SPY"
+        assert sent[0]["results"][1]["ticker"] == "QQQ"
+        assert len(sent[0]["failed"]) == 0
+
+    def test_send_nightly_roundup_handles_missing_results(self, monkeypatch):
+        """Failed tickers are recorded in failed list."""
+        sent = []
+
+        def fake_roundup(results, failed):
+            sent.append({"results": results, "failed": failed})
+
+        def fake_collect(ticker):
+            if ticker == "SPY":
+                return {"ticker": ticker, "current_signal": "BUY"}
+            return None  # QQQ has no result
+
+        config = {"markets": {"us": {"defaults": {}}}}
+
+        monkeypatch.setattr("Strategy_Auto_Trader.markov_cli.live_daemon.load_in_scope_tickers",
+                          lambda market, logger: ["SPY", "QQQ"] if market == "us" else [])
+        monkeypatch.setattr("Strategy_Auto_Trader.markov_cli.batch._collect_results", fake_collect)
+        monkeypatch.setattr("Strategy_Auto_Trader.output.emailer.send_daily_roundup", fake_roundup)
+
+        live_daemon._send_nightly_roundup(config, mock.Mock())
+
+        assert len(sent) == 1
+        assert len(sent[0]["results"]) == 1
+        assert len(sent[0]["failed"]) == 1
+        assert sent[0]["failed"][0]["ticker"] == "QQQ"
 
 
 class TestExecuteSignalsWithRetry:

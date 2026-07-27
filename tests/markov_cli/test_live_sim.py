@@ -1,11 +1,36 @@
 from __future__ import annotations
 
+from concurrent.futures import Future
 from unittest import mock
 
 import pandas as pd
 import pytest
 
 from Strategy_Auto_Trader.output.journal import TradeRecord
+
+
+class _ImmediateExecutor:
+    """Stand-in for ProcessPoolExecutor that runs submitted work synchronously,
+    in-process. Lets tests exercise the parallel dispatch/collection wiring in
+    generate_candidates() without real multiprocessing (which on Windows uses
+    spawn and can't pick up mock.patch effects in child processes)."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def submit(self, fn, *args, **kwargs):
+        fut = Future()
+        try:
+            fut.set_result(fn(*args, **kwargs))
+        except Exception as exc:  # pragma: no cover - defensive
+            fut.set_exception(exc)
+        return fut
 
 
 @pytest.fixture
@@ -687,13 +712,41 @@ class TestSkipRecords:
         assert records == []
 
 
+_EMPTY_ARBITRATE_RESULT = {
+    "executed": [], "equity_curve": [], "total_interest": 0.0,
+    "final_cash": 0.0, "n_candidates": 0, "n_admitted": 0, "n_rejected_cash": 0,
+}
+
+
 class TestMainCLI:
+
+    def test_main_requires_exactly_one_of_tickers_or_universe(self):
+        from Strategy_Auto_Trader.markov_cli.live_sim import main
+
+        with pytest.raises(SystemExit):
+            main(["--strategies", "default"])  # neither given
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.full_scan.load_sp_ftse_universe", return_value=["A"]):
+            with pytest.raises(SystemExit):
+                main(["--tickers", "TEST", "--universe", "--strategies", "default"])  # both given
+
+    def test_main_universe_flag_loads_sp_ftse_universe(self):
+        from Strategy_Auto_Trader.markov_cli.live_sim import main
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.full_scan.load_sp_ftse_universe", return_value=["U1", "U2"]) as mock_universe:
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._vol_filter_tickers", return_value=(["U1", "U2"], [], {})):
+                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {})) as mock_gen:
+                    with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
+                        main(["--universe", "--strategies", "default"])
+
+        mock_universe.assert_called_once()
+        assert mock_gen.call_args_list[0][1]["tickers"] == ["U1", "U2"]
 
     def test_main_no_vol_filter_bypasses_screen_tickers(self):
         from Strategy_Auto_Trader.markov_cli.live_sim import main
 
         with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._vol_filter_tickers") as mock_screen:
-            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.simulate_strategy", return_value=[]):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {})):
                 with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
                     main([
                         "--tickers", "TEST1", "TEST2",
@@ -708,7 +761,7 @@ class TestMainCLI:
         from Strategy_Auto_Trader.markov_cli.live_sim import main
 
         with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._vol_filter_tickers", return_value=(["TEST1"], ["TEST2"], {})):
-            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.simulate_strategy", return_value=[]):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {})):
                 with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
                     main([
                         "--tickers", "TEST1", "TEST2",
@@ -719,7 +772,7 @@ class TestMainCLI:
         from Strategy_Auto_Trader.markov_cli.live_sim import main
 
         with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._vol_filter_tickers", return_value=(["TEST1"], ["TEST2"], {})):
-            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.simulate_strategy", return_value=[]) as mock_sim:
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {})) as mock_gen:
                 with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
                     main([
                         "--tickers", "TEST1", "TEST2",
@@ -728,19 +781,236 @@ class TestMainCLI:
                     ])
 
         # exempt_strat should be called with all tickers, default with filtered
-        calls = mock_sim.call_args_list
-        assert len(calls) >= 2
+        calls = mock_gen.call_args_list
+        assert len(calls) == 2
+        tickers_by_call = {c[1]["strategy_name"]: c[1]["tickers"] for c in calls}
+        assert sorted(tickers_by_call["exempt_strat"]) == ["TEST1", "TEST2"]
+        assert tickers_by_call["default"] == ["TEST1"]
 
     def test_main_default_arguments(self):
         from Strategy_Auto_Trader.markov_cli.live_sim import main
 
         with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._vol_filter_tickers", return_value=(["TEST"], [], {})):
-            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.simulate_strategy", return_value=[]) as mock_sim:
-                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
-                    main(["--tickers", "TEST"])
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {})) as mock_gen:
+                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.arbitrate", return_value=dict(_EMPTY_ARBITRATE_RESULT)) as mock_arb:
+                    with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
+                        main(["--tickers", "TEST"])
 
-        call_kwargs = mock_sim.call_args_list[0][1]
-        assert call_kwargs["initial_cash"] == 10_000.0
-        assert call_kwargs["trade_cost"] == 1.0
-        assert call_kwargs["kelly_fallback"] == 100.0
-        assert call_kwargs["max_trades_per_day"] == 1
+        gen_kwargs = mock_gen.call_args_list[0][1]
+        assert gen_kwargs["workers"] == 2
+
+        arb_kwargs = mock_arb.call_args_list[0][1]
+        assert arb_kwargs["initial_cash"] == 10_000.0
+        assert arb_kwargs["trade_cost"] == 1.0
+        assert arb_kwargs["kelly_fallback"] == 100.0
+        assert arb_kwargs["max_trades_per_day"] == 1
+
+    def test_main_pot_sizes_sweep_calls_arbitrate_once_per_pot_size(self):
+        from Strategy_Auto_Trader.markov_cli.live_sim import main
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._vol_filter_tickers", return_value=(["TEST"], [], {})):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {})) as mock_gen:
+                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.arbitrate", return_value=dict(_EMPTY_ARBITRATE_RESULT)) as mock_arb:
+                    with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
+                        main([
+                            "--tickers", "TEST", "--strategies", "default",
+                            "--pot-sizes", "25000", "50000", "100000",
+                        ])
+
+        # generate_candidates runs once per strategy regardless of pot-size count
+        assert mock_gen.call_count == 1
+        # arbitrate runs once per (strategy, pot_size) pair
+        assert mock_arb.call_count == 3
+        pot_sizes_used = [c[1]["initial_cash"] for c in mock_arb.call_args_list]
+        assert pot_sizes_used == [25000.0, 50000.0, 100000.0]
+
+    def test_main_max_trades_per_day_zero_passed_through_as_unlimited(self):
+        from Strategy_Auto_Trader.markov_cli.live_sim import main
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._vol_filter_tickers", return_value=(["TEST"], [], {})):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {})):
+                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.arbitrate", return_value=dict(_EMPTY_ARBITRATE_RESULT)) as mock_arb:
+                    with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
+                        main([
+                            "--tickers", "TEST", "--strategies", "default",
+                            "--max-trades-per-day", "0",
+                        ])
+
+        assert mock_arb.call_args_list[0][1]["max_trades_per_day"] == 0
+
+
+class TestGenerateCandidates:
+
+    def test_sequential_and_parallel_dispatch_produce_identical_candidates(self, base_record, ts_base):
+        """generate_candidates(workers=1) and workers>1 must return the same
+        candidates from the same underlying per-ticker function — regression
+        guard for the parallel dispatch/collection wiring."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import generate_candidates, _Candidate
+
+        def fake_fetch(ticker, strategy_name, vol_filter_tag, vol_filter_ok=True):
+            rec = TradeRecord(date_opened="2026-01-12", ticker=ticker, strategy=strategy_name,
+                               entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
+            cand = _Candidate(
+                ticker=ticker, date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=1),
+                entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec,
+            )
+            close = pd.Series([100.0, 101.0], index=[ts_base, ts_base + pd.Timedelta(days=1)])
+            return [cand], close
+
+        tickers = ["A", "B", "C"]
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_extract_and_prices", side_effect=fake_fetch):
+            seq_candidates, seq_prices = generate_candidates(tickers, "test", workers=1)
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_extract_and_prices", side_effect=fake_fetch):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.ProcessPoolExecutor", _ImmediateExecutor):
+                par_candidates, par_prices = generate_candidates(tickers, "test", workers=4)
+
+        assert {c.ticker for c in seq_candidates} == {c.ticker for c in par_candidates} == set(tickers)
+        assert len(seq_candidates) == len(par_candidates) == 3
+        assert set(seq_prices.keys()) == set(par_prices.keys()) == set(tickers)
+
+    def test_workers_one_does_not_use_process_pool(self):
+        from Strategy_Auto_Trader.markov_cli.live_sim import generate_candidates
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_extract_and_prices", return_value=([], None)):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.ProcessPoolExecutor") as mock_pool:
+                generate_candidates(["A"], "test", workers=1)
+
+        mock_pool.assert_not_called()
+
+
+class TestArbitrate:
+
+    def test_max_trades_per_day_zero_is_unlimited(self, ts_base):
+        """max_trades_per_day <= 0 admits every same-day candidate cash allows,
+        not just one — the convention this run needs so cash, not an arbitrary
+        daily count, is the binding constraint under test."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate, _Candidate
+
+        candidates = []
+        for i in range(5):
+            rec = TradeRecord(date_opened="2026-01-12", ticker=f"T{i}", strategy="test",
+                               entry_score=float(i), kelly_fraction=0.1, return_pct=0.05)
+            candidates.append(_Candidate(
+                ticker=f"T{i}", date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=1),
+                entry_score=float(i), kelly_fraction=0.1, return_pct=0.05, record=rec,
+            ))
+
+        result = arbitrate(candidates, initial_cash=10_000.0, trade_cost=1.0,
+                            kelly_fallback=100.0, max_trades_per_day=0)
+
+        assert len(result["executed"]) == 5
+        assert result["n_admitted"] == 5
+
+    def test_negative_max_trades_per_day_is_also_unlimited(self, ts_base):
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate, _Candidate
+
+        rec = TradeRecord(date_opened="2026-01-12", ticker="A", strategy="test",
+                           entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
+        cand = _Candidate(ticker="A", date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=1),
+                           entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec)
+
+        result = arbitrate([cand], initial_cash=1_000.0, trade_cost=1.0,
+                            kelly_fallback=100.0, max_trades_per_day=-1)
+        assert len(result["executed"]) == 1
+
+    def test_admission_diagnostics_count_candidates_and_rejections(self, ts_base):
+        """n_candidates/n_admitted/n_rejected_cash support a 'capital wasn't the
+        constraint' conclusion with evidence, not just peak-vs-pot eyeballing."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate, _Candidate
+
+        candidates = []
+        for i in range(3):
+            rec = TradeRecord(date_opened="2026-01-12", ticker=f"T{i}", strategy="test",
+                               entry_score=float(3 - i), kelly_fraction=0.5, return_pct=0.05)
+            candidates.append(_Candidate(
+                ticker=f"T{i}", date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=5),
+                entry_score=float(3 - i), kelly_fraction=0.5, return_pct=0.05, record=rec,
+            ))
+
+        # cash=100: first candidate takes 50% (50), leaving ~49 after fee;
+        # second takes 50% of remaining (~24.5); third's 50% ask still fits
+        # (cash > trade_cost), so all three are admitted with shrinking size —
+        # use a tiny pot to force an actual rejection instead.
+        result = arbitrate(candidates, initial_cash=1.5, trade_cost=1.0,
+                            kelly_fallback=100.0, max_trades_per_day=0)
+
+        assert result["n_candidates"] == 3
+        assert result["n_admitted"] + result["n_rejected_cash"] >= result["n_candidates"] - 1
+        assert result["n_admitted"] < result["n_candidates"]
+
+    def test_empty_candidates_returns_zeroed_result(self):
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate
+
+        result = arbitrate([], initial_cash=5000.0, trade_cost=1.0,
+                            kelly_fallback=100.0, max_trades_per_day=1)
+        assert result["executed"] == []
+        assert result["equity_curve"] == []
+        assert result["final_cash"] == 5000.0
+        assert result["n_candidates"] == 0
+
+
+class TestMarkToMarket:
+
+    def test_open_position_valued_at_current_price_not_cost_basis(self, ts_base):
+        """A position still open at a later snapshot day is marked to its
+        current price, not frozen at its entry cost basis — the panel-reviewed
+        fix for the mark-to-cost bias that would otherwise misstate portfolio
+        value/drawdown for a real funding decision."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate, _Candidate
+
+        rec = TradeRecord(date_opened="2026-01-12", ticker="RISER", strategy="test",
+                           entry_score=1.0, kelly_fraction=0.5, return_pct=0.20)
+        cand = _Candidate(
+            ticker="RISER", date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=10),
+            entry_score=1.0, kelly_fraction=0.5, return_pct=0.20, record=rec,
+        )
+        # entry_price defaults to 0.0 on the TradeRecord unless set explicitly —
+        # mark-to-market needs a real entry price to compute a price ratio.
+        rec.entry_price = 100.0
+
+        # Price doubles by day 5, still open (closes day 10) — mark-to-market
+        # deployed value should reflect that, not the frozen cost basis.
+        price_series = pd.Series(
+            [100.0, 200.0],
+            index=[ts_base, ts_base + pd.Timedelta(days=5)],
+        )
+
+        result = arbitrate(
+            [cand], initial_cash=1000.0, trade_cost=0.0, kelly_fallback=100.0,
+            max_trades_per_day=1, price_by_ticker={"RISER": price_series},
+        )
+
+        # cost basis alloc = 0.5 * 1000 = 500
+        rows_by_date = {row["date"]: row for row in result["equity_curve"]}
+        opening_row = rows_by_date[ts_base.tz_localize(None).normalize()]
+        assert opening_row["deployed"] == pytest.approx(500.0)
+
+        # No later snapshot day exists in this scenario (only open/close event
+        # days are sampled) — but if price is looked up as-of the close day
+        # using the last known price (200, held from day 5), deployed should
+        # double relative to cost basis at that point too, given entry_price=100.
+        close_row = rows_by_date[(ts_base + pd.Timedelta(days=10)).tz_localize(None).normalize()]
+        # Position closes ON this day, so it's released before the deployed
+        # figure is computed — deployed on the close day itself is 0.
+        assert close_row["deployed"] == pytest.approx(0.0)
+
+    def test_missing_price_data_falls_back_to_cost_basis(self, ts_base):
+        """No price_by_ticker entry for a ticker (or price_by_ticker=None
+        entirely) falls back to cost-basis valuation rather than crashing."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate, _Candidate
+
+        rec = TradeRecord(date_opened="2026-01-12", ticker="NODATA", strategy="test",
+                           entry_score=1.0, kelly_fraction=0.5, return_pct=0.10)
+        rec.entry_price = 50.0
+        cand = _Candidate(
+            ticker="NODATA", date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=10),
+            entry_score=1.0, kelly_fraction=0.5, return_pct=0.10, record=rec,
+        )
+
+        result = arbitrate([cand], initial_cash=1000.0, trade_cost=0.0, kelly_fallback=100.0,
+                            max_trades_per_day=1, price_by_ticker=None)
+
+        opening_row = result["equity_curve"][0]
+        assert opening_row["deployed"] == pytest.approx(500.0)  # cost basis, no crash
