@@ -49,7 +49,7 @@ from ..plugins.costs import COST_MODEL_CHOICES, make_cost_model
 from ..plugins.interest import IbkrTieredInterest
 from ..plugins.persistent_hmm import PersistentHMMRegimeModel
 from ..quant_hmm.consolidated_engine import consolidated_backtest
-from ..quant_hmm.data_cache import fetch_hourly_cached
+from ..quant_hmm.data_cache import fetch_hourly_cached, fetch_hourly_stooq
 from ..quant_hmm.vol_screen import rolling_trend_quality
 from ..strategy.base.registry import resolve_strategy, wants_low_trend_quality
 
@@ -68,8 +68,112 @@ class _Candidate:
     record: TradeRecord
 
 
+def _recent_win_rate(candidates: list[_Candidate], ticker: str, lookback_days: int = 60) -> float:
+    """Win-rate for a ticker over lookback_days window (measured from latest candidate).
+
+    Returns fraction of trades that were profitable (return_pct > 0), or 0.5 if
+    no trades in window."""
+    ticker_cands = [c for c in candidates if c.ticker == ticker]
+    if not ticker_cands:
+        return 0.5
+
+    if lookback_days:
+        latest = max(c.date_opened for c in ticker_cands)
+        cutoff = latest - pd.Timedelta(days=lookback_days)
+        ticker_cands = [c for c in ticker_cands if c.date_opened >= cutoff]
+
+    if not ticker_cands:
+        return 0.5
+
+    wins = sum(1 for c in ticker_cands if c.return_pct > 0)
+    return wins / len(ticker_cands)
+
+
+def _trend_quality_asof(
+    ticker: str, when: pd.Timestamp, trend_quality_by_ticker: dict[str, pd.Series]
+) -> float | None:
+    """Look up trend_quality as of `when` (last known score at/before that moment).
+
+    Returns None if there's no series or insufficient data."""
+    series = trend_quality_by_ticker.get(ticker)
+    if series is None or series.empty:
+        return None
+
+    lookup = when
+    idx_tz = getattr(series.index, "tz", None)
+    if idx_tz is not None and lookup.tzinfo is None:
+        lookup = lookup.tz_localize(idx_tz)
+    elif idx_tz is None and lookup.tzinfo is not None:
+        lookup = lookup.tz_localize(None)
+
+    try:
+        score = series.asof(lookup)
+    except Exception:
+        return None
+    if score is None or (isinstance(score, float) and np.isnan(score)):
+        return None
+    return float(score)
+
+
+def _ticker_ranking_score(
+    ticker: str,
+    candidates: list[_Candidate],
+    trend_quality_by_ticker: dict[str, pd.Series],
+    as_of_date: pd.Timestamp,
+    vol_weight: float = 0.7,
+    win_rate_weight: float = 0.3,
+    lookback_days: int = 60,
+) -> float:
+    """Hybrid score: vol_weight * trend_quality_normalized + win_rate_weight * win_rate.
+
+    trend_quality is clipped to [0,1]; win_rate is [0,1]. Returns [0,1] combined score."""
+    tq = _trend_quality_asof(ticker, as_of_date, trend_quality_by_ticker)
+    if tq is None:
+        tq = 0.5
+    tq_normalized = max(0.0, min(1.0, tq))
+
+    wr = _recent_win_rate(candidates, ticker, lookback_days)
+    return vol_weight * tq_normalized + win_rate_weight * wr
+
+
+def _filter_candidates_by_top_tickers(
+    candidates: list[_Candidate],
+    trend_quality_by_ticker: dict[str, pd.Series],
+    top_k: int,
+    vol_weight: float = 0.7,
+    win_rate_weight: float = 0.3,
+    lookback_days: int = 60,
+) -> tuple[list[_Candidate], dict[str, float]]:
+    """Keep only candidates from top-K tickers by hybrid (vol + win-rate) ranking.
+
+    Each ticker is scored as median of all its candidate entry-day scores, then
+    top-K are selected. Returns (filtered_candidates, ticker_scores_dict for diagnostics)."""
+    if top_k <= 0:
+        return candidates, {}
+
+    ticker_scores_by_date: dict[str, list[float]] = {}
+    for c in candidates:
+        score = _ticker_ranking_score(
+            c.ticker, candidates, trend_quality_by_ticker, c.date_opened,
+            vol_weight, win_rate_weight, lookback_days
+        )
+        ticker_scores_by_date.setdefault(c.ticker, []).append(score)
+
+    ticker_median_score = {
+        ticker: float(np.median(scores))
+        for ticker, scores in ticker_scores_by_date.items()
+    }
+
+    top_tickers = set(sorted(ticker_median_score.keys(),
+                             key=lambda t: -ticker_median_score[t])[:top_k])
+
+    filtered = [c for c in candidates if c.ticker in top_tickers]
+    return filtered, ticker_median_score
+
+
 def _run_ticker_backtest(
-    ticker: str, strategy_name: str, vol_filter_ok: bool = True
+    ticker: str, strategy_name: str, vol_filter_ok: bool = True,
+    data_source: str = "yfinance"
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """Fetch data and run one ticker's full-history backtest.
 
@@ -82,7 +186,10 @@ def _run_ticker_backtest(
     data. The full OHLC frame (not just Close) is returned so callers needing
     High/Low (e.g. for rolling_trend_quality) don't have to re-fetch.
     """
-    df = fetch_hourly_cached(ticker, period="730d")
+    if data_source == "stooq":
+        df = fetch_hourly_stooq(ticker, period="730d")
+    else:
+        df = fetch_hourly_cached(ticker, period="730d")
     if df is None or df.empty:
         return None, None
     if isinstance(df.columns, pd.MultiIndex):
@@ -146,7 +253,8 @@ def _candidates_from_detail(
 
 
 def _fetch_and_extract(
-    ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True
+    ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True,
+    data_source: str = "yfinance"
 ) -> list[_Candidate]:
     """Run one ticker's full-history backtest and extract its round-trip trades.
 
@@ -154,7 +262,7 @@ def _fetch_and_extract(
     (baked into every Entry class) — this is a bool, not a re-lookup, since
     the caller has usually already screened the ticker once (efficiency).
     """
-    detail, _df = _run_ticker_backtest(ticker, strategy_name, vol_filter_ok)
+    detail, _df = _run_ticker_backtest(ticker, strategy_name, vol_filter_ok, data_source)
     if detail is None:
         print(f"  {ticker}: no data or insufficient data, skipping")
         return []
@@ -162,14 +270,15 @@ def _fetch_and_extract(
 
 
 def _fetch_extract_and_prices(
-    ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True
+    ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True,
+    data_source: str = "yfinance"
 ) -> tuple[list[_Candidate], pd.Series | None, pd.Series | None]:
     """Like _fetch_and_extract, but also returns the ticker's close-price series
     (for mark-to-market valuation) and its rolling trend_quality series (for
     daily vol-filter rescreening — see rolling_trend_quality()'s docstring for
     why a single "as of today" snapshot can't be used across a historical
     backtest). Top-level function so it's picklable for ProcessPoolExecutor."""
-    detail, df = _run_ticker_backtest(ticker, strategy_name, vol_filter_ok)
+    detail, df = _run_ticker_backtest(ticker, strategy_name, vol_filter_ok, data_source)
     if detail is None:
         return [], None, None
     candidates = _candidates_from_detail(ticker, detail, strategy_name, vol_filter_tag)
@@ -183,6 +292,7 @@ def generate_candidates(
     vol_filter_tag: str = "suitable",
     vol_filter_ok: bool = True,
     workers: int = 1,
+    data_source: str = "yfinance",
 ) -> tuple[list[_Candidate], dict[str, pd.Series], dict[str, pd.Series]]:
     """Generate one strategy's candidate trades across a ticker list, optionally
     in parallel, retaining each ticker's close-price series (mark-to-market)
@@ -198,7 +308,7 @@ def generate_candidates(
     if workers > 1 and len(tickers) > 1:
         with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(_fetch_extract_and_prices, t, strategy_name, vol_filter_tag, vol_filter_ok): t
+                executor.submit(_fetch_extract_and_prices, t, strategy_name, vol_filter_tag, vol_filter_ok, data_source): t
                 for t in tickers
             }
             for future in as_completed(futures):
@@ -211,7 +321,7 @@ def generate_candidates(
                     trend_quality_by_ticker[ticker] = trend_quality
     else:
         for ticker in tickers:
-            cands, close, trend_quality = _fetch_extract_and_prices(ticker, strategy_name, vol_filter_tag, vol_filter_ok)
+            cands, close, trend_quality = _fetch_extract_and_prices(ticker, strategy_name, vol_filter_tag, vol_filter_ok, data_source)
             all_candidates.extend(cands)
             if close is not None:
                 price_by_ticker[ticker] = close
@@ -460,34 +570,6 @@ def simulate_strategy(
     return executed
 
 
-def _trend_quality_asof(
-    ticker: str, when: pd.Timestamp, trend_quality_by_ticker: dict[str, pd.Series]
-) -> float | None:
-    """Look up a ticker's rolling trend_quality as of `when` (last known score
-    at/before that moment — the series is already shifted 1 day inside
-    rolling_trend_quality(), so this can't see same-day-or-later data). Returns
-    None if there's no series, or no non-NaN score yet (insufficient trailing
-    history) — callers should treat None as permissive, not exclusionary."""
-    series = trend_quality_by_ticker.get(ticker)
-    if series is None or series.empty:
-        return None
-
-    lookup = when
-    idx_tz = getattr(series.index, "tz", None)
-    if idx_tz is not None and lookup.tzinfo is None:
-        lookup = lookup.tz_localize(idx_tz)
-    elif idx_tz is None and lookup.tzinfo is not None:
-        lookup = lookup.tz_localize(None)
-
-    try:
-        score = series.asof(lookup)
-    except Exception:
-        return None
-    if score is None or (isinstance(score, float) and np.isnan(score)):
-        return None
-    return float(score)
-
-
 def _filter_candidates_by_daily_trend_quality(
     candidates: list[_Candidate],
     trend_quality_by_ticker: dict[str, pd.Series],
@@ -560,6 +642,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vol-filter-exempt", nargs="+", default=[],
                         help="Strategy names that trade the full ticker list, bypassing the vol filter "
                              "(other strategies in --strategies still get filtered)")
+    parser.add_argument("--top-k", type=int, default=0,
+                        help="Limit to top-K tickers by hybrid (vol_quality + win_rate) score "
+                             "(0 = no limit). Default: 0 (unlimited).")
+    parser.add_argument("--vol-weight", type=float, default=0.7,
+                        help="Weight for trend_quality in hybrid rank (0-1). Default: 0.7.")
+    parser.add_argument("--win-rate-weight", type=float, default=0.3,
+                        help="Weight for recent win-rate in hybrid rank (0-1). Default: 0.3.")
+    parser.add_argument("--lookback-days", type=int, default=60,
+                        help="Window for computing recent win-rate (days). Default: 60.")
+    parser.add_argument("--data-source", choices=["yfinance", "stooq"], default="yfinance",
+                        help="Data source: 'yfinance' (default, 2.9yr history) or 'stooq' "
+                             "(10+ yr from local data/stooq_raw/, hard-fails if missing)")
     parser.add_argument("--journal", default=None,
                         help="Journal CSV to append trades to (default: data/journals/live.csv)")
     parser.add_argument("--position-summary", default=None,
@@ -606,6 +700,7 @@ def main(argv: list[str] | None = None) -> int:
             # rescreen below.
             vol_filter_ok=True,
             workers=args.workers,
+            data_source=args.data_source,
         )
 
         cutoff = pd.Timestamp(args.start_date)
@@ -620,6 +715,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  daily vol gate: {len(candidates)}/{n_before} candidates survive "
                   f"(min_trend_quality={args.min_trend_quality}, "
                   f"{'inverted (wants choppy)' if wants_low else 'standard'})")
+
+        if args.top_k > 0:
+            n_before = len(candidates)
+            candidates, ticker_scores = _filter_candidates_by_top_tickers(
+                candidates, trend_quality_by_ticker, args.top_k,
+                vol_weight=args.vol_weight, win_rate_weight=args.win_rate_weight,
+                lookback_days=args.lookback_days,
+            )
+            top_tickers_list = sorted(ticker_scores.keys(),
+                                      key=lambda t: -ticker_scores[t])[:args.top_k]
+            print(f"  top-k filter: {len(candidates)}/{n_before} candidates from {args.top_k} best tickers")
+            print(f"    selected: {', '.join(top_tickers_list)}")
+            for t in top_tickers_list[:5]:
+                print(f"      {t}: score={ticker_scores.get(t, 0):.3f}")
+            if len(top_tickers_list) > 5:
+                print(f"      ... and {len(top_tickers_list) - 5} more")
 
         if candidates:
             earliest = min(c.date_opened for c in candidates)

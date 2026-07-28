@@ -19,6 +19,9 @@ calling them directly.
 
 from __future__ import annotations
 
+import os
+import pandas as pd
+
 from ..quant_hmm.quant_engine import fetch_hourly
 from ..quant_hmm.vol_screen import volatility_profile
 
@@ -59,3 +62,51 @@ def volatility_profile_cached(ticker: str, period: str = "2y"):
         if cached is not None:
             _cache[key] = cached
     return cached
+
+
+def fetch_hourly_stooq(ticker: str, period: str = "730d") -> pd.DataFrame | None:
+    """Fetch hourly OHLCV data from local Stooq CSV files.
+
+    Reads from data/stooq_raw/ directory structure:
+      data/stooq_raw/data/hourly/us/{ticker}.txt
+      data/stooq_raw/data/hourly/gb/{ticker}.txt (for .L suffix)
+
+    Stooq CSV format: Date,Open,High,Low,Close,Volume
+    Returns DataFrame with datetime index, same schema as yfinance.
+
+    Hard-fails if ticker not found (no fallback to yfinance).
+    """
+    stooq_base = os.path.join(os.path.dirname(__file__), "..", "..", "data", "stooq_raw")
+
+    # Normalize ticker: .L suffix maps to gb/ directory, others to us/
+    if ticker.endswith(".L"):
+        clean_ticker = ticker[:-2].lower()  # Remove .L, lowercase for filename
+        market = "gb"
+    else:
+        clean_ticker = ticker.lower()  # Lowercase for filename
+        market = "us"
+
+    csv_path = os.path.join(stooq_base, "data", "hourly", market, f"{clean_ticker}.txt")
+
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"Stooq file not found: {csv_path} (ticker: {ticker})")
+
+    try:
+        df = pd.read_csv(csv_path, parse_dates=["Date"], index_col="Date")
+        if df.empty:
+            raise ValueError(f"Stooq file empty: {csv_path}")
+
+        # Ensure columns match yfinance schema [Open, High, Low, Close, Volume]
+        required_cols = ["Open", "High", "Low", "Close", "Volume"]
+        if not all(col in df.columns for col in required_cols):
+            raise ValueError(f"Missing columns in {csv_path}. Expected {required_cols}, got {list(df.columns)}")
+
+        # Keep only required columns in yfinance order
+        df = df[required_cols]
+
+        # Sort by date ascending (ensure chronological order)
+        df = df.sort_index()
+
+        return df
+    except Exception as e:
+        raise RuntimeError(f"Failed to parse Stooq file {csv_path}: {e}") from e
