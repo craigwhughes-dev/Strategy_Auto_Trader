@@ -49,7 +49,7 @@ from ..plugins.costs import COST_MODEL_CHOICES, make_cost_model
 from ..plugins.interest import IbkrTieredInterest
 from ..plugins.persistent_hmm import PersistentHMMRegimeModel
 from ..quant_hmm.consolidated_engine import consolidated_backtest
-from ..quant_hmm.data_cache import fetch_hourly_cached, fetch_hourly_stooq
+from ..quant_hmm.data_cache import fetch_hourly_cached
 from ..quant_hmm.vol_screen import rolling_trend_quality
 from ..strategy.base.registry import resolve_strategy, wants_low_trend_quality
 
@@ -173,7 +173,6 @@ def _filter_candidates_by_top_tickers(
 
 def _run_ticker_backtest(
     ticker: str, strategy_name: str, vol_filter_ok: bool = True,
-    data_source: str = "yfinance"
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """Fetch data and run one ticker's full-history backtest.
 
@@ -186,10 +185,7 @@ def _run_ticker_backtest(
     data. The full OHLC frame (not just Close) is returned so callers needing
     High/Low (e.g. for rolling_trend_quality) don't have to re-fetch.
     """
-    if data_source == "stooq":
-        df = fetch_hourly_stooq(ticker, period="730d")
-    else:
-        df = fetch_hourly_cached(ticker, period="730d")
+    df = fetch_hourly_cached(ticker, period="730d")
     if df is None or df.empty:
         return None, None
     if isinstance(df.columns, pd.MultiIndex):
@@ -254,7 +250,6 @@ def _candidates_from_detail(
 
 def _fetch_and_extract(
     ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True,
-    data_source: str = "yfinance"
 ) -> list[_Candidate]:
     """Run one ticker's full-history backtest and extract its round-trip trades.
 
@@ -262,7 +257,7 @@ def _fetch_and_extract(
     (baked into every Entry class) — this is a bool, not a re-lookup, since
     the caller has usually already screened the ticker once (efficiency).
     """
-    detail, _df = _run_ticker_backtest(ticker, strategy_name, vol_filter_ok, data_source)
+    detail, _df = _run_ticker_backtest(ticker, strategy_name, vol_filter_ok)
     if detail is None:
         print(f"  {ticker}: no data or insufficient data, skipping")
         return []
@@ -271,14 +266,13 @@ def _fetch_and_extract(
 
 def _fetch_extract_and_prices(
     ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True,
-    data_source: str = "yfinance"
 ) -> tuple[list[_Candidate], pd.Series | None, pd.Series | None]:
     """Like _fetch_and_extract, but also returns the ticker's close-price series
     (for mark-to-market valuation) and its rolling trend_quality series (for
     daily vol-filter rescreening — see rolling_trend_quality()'s docstring for
     why a single "as of today" snapshot can't be used across a historical
     backtest). Top-level function so it's picklable for ProcessPoolExecutor."""
-    detail, df = _run_ticker_backtest(ticker, strategy_name, vol_filter_ok, data_source)
+    detail, df = _run_ticker_backtest(ticker, strategy_name, vol_filter_ok)
     if detail is None:
         return [], None, None
     candidates = _candidates_from_detail(ticker, detail, strategy_name, vol_filter_tag)
@@ -292,7 +286,6 @@ def generate_candidates(
     vol_filter_tag: str = "suitable",
     vol_filter_ok: bool = True,
     workers: int = 1,
-    data_source: str = "yfinance",
 ) -> tuple[list[_Candidate], dict[str, pd.Series], dict[str, pd.Series]]:
     """Generate one strategy's candidate trades across a ticker list, optionally
     in parallel, retaining each ticker's close-price series (mark-to-market)
@@ -308,7 +301,7 @@ def generate_candidates(
     if workers > 1 and len(tickers) > 1:
         with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(_fetch_extract_and_prices, t, strategy_name, vol_filter_tag, vol_filter_ok, data_source): t
+                executor.submit(_fetch_extract_and_prices, t, strategy_name, vol_filter_tag, vol_filter_ok): t
                 for t in tickers
             }
             for future in as_completed(futures):
@@ -321,7 +314,7 @@ def generate_candidates(
                     trend_quality_by_ticker[ticker] = trend_quality
     else:
         for ticker in tickers:
-            cands, close, trend_quality = _fetch_extract_and_prices(ticker, strategy_name, vol_filter_tag, vol_filter_ok, data_source)
+            cands, close, trend_quality = _fetch_extract_and_prices(ticker, strategy_name, vol_filter_tag, vol_filter_ok)
             all_candidates.extend(cands)
             if close is not None:
                 price_by_ticker[ticker] = close
@@ -651,9 +644,6 @@ def main(argv: list[str] | None = None) -> int:
                         help="Weight for recent win-rate in hybrid rank (0-1). Default: 0.3.")
     parser.add_argument("--lookback-days", type=int, default=60,
                         help="Window for computing recent win-rate (days). Default: 60.")
-    parser.add_argument("--data-source", choices=["yfinance", "stooq"], default="yfinance",
-                        help="Data source: 'yfinance' (default, 2.9yr history) or 'stooq' "
-                             "(10+ yr from local data/stooq_raw/, hard-fails if missing)")
     parser.add_argument("--journal", default=None,
                         help="Journal CSV to append trades to (default: data/journals/live.csv)")
     parser.add_argument("--position-summary", default=None,
@@ -700,7 +690,6 @@ def main(argv: list[str] | None = None) -> int:
             # rescreen below.
             vol_filter_ok=True,
             workers=args.workers,
-            data_source=args.data_source,
         )
 
         cutoff = pd.Timestamp(args.start_date)
