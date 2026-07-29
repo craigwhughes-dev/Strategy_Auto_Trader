@@ -44,6 +44,14 @@ class StandardExitRules:
         self._exit_on_consolidation = exit_on_consolidation
         self._use_sar_stop = use_sar_stop
 
+    @property
+    def exit_on_macd_cross(self) -> bool:
+        return self._exit_on_macd_cross
+
+    @property
+    def exit_on_rsi_reversal(self) -> bool:
+        return self._exit_on_rsi_reversal
+
     def check(self, trade: TradeState, bar: BarData) -> ExitResult:
         """Evaluate all exit conditions for one bar in priority order."""
         eff_stop = _effective_stop_for_bar(

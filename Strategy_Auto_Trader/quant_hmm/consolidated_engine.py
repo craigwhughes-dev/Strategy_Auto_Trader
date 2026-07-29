@@ -449,12 +449,23 @@ def consolidated_backtest(
 
     vol_ratio_arr = _compute_volume_ratio(volume, n)
 
+    # A strategy's own hardcoded exit-indicator default (e.g. BreakoutMomentumExit's
+    # exit_on_macd_cross=True) must activate the indicator series here even when the
+    # CLI didn't also pass --exit-macd-cross — OR, not override, so an explicit CLI
+    # flag still forces the series on for a strategy whose own default is False.
+    _exit_on_macd_cross_eff = exit_on_macd_cross or (
+        getattr(exit_strategy, "exit_on_macd_cross", False) if exit_strategy is not None else False
+    )
+    _exit_on_rsi_reversal_eff = exit_on_rsi_reversal or (
+        getattr(exit_strategy, "exit_on_rsi_reversal", False) if exit_strategy is not None else False
+    )
+
     close_s = pd.Series(close, index=dates)
     pre = _precompute_hourly_vote_series(
         close_s, volume,
         rsi_period=rsi_period, ma_fast=ma_fast, ma_slow=ma_slow, ma_trend=ma_trend,
         vol_stop_window=vol_stop_window,
-        exit_on_macd_cross=exit_on_macd_cross, exit_on_rsi_reversal=exit_on_rsi_reversal,
+        exit_on_macd_cross=_exit_on_macd_cross_eff, exit_on_rsi_reversal=_exit_on_rsi_reversal_eff,
         exit_on_consolidation=exit_on_consolidation,
         use_sar_stop=use_sar_stop, sar_af_start=sar_af_start,
         sar_af_step=sar_af_step, sar_af_max=sar_af_max,

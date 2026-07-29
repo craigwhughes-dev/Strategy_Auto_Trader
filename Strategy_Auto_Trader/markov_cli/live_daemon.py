@@ -209,6 +209,12 @@ def acquire_process_lock(logger: logging.Logger, takeover: bool = False) -> bool
             if holder is not None and not _kill_daemon_process(holder, logger):
                 logger.critical("Takeover failed: could not kill lock holder")
                 return False
+            # _kill_daemon_process can itself take ~10s (wait_procs timeouts);
+            # give the retry loop its own fresh window to observe the lock
+            # release instead of inheriting whatever remains of the pre-kill
+            # deadline, which could already be exhausted by a slow kill.
+            deadline = time.time() + 15
+            continue
         if time.time() > deadline:
             logger.critical("Takeover failed: lock still held after kill")
             return False

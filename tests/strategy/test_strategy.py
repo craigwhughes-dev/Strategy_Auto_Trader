@@ -67,6 +67,33 @@ class TestStrategy:
         with pytest.raises(KeyError, match="Unknown strategy"):
             resolve_strategy("banana")
 
+    def test_resolve_strategy_entry_overrides_flow_through(self):
+        from Strategy_Auto_Trader.strategy.base.registry import resolve_strategy
+        entry, _ = resolve_strategy(
+            "optimised", entry_overrides={"buy_threshold": 1.0, "quality_gate_enabled": False},
+        )
+        assert entry._buy_t == 1.0
+        assert entry._quality_gate_enabled is False
+
+    def test_resolve_strategy_exit_overrides_flow_through(self):
+        from Strategy_Auto_Trader.strategy.base.registry import resolve_strategy
+        _, exit_ = resolve_strategy(
+            "optimised", exit_overrides={"trailing_stop": 0.15, "take_profit_pct": 999.0},
+        )
+        assert exit_.take_profit_pct == 999.0
+        assert exit_._impl._trailing_stop == 0.15
+
+    def test_resolve_strategy_no_overrides_unaffected(self):
+        from Strategy_Auto_Trader.strategy.base.registry import resolve_strategy
+        entry, exit_ = resolve_strategy("optimised")
+        assert entry._buy_t == 6.0
+        assert exit_.stop_loss_pct == 0.08
+
+    def test_resolve_strategy_unsupported_override_raises(self):
+        from Strategy_Auto_Trader.strategy.base.registry import resolve_strategy
+        with pytest.raises(TypeError):
+            resolve_strategy("choppy_vol", entry_overrides={"buy_threshold": 1.0})
+
     # -- DefaultEntry behaviour -------------------------------------------------
 
     def test_default_entry_evaluate_returns_entry_decision(self):
@@ -283,8 +310,7 @@ class TestStrategy:
         from Strategy_Auto_Trader.strategy.conservative import ConservativeEntry
         from Strategy_Auto_Trader.strategy.trend_follow import TrendEntry
         from Strategy_Auto_Trader.strategy.breakout_momentum import BreakoutMomentumEntry
-        from Strategy_Auto_Trader.strategy.ai_strategy import AiEntry
-        for cls in (DefaultEntry, ConservativeEntry, TrendEntry, BreakoutMomentumEntry, AiEntry):
+        for cls in (DefaultEntry, ConservativeEntry, TrendEntry, BreakoutMomentumEntry):
             assert cls.quality_gate_enabled is True
 
     def test_quality_gate_enabled_false_on_partial_gate_strategies(self):

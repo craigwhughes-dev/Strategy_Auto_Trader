@@ -13,66 +13,27 @@ To register a new strategy:
 
 from __future__ import annotations
 
-from ..ai_optimised import AiOptimisedEntry, AiOptimisedExit
-from ..ai_strategy import AiEntry, AiExit
 from ..breakout_momentum import BreakoutMomentumEntry, BreakoutMomentumExit
-from ..breakout_momentum_optimised import (
-    BreakoutMomentumOptimisedEntry,
-    BreakoutMomentumOptimisedExit,
-)
 from ..choppy_vol import ChoppyVolEntry, ChoppyVolExit
-from ..choppy_vol_optimised import ChoppyVolOptimisedEntry, ChoppyVolOptimisedExit
 from ..conservative import ConservativeEntry, ConservativeExit
-from ..conservative_optimised import ConservativeOptimisedEntry, ConservativeOptimisedExit
 from ..default import DefaultEntry, DefaultExit
 from ..mean_reversion import MeanReversionEntry, MeanReversionExit
 from ..optimised import OptimisedEntry, OptimisedExit
-from ..optimised_aggressive import OptimisedAggressiveEntry, OptimisedAggressiveExit
-from ..optimised_aggressive_optimised import (
-    OptimisedAggressiveOptimisedEntry,
-    OptimisedAggressiveOptimisedExit,
-)
-from ..optimised_optimised import OptimisedOptimisedEntry, OptimisedOptimisedExit
-from ..optimised_pbull import OptimisedPbullEntry, OptimisedPbullExit
-from ..optimised_regime import OptimisedRegimeEntry, OptimisedRegimeExit
-from ..optimised_rsi import OptimisedRsiEntry, OptimisedRsiExit
-from ..optimised_score7 import OptimisedScore7Entry, OptimisedScore7Exit
-from ..optimised_volume import OptimisedVolumeEntry, OptimisedVolumeExit
+from ..optimised_new import OptimisedNewEntry, OptimisedNewExit
 from ..trend_follow import TrendEntry, TrendExit
-from ..trend_optimised import TrendOptimisedEntry, TrendOptimisedExit
 
 STRATEGY_REGISTRY: dict[str, dict[str, type]] = {
-    "ai": {
-        "entry": AiEntry,
-        "exit":  AiExit,
-    },
-    "ai_optimised": {
-        "entry": AiOptimisedEntry,
-        "exit":  AiOptimisedExit,
-    },
     "breakout_momentum": {
         "entry": BreakoutMomentumEntry,
         "exit":  BreakoutMomentumExit,
-    },
-    "breakout_momentum_optimised": {
-        "entry": BreakoutMomentumOptimisedEntry,
-        "exit":  BreakoutMomentumOptimisedExit,
     },
     "choppy_vol": {
         "entry": ChoppyVolEntry,
         "exit":  ChoppyVolExit,
     },
-    "choppy_vol_optimised": {
-        "entry": ChoppyVolOptimisedEntry,
-        "exit":  ChoppyVolOptimisedExit,
-    },
     "conservative": {
         "entry": ConservativeEntry,
         "exit":  ConservativeExit,
-    },
-    "conservative_optimised": {
-        "entry": ConservativeOptimisedEntry,
-        "exit":  ConservativeOptimisedExit,
     },
     "default": {
         "entry": DefaultEntry,
@@ -86,45 +47,13 @@ STRATEGY_REGISTRY: dict[str, dict[str, type]] = {
         "entry": OptimisedEntry,
         "exit":  OptimisedExit,
     },
-    "optimised_aggressive": {
-        "entry": OptimisedAggressiveEntry,
-        "exit":  OptimisedAggressiveExit,
-    },
-    "optimised_aggressive_optimised": {
-        "entry": OptimisedAggressiveOptimisedEntry,
-        "exit":  OptimisedAggressiveOptimisedExit,
-    },
-    "optimised_optimised": {
-        "entry": OptimisedOptimisedEntry,
-        "exit":  OptimisedOptimisedExit,
-    },
-    "optimised_pbull": {
-        "entry": OptimisedPbullEntry,
-        "exit":  OptimisedPbullExit,
-    },
-    "optimised_regime": {
-        "entry": OptimisedRegimeEntry,
-        "exit":  OptimisedRegimeExit,
-    },
-    "optimised_rsi": {
-        "entry": OptimisedRsiEntry,
-        "exit":  OptimisedRsiExit,
-    },
-    "optimised_score7": {
-        "entry": OptimisedScore7Entry,
-        "exit":  OptimisedScore7Exit,
-    },
-    "optimised_volume": {
-        "entry": OptimisedVolumeEntry,
-        "exit":  OptimisedVolumeExit,
+    "optimised_new": {
+        "entry": OptimisedNewEntry,
+        "exit":  OptimisedNewExit,
     },
     "trend": {
         "entry": TrendEntry,
         "exit":  TrendExit,
-    },
-    "trend_optimised": {
-        "entry": TrendOptimisedEntry,
-        "exit":  TrendOptimisedExit,
     },
 }
 
@@ -134,6 +63,8 @@ def resolve_strategy(
     ticker: str | None = None,
     vol_filter_ok: bool | None = None,
     min_trend_quality: float = 0.0,
+    entry_overrides: dict | None = None,
+    exit_overrides: dict | None = None,
 ) -> tuple[object, object]:
     """Instantiate the entry and exit classes for a named strategy.
 
@@ -152,6 +83,14 @@ def resolve_strategy(
     filter applied automatically. With neither, the filter defaults to
     "on"/permissive (True) since there is no ticker to evaluate.
 
+    entry_overrides/exit_overrides are splatted directly into the strategy's
+    Entry/Exit constructors on top of vol_filter_ok — every strategy owns its
+    own defaults (see its module), these only override what's explicitly
+    passed. An override a given strategy's constructor doesn't accept (e.g.
+    buy_threshold on "choppy_vol") raises a normal TypeError — no silent
+    degrade, since nothing in this codebase applies one override set across
+    varying --strategy values today.
+
     Returns (entry_instance, exit_instance).
     Raises KeyError for unknown names.
     """
@@ -169,7 +108,9 @@ def resolve_strategy(
             if prof is not None:
                 vol_filter_ok = prof["trend_quality"] >= min_trend_quality
 
-    return cls_map["entry"](vol_filter_ok=vol_filter_ok), cls_map["exit"]()
+    entry = cls_map["entry"](vol_filter_ok=vol_filter_ok, **(entry_overrides or {}))
+    exit_ = cls_map["exit"](**(exit_overrides or {}))
+    return entry, exit_
 
 
 def wants_low_trend_quality(name: str) -> bool:

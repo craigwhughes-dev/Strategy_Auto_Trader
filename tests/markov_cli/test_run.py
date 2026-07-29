@@ -15,10 +15,12 @@ class TestRun:
         assert args.ticker == "AAPL"
         assert args.entry_prob == 0.65
         assert args.exit_prob == 0.40
-        assert args.stop_loss_pct == 0.05
-        assert args.take_profit_pct == 0.15
+        # Strategy-owned tunables are argparse.SUPPRESS'd when omitted — the
+        # selected strategy's own default applies instead of a CLI-wide one.
+        assert not hasattr(args, "stop_loss_pct")
+        assert not hasattr(args, "take_profit_pct")
+        assert not hasattr(args, "buy_threshold")
         assert args.use_kelly is True
-        assert args.buy_threshold == 3.0
         assert args.regime_smooth == 24
         assert args.min_hold_bars == 48
         assert args.skip_unused_indicators is True
@@ -34,6 +36,58 @@ class TestRun:
         assert _build_arg_parser().parse_args(["--ticker", "AAPL"]).signal_reports_only is False
         args = _build_arg_parser().parse_args(["--ticker", "AAPL", "--signal-reports-only"])
         assert args.signal_reports_only is True
+
+    def test_build_strategy_overrides_empty_when_nothing_explicit(self):
+        from Strategy_Auto_Trader.markov_cli.run import _build_arg_parser, _build_strategy_overrides
+        args = _build_arg_parser().parse_args(["--ticker", "AAPL", "--strategy", "optimised"])
+        entry_overrides, exit_overrides = _build_strategy_overrides(args)
+        assert entry_overrides == {}
+        assert exit_overrides == {}
+
+    def test_build_strategy_overrides_picks_up_explicit_exit_flags(self):
+        from Strategy_Auto_Trader.markov_cli.run import _build_arg_parser, _build_strategy_overrides
+        args = _build_arg_parser().parse_args([
+            "--ticker", "AAPL", "--strategy", "optimised",
+            "--trailing-stop", "0.15", "--profit-stop-scale", "0.3",
+            "--take-profit-pct", "999", "--min-stop", "0.02",
+        ])
+        entry_overrides, exit_overrides = _build_strategy_overrides(args)
+        assert entry_overrides == {}
+        assert exit_overrides == {
+            "trailing_stop": 0.15, "profit_stop_scale": 0.3,
+            "take_profit_pct": 999.0, "min_stop_pct": 0.02,
+        }
+
+    def test_build_strategy_overrides_picks_up_explicit_entry_flags(self):
+        from Strategy_Auto_Trader.markov_cli.run import _build_arg_parser, _build_strategy_overrides
+        args = _build_arg_parser().parse_args([
+            "--ticker", "AAPL", "--strategy", "optimised",
+            "--buy-threshold", "1.0", "--sell-threshold", "-1.0",
+        ])
+        entry_overrides, exit_overrides = _build_strategy_overrides(args)
+        assert entry_overrides == {"buy_threshold": 1.0, "sell_threshold": -1.0}
+        assert exit_overrides == {}
+
+    def test_build_strategy_overrides_plugin_gate_none(self):
+        from Strategy_Auto_Trader.markov_cli.run import _build_arg_parser, _build_strategy_overrides
+        args = _build_arg_parser().parse_args([
+            "--ticker", "AAPL", "--strategy", "optimised", "--plugin-gate", "none",
+        ])
+        entry_overrides, _ = _build_strategy_overrides(args)
+        assert entry_overrides == {"quality_gate_enabled": False}
+
+    def test_backfill_tunable_defaults_fills_only_missing(self):
+        from Strategy_Auto_Trader.markov_cli.run import (
+            _build_arg_parser, _backfill_tunable_defaults, _TUNABLE_DEFAULTS,
+        )
+        args = _build_arg_parser().parse_args([
+            "--ticker", "AAPL", "--stop-loss-pct", "0.5",
+        ])
+        _backfill_tunable_defaults(args)
+        assert args.stop_loss_pct == 0.5  # explicit value untouched
+        for key, value in _TUNABLE_DEFAULTS.items():
+            if key != "stop_loss_pct":
+                assert getattr(args, key) == value  # backfilled
 
     def test_fetch_company_info_success(self):
         from Strategy_Auto_Trader.markov_cli import run as run_mod

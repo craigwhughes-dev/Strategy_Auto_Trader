@@ -24,7 +24,6 @@ from ..output.charting import plot_backtest
 from ..output.report import write_daily_summary
 from ..plugins.costs import COST_MODEL_CHOICES, make_cost_model
 from ..plugins.kelly_sizer import FixedSizer, KellySizer
-from ..plugins.quality_gate import NullQualityGate, QualityGatePlugin
 from ..plugins.context_adjuster import NullAdjuster, SentimentAdjuster
 from ..strategy.base.registry import STRATEGY_REGISTRY, resolve_strategy
 
@@ -59,10 +58,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         help="P(Bull) threshold to consider entry (default: 0.65)")
     parser.add_argument("--exit-prob", type=float, default=0.40,
                         help="P(Bull) threshold for regime exit after min-hold (default: 0.40)")
-    parser.add_argument("--buy-threshold", type=float, default=3.0,
-                        help="Composite score needed to trigger BUY (default: 3.0)")
-    parser.add_argument("--sell-threshold", type=float, default=-3.0,
-                        help="Composite score triggering SELL (default: -3.0)")
+    parser.add_argument("--buy-threshold", type=float, default=argparse.SUPPRESS,
+                        help="Composite score needed to trigger BUY (default: the "
+                             "selected strategy's own default; 3.0 for 'default')")
+    parser.add_argument("--sell-threshold", type=float, default=argparse.SUPPRESS,
+                        help="Composite score triggering SELL (default: the "
+                             "selected strategy's own default; -3.0 for 'default')")
     parser.add_argument("--volume-min-ratio", type=float, default=0.8,
                         help="Volume / 100-bar average minimum for entry (default: 0.8)")
     parser.add_argument("--regime-smooth", type=int, default=24,
@@ -70,23 +71,26 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-hold-bars", type=int, default=48,
                         help="Minimum bars held before regime-exit or signal-SELL (default: 48)")
 
-    # Stop-loss / take-profit
-    parser.add_argument("--stop-loss-pct", type=float, default=0.05,
-                        help="Hard stop-loss fraction from entry (default: 0.05 = 5%%)")
-    parser.add_argument("--take-profit-pct", type=float, default=0.15,
-                        help="Hard take-profit fraction from entry (default: 0.15 = 15%%)")
+    # Stop-loss / take-profit — default: the selected strategy's own value.
+    parser.add_argument("--stop-loss-pct", type=float, default=argparse.SUPPRESS,
+                        help="Hard stop-loss fraction from entry (default: the "
+                             "selected strategy's own default; 0.05 = 5%% for 'default')")
+    parser.add_argument("--take-profit-pct", type=float, default=argparse.SUPPRESS,
+                        help="Hard take-profit fraction from entry (default: the "
+                             "selected strategy's own default; 0.15 = 15%% for 'default')")
 
-    # Trailing / vol-stop
-    parser.add_argument("--trailing-stop", type=float, default=0.0,
+    # Trailing / vol-stop — default: the selected strategy's own value.
+    parser.add_argument("--trailing-stop", type=float, default=argparse.SUPPRESS,
                         help="Fixed trailing stop: fraction drop from peak. 0=off")
-    parser.add_argument("--vol-stop-mult", type=float, default=0.0,
+    parser.add_argument("--vol-stop-mult", type=float, default=argparse.SUPPRESS,
                         help="Vol-scaled trailing stop multiplier. 0=off")
-    parser.add_argument("--vol-stop-window", type=int, default=20,
+    parser.add_argument("--vol-stop-window", type=int, default=argparse.SUPPRESS,
                         help="Lookback window in bars for realised vol (default: 20)")
-    parser.add_argument("--profit-stop-scale", type=float, default=0.0,
+    parser.add_argument("--profit-stop-scale", type=float, default=argparse.SUPPRESS,
                         help="Profit-scaled stop tightening per 1%% of gain. 0=off")
-    parser.add_argument("--min-stop", type=float, default=0.05,
-                        help="Floor on profit-adjusted stop (default: 0.05)")
+    parser.add_argument("--min-stop", type=float, default=argparse.SUPPRESS,
+                        help="Floor on profit-adjusted stop (default: the "
+                             "selected strategy's own default)")
 
     # Capital / costs
     parser.add_argument("--initial-cash", type=float, default=20_000.0)
@@ -102,17 +106,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-kelly", dest="use_kelly", action="store_false", default=True,
                         help="Use fixed 10%% allocation instead of Kelly sizing")
 
-    # Exit indicators
-    parser.add_argument("--exit-rsi-reversal", dest="exit_rsi", action="store_true", default=False)
-    parser.add_argument("--no-exit-rsi-reversal", dest="exit_rsi", action="store_false")
-    parser.add_argument("--exit-macd-cross", dest="exit_macd", action="store_true", default=False)
-    parser.add_argument("--exit-consolidation", dest="exit_consol", action="store_true", default=False)
-    parser.add_argument("--sar-stop", dest="sar_stop", action="store_true", default=False)
+    # Exit indicators — default: the selected strategy's own value.
+    parser.add_argument("--exit-rsi-reversal", dest="exit_rsi", action="store_true",
+                        default=argparse.SUPPRESS)
+    parser.add_argument("--no-exit-rsi-reversal", dest="exit_rsi", action="store_false",
+                        default=argparse.SUPPRESS)
+    parser.add_argument("--exit-macd-cross", dest="exit_macd", action="store_true",
+                        default=argparse.SUPPRESS)
+    parser.add_argument("--exit-consolidation", dest="exit_consol", action="store_true",
+                        default=argparse.SUPPRESS)
+    parser.add_argument("--sar-stop", dest="sar_stop", action="store_true",
+                        default=argparse.SUPPRESS)
     parser.add_argument("--sar-af-start", type=float, default=0.02)
     parser.add_argument("--sar-af-step", type=float, default=0.02)
     parser.add_argument("--sar-af-max", type=float, default=0.20)
-    parser.add_argument("--max-hold-days", type=int, default=0,
-                        help="Force exit after N bars. 0=off")
+    parser.add_argument("--max-hold-days", type=int, default=argparse.SUPPRESS,
+                        help="Force exit after N bars. 0=off (default: the "
+                             "selected strategy's own default)")
 
     # Indicator computation
     parser.add_argument("--no-skip-unused-indicators", dest="skip_unused_indicators",
@@ -138,9 +148,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     # Plugin selection (orthogonal to --strategy)
     parser.add_argument("--plugin-sizer", default="kelly", choices=["kelly", "fixed"],
                         help="Position sizer: 'kelly' (default) or 'fixed' (flat 10%% allocation)")
-    parser.add_argument("--plugin-gate", default="quality", choices=["quality", "none"],
-                        help="Quality gate: 'quality' (default) or 'none'. "
-                             "Ignored when --strategy is not 'default'.")
+    parser.add_argument("--plugin-gate", default=argparse.SUPPRESS, choices=["quality", "none"],
+                        help="Quality gate override for the selected strategy's "
+                             "quality_gate_enabled: 'quality' forces on, 'none' forces "
+                             "off. Default: the selected strategy's own setting.")
+    parser.add_argument("--gate-sensitivity", type=int, default=argparse.SUPPRESS,
+                        help="Number of weak-context/adverse-exit conditions (of 5) "
+                             "needed to fire the quality gate (default: the selected "
+                             "strategy's own default; 2 for all strategies today)")
     parser.add_argument("--plugin-adjuster", default="sentiment", choices=["sentiment", "none"],
                         help="Context adjuster: 'sentiment' (default) or 'none' (identity)")
 
@@ -154,6 +169,84 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--position-mode", default=argparse.SUPPRESS)
 
     return parser
+
+
+#: CLI dest -> the value that flag used to hard-default to before it became
+#: strategy-owned. Used both to detect "was this flag explicit" (via
+#: hasattr, since these dests are now argparse.SUPPRESS) and to backfill the
+#: attribute afterwards so every other `args.<dest>` reference in this module
+#: keeps working unchanged whether or not the user passed the flag.
+_TUNABLE_DEFAULTS: dict[str, object] = {
+    "buy_threshold": 3.0,
+    "sell_threshold": -3.0,
+    "stop_loss_pct": 0.05,
+    "take_profit_pct": 0.15,
+    "trailing_stop": 0.0,
+    "vol_stop_mult": 0.0,
+    "vol_stop_window": 20,
+    "profit_stop_scale": 0.0,
+    "min_stop": 0.05,
+    "max_hold_days": 0,
+    "exit_rsi": False,
+    "exit_macd": False,
+    "exit_consol": False,
+    "sar_stop": False,
+    "plugin_gate": "quality",
+    "gate_sensitivity": 2,
+}
+
+#: CLI dest -> the matching Entry/Exit constructor kwarg name, where they differ.
+_EXIT_OVERRIDE_MAP: dict[str, str] = {
+    "stop_loss_pct": "stop_loss_pct",
+    "take_profit_pct": "take_profit_pct",
+    "trailing_stop": "trailing_stop",
+    "vol_stop_mult": "vol_stop_mult",
+    "vol_stop_window": "vol_stop_window",
+    "profit_stop_scale": "profit_stop_scale",
+    "min_stop": "min_stop_pct",
+    "max_hold_days": "max_hold_days",
+    "exit_rsi": "exit_on_rsi_reversal",
+    "exit_macd": "exit_on_macd_cross",
+    "exit_consol": "exit_on_consolidation",
+    "sar_stop": "use_sar_stop",
+}
+
+
+def _build_strategy_overrides(args: argparse.Namespace) -> tuple[dict, dict]:
+    """Build (entry_overrides, exit_overrides) from only the CLI flags the
+    user explicitly passed. Must run before any backfill of _TUNABLE_DEFAULTS
+    onto `args` — relies on hasattr() being False for an omitted SUPPRESS'd
+    flag. An omitted flag leaves the selected strategy's own default alone;
+    an explicit flag overrides it uniformly, whatever --strategy is set to.
+    """
+    explicit = {k for k in _TUNABLE_DEFAULTS if hasattr(args, k)}
+
+    entry_overrides: dict = {}
+    if "buy_threshold" in explicit:
+        entry_overrides["buy_threshold"] = args.buy_threshold
+    if "sell_threshold" in explicit:
+        entry_overrides["sell_threshold"] = args.sell_threshold
+    if "plugin_gate" in explicit:
+        entry_overrides["quality_gate_enabled"] = (args.plugin_gate == "quality")
+    if "gate_sensitivity" in explicit:
+        entry_overrides["gate_sensitivity"] = args.gate_sensitivity
+
+    exit_overrides = {
+        ctor_key: getattr(args, arg_key)
+        for arg_key, ctor_key in _EXIT_OVERRIDE_MAP.items()
+        if arg_key in explicit
+    }
+    return entry_overrides, exit_overrides
+
+
+def _backfill_tunable_defaults(args: argparse.Namespace) -> None:
+    """Fill in any _TUNABLE_DEFAULTS attribute the user didn't pass, so every
+    `args.<dest>` reference elsewhere in this module keeps working exactly as
+    before regardless of --strategy — must run after _build_strategy_overrides
+    so it doesn't erase the hasattr()-based explicit/implicit distinction."""
+    for key, value in _TUNABLE_DEFAULTS.items():
+        if not hasattr(args, key):
+            setattr(args, key, value)
 
 
 def _write_quality_gate(run_dir: Path, flag: str, reason: str = "") -> None:
@@ -204,6 +297,8 @@ def _print_backtest_summary(bt: dict) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
+    entry_overrides, exit_overrides = _build_strategy_overrides(args)
+    _backfill_tunable_defaults(args)
 
     print(f"\nstrategy-auto-trader (consolidated engine) — ticker={args.ticker}")
 
@@ -235,13 +330,14 @@ def main(argv: list[str] | None = None) -> int:
         position_sizer = KellySizer(use_kelly=False, lookback=20)
     context_adjuster = _ADJ_MAP[args.plugin_adjuster]()
 
-    # Strategy: resolve named entry+exit pair (supersedes plugin-gate when not default).
-    # For the "default" strategy, still honour --plugin-gate to allow gate=none via CLI.
-    entry_s, exit_s = resolve_strategy(args.strategy, ticker=args.ticker)
-    if args.strategy == "default":
-        _GATE_MAP = {"quality": QualityGatePlugin, "none": NullQualityGate}
-        quality_gate = _GATE_MAP[args.plugin_gate]()
-        entry_s = exit_s = None   # fall through to plugin-level resolution in the engine
+    # Strategy: resolve named entry+exit pair, uniformly for every --strategy.
+    # entry_overrides/exit_overrides (built above, before SUPPRESS backfill)
+    # carry only the CLI flags the user explicitly passed — everything else
+    # falls through to the selected strategy's own defaults.
+    entry_s, exit_s = resolve_strategy(
+        args.strategy, ticker=args.ticker,
+        entry_overrides=entry_overrides, exit_overrides=exit_overrides,
+    )
 
     regime_model = None
     if args.hmm_cache:
@@ -287,7 +383,6 @@ def main(argv: list[str] | None = None) -> int:
         sar_af_step=args.sar_af_step,
         sar_af_max=args.sar_af_max,
         position_sizer=position_sizer,
-        quality_gate=quality_gate if args.strategy == "default" else None,
         context_adjuster=context_adjuster,
         entry_strategy=entry_s,
         exit_strategy=exit_s,

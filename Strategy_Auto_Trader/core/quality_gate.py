@@ -13,8 +13,15 @@ or hourly bars.
 
 from __future__ import annotations
 
+#: Number of weak-context / adverse-exit conditions (out of 5) required to
+#: fire the gate. Strategy-overridable via gate_sensitivity (see individual
+#: Entry classes); this is the shared default, not a strategy-specific value.
+DEFAULT_GATE_SENSITIVITY = 2
 
-def _is_weak_buy_context(markov_sig: float | None, mom: dict) -> bool:
+
+def _is_weak_buy_context(
+    markov_sig: float | None, mom: dict, gate_sensitivity: int = DEFAULT_GATE_SENSITIVITY,
+) -> bool:
     conditions = 0
     if markov_sig is not None and markov_sig < 0.25:
         conditions += 1
@@ -27,10 +34,12 @@ def _is_weak_buy_context(markov_sig: float | None, mom: dict) -> bool:
         conditions += 1
     if mom.get("cur_rsi", 50.0) < 50 and not mom.get("recent_cross_above_50", False):
         conditions += 1
-    return conditions >= 2
+    return conditions >= gate_sensitivity
 
 
-def _is_adverse_exit_context(markov_sig: float | None, mom: dict) -> bool:
+def _is_adverse_exit_context(
+    markov_sig: float | None, mom: dict, gate_sensitivity: int = DEFAULT_GATE_SENSITIVITY,
+) -> bool:
     conditions = 0
     if markov_sig is not None and markov_sig < -0.20:
         conditions += 1
@@ -43,10 +52,16 @@ def _is_adverse_exit_context(markov_sig: float | None, mom: dict) -> bool:
         conditions += 1
     if mom.get("above_sma200") is False:
         conditions += 1
-    return conditions >= 2
+    return conditions >= gate_sensitivity
 
 
-def _apply_quality_gate(sig: dict, mom: dict, markov_sig: float | None, currently_in: bool) -> dict:
+def _apply_quality_gate(
+    sig: dict,
+    mom: dict,
+    markov_sig: float | None,
+    currently_in: bool,
+    gate_sensitivity: int = DEFAULT_GATE_SENSITIVITY,
+) -> dict:
     """Apply the veto layer.
 
     sig.get("flag") == "BUY" and not currently_in and weak context -> HOLD.
@@ -57,7 +72,7 @@ def _apply_quality_gate(sig: dict, mom: dict, markov_sig: float | None, currentl
     gated["reason"] = sig.get("reason", "")
     gated["gate_fired"] = False
 
-    if sig.get("flag") == "BUY" and not currently_in and _is_weak_buy_context(markov_sig, mom):
+    if sig.get("flag") == "BUY" and not currently_in and _is_weak_buy_context(markov_sig, mom, gate_sensitivity):
         gated["flag"] = "HOLD"
         gated["reason"] = "quality_gate: weak buy context"
         gated["gate_fired"] = True
@@ -66,7 +81,7 @@ def _apply_quality_gate(sig: dict, mom: dict, markov_sig: float | None, currentl
     # gate_fired distinguishes this SELL from a plain composite-signal SELL —
     # callers use it to bypass min_hold_bars, since a genuinely adverse context
     # shouldn't wait out the whipsaw-noise protection meant for fresh entries.
-    if currently_in and _is_adverse_exit_context(markov_sig, mom):
+    if currently_in and _is_adverse_exit_context(markov_sig, mom, gate_sensitivity):
         gated["flag"] = "SELL"
         gated["reason"] = "quality_gate: adverse exit context"
         gated["gate_fired"] = True

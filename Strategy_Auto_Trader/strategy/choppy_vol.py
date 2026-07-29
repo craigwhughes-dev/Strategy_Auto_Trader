@@ -80,12 +80,18 @@ Kelly position sizing on (use_kelly=True, kelly_lookback=20).
 Quality gate: quality_gate_enabled=False (never calls _apply_quality_gate;
 the RSI-reversion SELL above is this strategy's own exit signal, not the
 shared gate).
+
+Exit values above (stop_loss_pct/take_profit_pct/max_hold_days/etc.) are
+this strategy's own defaults, not fixed — overridable via the matching CLI
+flag regardless of which --strategy is selected. Unlike every other
+strategy, ChoppyVolEntry itself accepts no overrides at all (see its class
+docstring) — there is no composite score or quality gate to threshold here.
 """
 
 from __future__ import annotations
 
-from ..plugins.exit_rules import StandardExitRules
 from ..plugins.types import BarData, EntryDecision, ExitResult, RegimeState, TradeState
+from .base.exit_overrides import build_standard_exit_rules
 
 _RSI_OVERSOLD = 35.0
 _RSI_REVERSION = 50.0
@@ -97,6 +103,10 @@ class ChoppyVolEntry:
     Satisfies EntryStrategyProtocol. Ignores vol_filter_ok by design — this
     strategy exists specifically to trade tickers the trend strategies veto
     for being choppy, so re-applying that veto here would defeat the point.
+
+    Deliberately does not accept buy_threshold/sell_threshold/weights/
+    quality_gate_enabled overrides (unlike the other 6 strategies) — there is
+    no composite score here to threshold or gate against (see evaluate()).
     """
 
     #: Not used for scoring (this strategy bypasses composite_signal
@@ -168,19 +178,47 @@ class ChoppyVolExit:
     use_kelly: bool = True
     kelly_lookback: int = 20
 
-    def __init__(self) -> None:
-        self._impl = StandardExitRules(
-            stop_loss_pct=self._stop,
-            trailing_stop=0.0,
-            vol_stop_mult=0.0,
-            vol_stop_window=20,
-            profit_stop_scale=0.0,
-            min_stop_pct=self._stop,
-            max_hold_days=self._max_hold_bars,
-            exit_on_macd_cross=False,
-            exit_on_rsi_reversal=False,
-            exit_on_consolidation=False,
-            use_sar_stop=False,
+    def __init__(
+        self,
+        stop_loss_pct: float | None = None,
+        take_profit_pct: float | None = None,
+        trailing_stop: float | None = None,
+        vol_stop_mult: float | None = None,
+        vol_stop_window: int | None = None,
+        profit_stop_scale: float | None = None,
+        min_stop_pct: float | None = None,
+        max_hold_days: int | None = None,
+        exit_on_macd_cross: bool | None = None,
+        exit_on_rsi_reversal: bool | None = None,
+        exit_on_consolidation: bool | None = None,
+        use_sar_stop: bool | None = None,
+    ) -> None:
+        self._stop = stop_loss_pct if stop_loss_pct is not None else self._stop
+        self._target = take_profit_pct if take_profit_pct is not None else self._target
+        self._impl = build_standard_exit_rules(
+            defaults={
+                "stop_loss_pct": self._stop,
+                "trailing_stop": 0.0,
+                "vol_stop_mult": 0.0,
+                "vol_stop_window": 20,
+                "profit_stop_scale": 0.0,
+                "min_stop_pct": self._stop,
+                "max_hold_days": self._max_hold_bars,
+                "exit_on_macd_cross": False,
+                "exit_on_rsi_reversal": False,
+                "exit_on_consolidation": False,
+                "use_sar_stop": False,
+            },
+            trailing_stop=trailing_stop,
+            vol_stop_mult=vol_stop_mult,
+            vol_stop_window=vol_stop_window,
+            profit_stop_scale=profit_stop_scale,
+            min_stop_pct=min_stop_pct,
+            max_hold_days=max_hold_days,
+            exit_on_macd_cross=exit_on_macd_cross,
+            exit_on_rsi_reversal=exit_on_rsi_reversal,
+            exit_on_consolidation=exit_on_consolidation,
+            use_sar_stop=use_sar_stop,
         )
 
     @property
@@ -192,6 +230,14 @@ class ChoppyVolExit:
     def take_profit_pct(self) -> float:
         """Hard take-profit fraction (6%)."""
         return self._target
+
+    @property
+    def exit_on_macd_cross(self) -> bool:
+        return self._impl.exit_on_macd_cross
+
+    @property
+    def exit_on_rsi_reversal(self) -> bool:
+        return self._impl.exit_on_rsi_reversal
 
     def check(self, trade: TradeState, bar_data: BarData) -> ExitResult:
         """Delegate to the stop/target/max-hold backstop. RSI reversion exit

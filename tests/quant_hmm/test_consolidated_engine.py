@@ -832,3 +832,167 @@ class TestConsolidatedEngine:
             "kelly_lookback=2 on exit_strategy should have triggered a Kelly recompute by now"
         )
 
+    # -- exit-indicator precompute gap (Item 2 fix) ------------------------
+    # consolidated_backtest's own exit_on_macd_cross/exit_on_rsi_reversal
+    # kwargs (sourced from the CLI's --exit-macd-cross/--exit-rsi-reversal,
+    # both default False) must be OR'd with the resolved exit_strategy's own
+    # flags before reaching _precompute_hourly_vote_series — same pattern as
+    # use_kelly/kelly_lookback above. Verified via a spy on the real function
+    # (wraps=) so the rest of the backtest still runs unmodified.
+
+    def test_exit_strategy_own_indicator_default_reaches_precompute(self):
+        """BreakoutMomentumExit hardcodes exit_on_macd_cross=exit_on_rsi_reversal=True
+        — this must activate the indicator series even when the CLI-level kwarg
+        (defaulting False) isn't passed. Before the Item 2 fix this silently
+        stayed False regardless of the strategy's own stated default."""
+        from Strategy_Auto_Trader.quant_hmm import consolidated_engine as ce
+        from Strategy_Auto_Trader.strategy.breakout_momentum import BreakoutMomentumExit
+        from Strategy_Auto_Trader.plugins.types import EntryDecision
+
+        class AlwaysHoldEntry:
+            require_flip_entry = False
+            def evaluate(self, regime, mom, _volume_ratio, currently_in=False):
+                return EntryDecision(flag="HOLD", raw_flag="HOLD", score=0.0, reason="")
+
+        n = 100
+        close = np.linspace(100, 120, n)
+        p_bull_seq = [0.80] * n
+        orig = ce._precompute_hourly_vote_series
+
+        with mock.patch.object(ce, "_precompute_hourly_vote_series", wraps=orig) as spy:
+            _run_consolidated_fake(
+                close, p_bull_seq,
+                min_train_bars=20, hmm_refit_bars=20, regime_smooth=1,
+                entry_strategy=AlwaysHoldEntry(),
+                exit_strategy=BreakoutMomentumExit(),
+            )
+        _, kwargs = spy.call_args
+        assert kwargs["exit_on_macd_cross"] is True
+        assert kwargs["exit_on_rsi_reversal"] is True
+
+    def test_exit_strategy_false_default_stays_false_without_cli_flag(self):
+        """No-regression counterpart: a strategy whose own default is False
+        (default.py's DefaultExit) and no CLI flag passed must not spuriously
+        activate the indicator series."""
+        from Strategy_Auto_Trader.quant_hmm import consolidated_engine as ce
+        from Strategy_Auto_Trader.strategy.default import DefaultExit
+        from Strategy_Auto_Trader.plugins.types import EntryDecision
+
+        class AlwaysHoldEntry:
+            require_flip_entry = False
+            def evaluate(self, regime, mom, _volume_ratio, currently_in=False):
+                return EntryDecision(flag="HOLD", raw_flag="HOLD", score=0.0, reason="")
+
+        n = 100
+        close = np.linspace(100, 120, n)
+        p_bull_seq = [0.80] * n
+        orig = ce._precompute_hourly_vote_series
+
+        with mock.patch.object(ce, "_precompute_hourly_vote_series", wraps=orig) as spy:
+            _run_consolidated_fake(
+                close, p_bull_seq,
+                min_train_bars=20, hmm_refit_bars=20, regime_smooth=1,
+                entry_strategy=AlwaysHoldEntry(),
+                exit_strategy=DefaultExit(),
+            )
+        _, kwargs = spy.call_args
+        assert kwargs["exit_on_macd_cross"] is False
+        assert kwargs["exit_on_rsi_reversal"] is False
+
+    def test_explicit_cli_flag_forces_indicator_on_over_false_strategy_default(self):
+        """An explicit CLI flag must still force the series on even when the
+        selected strategy's own default is False — OR, not exit_strategy-wins."""
+        from Strategy_Auto_Trader.quant_hmm import consolidated_engine as ce
+        from Strategy_Auto_Trader.strategy.default import DefaultExit
+        from Strategy_Auto_Trader.plugins.types import EntryDecision
+
+        class AlwaysHoldEntry:
+            require_flip_entry = False
+            def evaluate(self, regime, mom, _volume_ratio, currently_in=False):
+                return EntryDecision(flag="HOLD", raw_flag="HOLD", score=0.0, reason="")
+
+        n = 100
+        close = np.linspace(100, 120, n)
+        p_bull_seq = [0.80] * n
+        orig = ce._precompute_hourly_vote_series
+
+        with mock.patch.object(ce, "_precompute_hourly_vote_series", wraps=orig) as spy:
+            _run_consolidated_fake(
+                close, p_bull_seq,
+                min_train_bars=20, hmm_refit_bars=20, regime_smooth=1,
+                entry_strategy=AlwaysHoldEntry(),
+                exit_strategy=DefaultExit(),
+                exit_on_macd_cross=True,
+            )
+        _, kwargs = spy.call_args
+        assert kwargs["exit_on_macd_cross"] is True
+
+    # -- Zero-regression: every registered strategy, no overrides ---------
+    # Pins each strategy's own default behaviour (buy/sell threshold, gate,
+    # stop/trailing/target shape) against a fixed synthetic rise-then-fall
+    # price path + regime sequence, resolved via resolve_strategy() with no
+    # overrides — exactly the CLI's no-flags-passed case. A future change to
+    # any strategy's class-level defaults, or to how overrides flow through
+    # resolve_strategy()/the Exit-override helper, should show up here as a
+    # diff against these pinned values.
+
+    @pytest.mark.parametrize("strategy_name,expected_buys,expected_sells,expected_reasons", [
+        ("breakout_momentum", 0, 0, []),
+        ("choppy_vol", 0, 0, []),
+        ("conservative", 1, 1, ["quality_gate: adverse exit context"]),
+        ("default", 1, 1, ["quality_gate: adverse exit context"]),
+        ("mean_reversion", 0, 0, []),
+        ("optimised", 0, 0, []),
+        ("trend", 1, 1, ["quality_gate: adverse exit context"]),
+    ])
+    def test_strategy_zero_regression_no_overrides(
+        self, strategy_name, expected_buys, expected_sells, expected_reasons,
+    ):
+        import re
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import consolidated_backtest
+        from Strategy_Auto_Trader.plugins.types import RegimeState
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import discretize_p_bull
+        from Strategy_Auto_Trader.strategy.base.registry import resolve_strategy
+
+        close = np.concatenate([np.linspace(100, 140, 150), np.linspace(140, 80, 150)])
+        p_bull_seq = np.concatenate([np.full(150, 0.8), np.full(150, 0.1)])
+        df = _hourly_df(close)
+        entry_prob, exit_prob = 0.65, 0.40
+
+        class FakeRegimeModel:
+            def __init__(self):
+                self._i = 0
+
+            def needs_refit(self, t):
+                return False
+
+            def refit(self, returns):
+                pass
+
+            def step(self, returns, t):
+                p_bull = p_bull_seq[self._i] if self._i < len(p_bull_seq) else p_bull_seq[-1]
+                self._i += 1
+                p_bear = 1.0 - p_bull
+                return RegimeState(
+                    p_bull=p_bull, p_bear=p_bear, p_bull_smooth=p_bull,
+                    regime_signal=p_bull - p_bear,
+                    hmm_vote=discretize_p_bull(p_bull, bull_edge=entry_prob, bear_edge=exit_prob),
+                )
+
+            def reset(self):
+                pass
+
+        entry_s, exit_s = resolve_strategy(strategy_name, vol_filter_ok=True)
+        bt = consolidated_backtest(
+            df, regime_model=FakeRegimeModel(), entry_strategy=entry_s, exit_strategy=exit_s,
+            entry_prob=entry_prob, exit_prob=exit_prob, regime_smooth=1,
+            min_train_bars=50, hmm_refit_bars=50, volume_min_ratio=0.0,
+            min_hold_bars=5, skip_unused_indicators=False,
+        )
+        assert bt["n_buys"] == expected_buys
+        assert bt["n_sells"] == expected_sells
+        detail = bt["detail"]
+        sells = detail[detail["trade_event"] == "SELL"] if len(detail) else detail
+        reasons = sorted({re.sub(r"\([^)]*\)", "", r) for r in sells["sell_reason"]}) if len(sells) else []
+        assert reasons == expected_reasons
+

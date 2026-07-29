@@ -1,69 +1,61 @@
-"""Optimised strategy — trend backbone tuned on the live-sim trade journal.
+"""Optimised-new strategy — ratchet-only exit variant of "optimised", for comparison.
 
-What this strategy is trying to do
-------------------------------------
-This strategy was derived empirically rather than designed from first
-principles. The 2,122 closed trades in data/journals/live.csv (all three
-existing strategies, FTSE universe, hourly bars, 2025-01-02 .. 2026-07-02)
-were compared against actual subsequent price history (scripts/
-analyze_journal.py) to measure which signal components predicted profitable
-trades and which exits fired well. The findings, and how each shaped a
-parameter:
+>>> UNVALIDATED — single-ticker sanity test only, not a live-capital candidate <<<
+Same entry logic as `optimised` (identical weights/thresholds/vetoes — see
+strategy/optimised.py), copied standalone rather than shared so each can
+evolve independently. The only difference is the exit shape, testing a
+YouTube-inspired idea: instead of a hard take-profit ceiling, let a
+profit-ratcheting trailing stop be the sole determinant of when a winning
+trade closes (the hard stop-loss remains as the initial risk floor).
 
-* Trend was the clear backbone: best profit factor (1.36) and by far the
-  best total P&L (+£952 vs +£92 default / +£22 conservative), so the
-  weights and exit shape start from the trend strategy.
-* High-conviction entries paid: trades entered with a composite score above
-  ~62% of the maximum had profit factor ~1.96 vs ~1.30 below, so the buy
-  threshold is set at 66.7% of the maximum score (6.0 / 9.0) — stricter
-  than any existing strategy.
-* Volume mattered more than trend gave it credit for: entries with
-  volume_ratio > 1.5 carried the entire net profit of the journal
-  (+£2,293); everything below 1.5 was net negative. Volume weight raised
-  0.5 -> 1.0.
-* Regime confirmation mattered: entries with regime_signal > 0.75 hit 60%
-  with profit factor 1.75; entries with regime_signal <= 0 were net losers
-  across 870 trades. HMM weight raised 1.5 -> 2.0, plus a hard entry veto
-  when regime_signal <= 0.
-* Overbought entries lost: RSI > 70 at entry lost £1,123 over 402 trades
-  (profit factor 1.02), while RSI 60-70 was the sweet spot (1.71). RSI
-  weight kept low (1.0, as in trend) and a hard entry veto added for
-  RSI > 70.
-* Exits were left alone: forward returns fetched for 5/20/60 bars after
-  every exit showed no systematic whipsaw after trend's 8% stops and no
-  money left on the table after take-profits, and the shared quality-gate
-  exit (82% of all exits) was healthy (+0.9%..+1.6% average). Winners ran
-  up to 27 days, so no max-hold cap.
+What changed vs. `optimised`, and why
+--------------------------------------
+* `take_profit_pct` effectively disabled (999 — no realistic trade reaches
+  it) instead of the hard 30% ceiling. Winners are no longer capped; the
+  trailing stop alone decides when to lock in gains.
+* `quality_gate_enabled` defaults to False instead of True. Investigation
+  this session found the quality gate's adverse-exit escalation was 100% of
+  `optimised`'s exits on the tickers tested — with the gate on, the ratchet
+  stop never got a chance to bind before the gate fired first. Turning the
+  gate off is required for the ratchet mechanism to actually do anything.
+* `profit_stop_scale` raised 0.5 -> ... no, kept 0.5's *shape* but the base
+  mechanism (vol_stop_mult=2.0, unchanged from `optimised`) is what actually
+  determines the trailing distance — `profit_stop_scale=0.30` narrows it as
+  the trade becomes profitable. (A `trailing_stop=0.15` fixed-distance
+  override was tried in the same test session but is a no-op whenever
+  `vol_stop_mult>0`, per `core/exits.py::_effective_stop_for_bar` — the
+  vol-scaled branch always wins when active. Not carried into this file to
+  avoid a dead constant.)
+* `min_stop_pct` tightened 0.04 -> 0.03 (the ratchet floor — never allow the
+  trailing distance to narrow past this even at very high profit).
+* `stop_loss_pct` (0.08), `vol_stop_mult` (2.0), `vol_stop_window` (20),
+  `max_hold_days` (0) all unchanged from `optimised` — only the take-profit
+  ceiling, gate, profit-stop-scale and min-stop floor differ.
 
-The two vetoes only block NEW entries (a would-be BUY becomes HOLD); they
-never suppress SELL/exit signalling while a position is open.
-
-Caveat: parameters are fitted in-sample on the journal window above, and
-the trend edge was concentrated in a few tickers — treat live results as
-the real test.
+Single-ticker result so far: AAPL, 2023-08 to 2026-07, hourly bars —
+Sharpe 1.96 vs `optimised`'s 1.21 baseline on the same window, but only 28
+trades vs 50 (fewer, larger-ratchet-managed trades). Not tested across a
+universe, not tested for the tighter gate-driven whipsaw protection that
+`optimised` relies on being permanently off — treat as an open comparison,
+not a validated improvement (see choppy_vol.py for what a decisively-tested
+regression looks like; this one just hasn't been tested broadly yet either
+way).
 
 Entry
 -----
-Weighted vote: HMM (2.0) + RSI (1.0) + SMA200 (3.0) + trend SMA20/50 (2.0)
-+ volume (1.0).  Markov slot zeroed (HMM carries that role).
-Buy threshold 6.0 (out of max 9.0), sell -4.5.
-Entry vetoes (BUY -> HOLD when flat): RSI > 70, or regime_signal <= 0.
-Standard quality gate applies on top.
+Identical to `optimised`: HMM (2.0) + RSI (1.0) + SMA200 (3.0) + trend
+SMA20/50 (2.0) + volume (1.0). Buy threshold 6.0, sell -4.5. RSI>70 and
+regime_signal<=0 entry vetoes. Quality gate defaults OFF (see above) but is
+still overridable back on via --plugin-gate quality for further comparison.
 
 Exit
 ----
-Wide hard stop 8%, wide take-profit 30%.
-Vol-scaled trailing stop (vol_stop_mult=2.0, vol_stop_window=20).
-Profit-stop tightening (profit_stop_scale=0.5), floor 4%.
-No max hold limit.
+Hard stop-loss 8% (unchanged floor). No hard take-profit (999, effectively
+off). Vol-scaled trailing stop (vol_stop_mult=2.0, vol_stop_window=20),
+profit-stop tightening (profit_stop_scale=0.30, floor 3%). No max hold.
 
-All entry and exit values above are this strategy's own defaults, not
-fixed — every one is overridable via the matching CLI flag (e.g.
---trailing-stop, --profit-stop-scale, --plugin-gate) regardless of which
---strategy is selected; an omitted flag leaves this strategy's default
-untouched. Caveat from the journal-derived tuning above still applies:
-these numbers are an empirical finding, not a starting point assumed to
-need adjustment — override for deliberate experimentation, not by default.
+All values above are this strategy's own defaults, not fixed — every one is
+overridable via the matching CLI flag regardless of --strategy selected.
 """
 
 from __future__ import annotations
@@ -73,31 +65,32 @@ from ..core.quality_gate import _apply_quality_gate
 from ..plugins.types import BarData, EntryDecision, ExitResult, RegimeState, TradeState
 from .base.exit_overrides import build_standard_exit_rules
 
-#: Entry vetoes derived from the journal analysis (see module docstring).
+#: Entry vetoes, identical to optimised.py.
 _RSI_OVERBOUGHT = 70.0
 _MIN_REGIME_SIGNAL = 0.0
 
 
-class OptimisedEntry:
-    """Trend-style entry with journal-derived weights, threshold and vetoes.
+class OptimisedNewEntry:
+    """Trend-style entry, identical to OptimisedEntry except the quality
+    gate defaults off (see module docstring for why).
 
     Satisfies EntryStrategyProtocol.
     """
 
     weights: dict[str, float] = {
         "markov": 0.0,
-        "rsi":    1.0,   # kept low — but see the RSI > 70 veto below
+        "rsi":    1.0,
         "trend":  2.0,
         "sma200": 3.0,
-        "volume": 1.0,   # raised from trend's 0.5 — high volume carried the P&L
-        "hmm":    2.0,   # raised from 1.5 — strong regimes hit 60%
+        "volume": 1.0,
+        "hmm":    2.0,
     }
     buy_threshold: float = 6.0
     sell_threshold: float = -4.5
-    #: Whether core/quality_gate._apply_quality_gate runs on top of the vote.
-    quality_gate_enabled: bool = True
-    #: Number of weak-context/adverse-exit conditions (of 5) needed to fire
-    #: the gate. Overridable at construction (e.g. CLI --gate-sensitivity).
+    #: Defaults OFF here (unlike optimised.py) — the gate's adverse-exit
+    #: escalation dominated every exit in testing, leaving the ratchet stop
+    #: below no chance to ever bind.
+    quality_gate_enabled: bool = False
     gate_sensitivity: int = 2
 
     def __init__(
@@ -160,28 +153,25 @@ class OptimisedEntry:
         if float(mom.get("cur_rsi", 50.0)) > _RSI_OVERBOUGHT:
             return EntryDecision(
                 flag="HOLD", raw_flag=decision.raw_flag, score=decision.score,
-                reason=f"optimised veto: RSI > {_RSI_OVERBOUGHT:.0f} (overbought entries lose)",
+                reason=f"optimised_new veto: RSI > {_RSI_OVERBOUGHT:.0f} (overbought entries lose)",
             )
         if regime.regime_signal is not None and regime.regime_signal <= _MIN_REGIME_SIGNAL:
             return EntryDecision(
                 flag="HOLD", raw_flag=decision.raw_flag, score=decision.score,
-                reason="optimised veto: regime_signal <= 0 (no bull-regime confirmation)",
+                reason="optimised_new veto: regime_signal <= 0 (no bull-regime confirmation)",
             )
         return decision
 
 
-class OptimisedExit:
-    """Wide stop (8%) and target (30%) with vol-scaled trailing stop.
-
-    Identical shape to TrendExit — the journal's forward-return analysis
-    showed no systematic whipsaw or give-back at these levels, so the exit
-    side was deliberately left unchanged.
+class OptimisedNewExit:
+    """Hard stop-loss floor (8%) only — no hard take-profit. Winners are
+    closed exclusively by the vol-scaled, profit-narrowing trailing stop.
 
     Satisfies ExitStrategyProtocol.
     """
 
     _stop: float = 0.08
-    _target: float = 0.30
+    _target: float = 999.0  # effectively disabled — see module docstring
     use_kelly: bool = True
     kelly_lookback: int = 20
 
@@ -205,12 +195,12 @@ class OptimisedExit:
         self._impl = build_standard_exit_rules(
             defaults={
                 "stop_loss_pct": self._stop,
-                "trailing_stop": 0.0,        # use vol-stop rather than fixed trail
-                "vol_stop_mult": 2.0,        # 2 × realised-vol trailing stop
+                "trailing_stop": 0.0,        # inert while vol_stop_mult>0 — see docstring
+                "vol_stop_mult": 2.0,        # 2 × realised-vol trailing stop (unchanged)
                 "vol_stop_window": 20,
-                "profit_stop_scale": 0.5,    # tighten trail as profit grows
-                "min_stop_pct": 0.04,        # floor: never tighter than 4%
-                "max_hold_days": 0,          # no forced exit — winners ran to 27 days
+                "profit_stop_scale": 0.30,   # tighten trail as profit grows (was 0.5)
+                "min_stop_pct": 0.03,        # floor: never tighter than 3% (was 0.04)
+                "max_hold_days": 0,
                 "exit_on_macd_cross": False,
                 "exit_on_rsi_reversal": False,
                 "exit_on_consolidation": False,
@@ -235,7 +225,7 @@ class OptimisedExit:
 
     @property
     def take_profit_pct(self) -> float:
-        """Hard take-profit fraction (30%)."""
+        """Effectively-disabled hard take-profit (999)."""
         return self._target
 
     @property

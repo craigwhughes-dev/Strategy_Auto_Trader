@@ -9,8 +9,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import multiprocessing
 import os
-import signal
 import sys
 import time
 from pathlib import Path
@@ -27,29 +27,31 @@ class TimeoutError(Exception):
     pass
 
 
-def _timeout_handler(signum, frame):
-    raise TimeoutError("Backtest exceeded time limit (5 minutes)")
-
-
 def run_single_with_timeout(argv: list[str], timeout_seconds: int = 300) -> None:
     """Run backtest with timeout protection (5 minutes default).
 
-    Raises TimeoutError if run_single exceeds the limit.
-    Only available on Unix-like systems; on Windows, runs without timeout.
-    """
-    if sys.platform == "win32":
-        # Windows doesn't support signal.SIGALRM; run without timeout
-        run_single(argv)
-        return
+    Runs run_single in a child process so a stalled ticker (stuck network
+    fetch, hung HMM fit, etc.) can be forcibly killed instead of freezing the
+    whole daemon cycle indefinitely — signal.SIGALRM only interrupts a thread,
+    it can't be used on Windows and doesn't unblock a stuck C-level I/O call.
 
-    # Unix: set alarm and run
-    old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(timeout_seconds)
-    try:
-        run_single(argv)
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
+    Raises TimeoutError if run_single exceeds the limit.
+    """
+    ctx = multiprocessing.get_context("spawn")
+    proc = ctx.Process(target=run_single, args=(argv,))
+    proc.start()
+    proc.join(timeout_seconds)
+
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(5)
+        if proc.is_alive():
+            proc.kill()
+            proc.join()
+        raise TimeoutError(f"Backtest exceeded time limit ({timeout_seconds}s)")
+
+    if proc.exitcode != 0:
+        raise RuntimeError(f"run_single exited with code {proc.exitcode}")
 
 DEFAULTS_FILE = Path(__file__).resolve().parent.parent.parent / "config" / "watchlist.json"
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
@@ -99,10 +101,15 @@ def _build_argv(ticker_cfg: dict, defaults: dict) -> list[str]:
     if merged.get("no_hmm", False):
         argv.append("--no-hmm")
 
-    if merged.get("exit_rsi_reversal", True):
-        argv.append("--exit-rsi-reversal")
-    else:
-        argv.append("--no-exit-rsi-reversal")
+    # Explicit-only (unlike long_only/sma200 above): unlike those two flags,
+    # exit_rsi_reversal's strategy-level default varies per --strategy, so
+    # silently defaulting to True here would override every strategy's own
+    # exit setting once resolve_strategy() overrides are wired to the CLI.
+    if "exit_rsi_reversal" in merged:
+        if merged["exit_rsi_reversal"]:
+            argv.append("--exit-rsi-reversal")
+        else:
+            argv.append("--no-exit-rsi-reversal")
 
     if merged.get("exit_macd_cross", False):
         argv.append("--exit-macd-cross")

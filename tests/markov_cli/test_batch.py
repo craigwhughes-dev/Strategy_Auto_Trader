@@ -1,10 +1,25 @@
 from __future__ import annotations
 
 import json
+import time
 from unittest import mock
 
 import pandas as pd
 import pytest
+
+
+# Module-level so multiprocessing's spawn context can pickle-import them by
+# reference (a closure defined inside a test method is not picklable).
+def _fake_run_single_ok(argv):
+    return 0
+
+
+def _fake_run_single_hangs(argv):
+    time.sleep(30)
+
+
+def _fake_run_single_fails(argv):
+    raise RuntimeError("boom")
 
 
 class TestBatch:
@@ -70,6 +85,25 @@ class TestBatch:
         defaults = {}
         argv = _build_argv(cfg, defaults)
         assert "--no-hmm" in argv
+
+    def test_build_argv_exit_rsi_reversal_absent_by_default(self):
+        # Explicit-only: must NOT default to True. Its per-strategy default
+        # varies (e.g. optimised/conservative hardcode False) — silently
+        # forcing True here would override every strategy's own exit setting.
+        from Strategy_Auto_Trader.markov_cli.batch import _build_argv
+        argv = _build_argv({"ticker": "AAPL"}, {})
+        assert "--exit-rsi-reversal" not in argv
+        assert "--no-exit-rsi-reversal" not in argv
+
+    def test_build_argv_exit_rsi_reversal_explicit_true(self):
+        from Strategy_Auto_Trader.markov_cli.batch import _build_argv
+        argv = _build_argv({"ticker": "AAPL"}, {"exit_rsi_reversal": True})
+        assert "--exit-rsi-reversal" in argv
+
+    def test_build_argv_exit_rsi_reversal_explicit_false(self):
+        from Strategy_Auto_Trader.markov_cli.batch import _build_argv
+        argv = _build_argv({"ticker": "AAPL"}, {"exit_rsi_reversal": False})
+        assert "--no-exit-rsi-reversal" in argv
 
     def test_build_argv_all_flags(self):
         from Strategy_Auto_Trader.markov_cli.batch import _build_argv
@@ -249,3 +283,28 @@ class TestBatch:
         with mock.patch("Strategy_Auto_Trader.markov_cli.screen._screen_one", return_value=screen_result):
             passed, _ = batch._fast_screen_tickers([cfg])
         assert passed[0] == cfg
+
+    def test_run_single_with_timeout_completes_normally(self):
+        from Strategy_Auto_Trader.markov_cli import batch
+
+        with mock.patch.object(batch, "run_single", _fake_run_single_ok):
+            batch.run_single_with_timeout(["--ticker", "AAPL"], timeout_seconds=10)
+
+    def test_run_single_with_timeout_kills_hung_process(self):
+        from Strategy_Auto_Trader.markov_cli import batch
+
+        with mock.patch.object(batch, "run_single", _fake_run_single_hangs):
+            t0 = time.time()
+            with pytest.raises(batch.TimeoutError):
+                batch.run_single_with_timeout(["--ticker", "AAPL"], timeout_seconds=1)
+            elapsed = time.time() - t0
+        # Proves the child was actually killed, not just that join() gave up
+        # while the hung process kept running in the background.
+        assert elapsed < 20
+
+    def test_run_single_with_timeout_propagates_child_failure(self):
+        from Strategy_Auto_Trader.markov_cli import batch
+
+        with mock.patch.object(batch, "run_single", _fake_run_single_fails):
+            with pytest.raises(RuntimeError, match="exited with code"):
+                batch.run_single_with_timeout(["--ticker", "AAPL"], timeout_seconds=10)

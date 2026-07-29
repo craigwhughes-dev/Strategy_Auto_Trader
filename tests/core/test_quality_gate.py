@@ -129,3 +129,49 @@ class TestQualityGate:
         gate = _apply_quality_gate(sig, self._mom(), 0.5, False)
         assert gate["flag"] == "BUY"
         assert gate["gate_fired"] is False
+
+    # -- gate_sensitivity ----------------------------------------------------
+
+    def test_default_gate_sensitivity_constant_is_two(self):
+        from Strategy_Auto_Trader.core.quality_gate import DEFAULT_GATE_SENSITIVITY
+        assert DEFAULT_GATE_SENSITIVITY == 2
+
+    def test_is_weak_buy_context_default_sensitivity_matches_constant(self):
+        """Omitting gate_sensitivity behaves identically to passing the
+        DEFAULT_GATE_SENSITIVITY constant explicitly (parity for Item 1)."""
+        from Strategy_Auto_Trader.core.quality_gate import (
+            DEFAULT_GATE_SENSITIVITY, _is_weak_buy_context,
+        )
+        mom = self._mom(above_sma50=False, volume_ratio=0.8)
+        assert _is_weak_buy_context(0.25, mom) == _is_weak_buy_context(
+            0.25, mom, gate_sensitivity=DEFAULT_GATE_SENSITIVITY,
+        )
+
+    def test_is_weak_buy_context_sensitivity_one_fires_on_single_condition(self):
+        from Strategy_Auto_Trader.core.quality_gate import _is_weak_buy_context
+        mom = self._mom(above_sma50=False)  # exactly 1 weak condition
+        assert _is_weak_buy_context(0.5, mom, gate_sensitivity=2) is False
+        assert _is_weak_buy_context(0.5, mom, gate_sensitivity=1) is True
+
+    def test_is_weak_buy_context_sensitivity_five_requires_all_conditions(self):
+        from Strategy_Auto_Trader.core.quality_gate import _is_weak_buy_context
+        mom = self._mom(above_sma50=False, volume_ratio=0.8)  # 2 weak conditions
+        assert _is_weak_buy_context(0.25, mom, gate_sensitivity=2) is True
+        assert _is_weak_buy_context(0.25, mom, gate_sensitivity=5) is False
+
+    def test_is_adverse_exit_context_sensitivity_one_fires_on_single_condition(self):
+        from Strategy_Auto_Trader.core.quality_gate import _is_adverse_exit_context
+        mom = self._mom(cur_rsi=35.0)  # exactly 1 adverse condition
+        assert _is_adverse_exit_context(0.5, mom, gate_sensitivity=2) is False
+        assert _is_adverse_exit_context(0.5, mom, gate_sensitivity=1) is True
+
+    def test_apply_quality_gate_gate_sensitivity_threaded_through(self):
+        """gate_sensitivity passed to _apply_quality_gate reaches both the
+        weak-buy and adverse-exit checks, not just one."""
+        from Strategy_Auto_Trader.core.quality_gate import _apply_quality_gate
+        sig = {"flag": "BUY", "score": 3.0, "max_score": 4.0}
+        mom = self._mom(above_sma50=False)  # 1 weak condition, not enough at default sensitivity
+        gate = _apply_quality_gate(sig, mom, 0.5, False, gate_sensitivity=2)
+        assert gate["flag"] == "BUY"
+        gate = _apply_quality_gate(sig, mom, 0.5, False, gate_sensitivity=1)
+        assert gate["flag"] == "HOLD"

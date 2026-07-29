@@ -1773,6 +1773,26 @@ class TestProcessLock:
         assert live_daemon.acquire_process_lock(logger, takeover=True) is False
         assert logger.critical.called
 
+    def test_takeover_retries_lock_after_slow_kill(self, monkeypatch):
+        """Regression: killing a slow-to-die holder can itself take longer
+        than the takeover deadline. That must not cause the retry to be
+        abandoned before it even attempts to re-acquire the now-free lock."""
+        logger = mock.Mock()
+        monkeypatch.setattr(live_daemon, "_read_holder_pid", lambda: 999)
+        monkeypatch.setattr(live_daemon, "_kill_daemon_process",
+                             lambda pid, logger: True)
+
+        try_lock_results = iter([False, True])
+        monkeypatch.setattr(live_daemon, "_try_lock",
+                             lambda handle: next(try_lock_results))
+
+        # Kill "took" 20s — past the 15s deadline budget computed at loop start.
+        clock = iter([1000.0, 1020.0])
+        monkeypatch.setattr(live_daemon.time, "time", lambda: next(clock))
+
+        assert live_daemon.acquire_process_lock(logger, takeover=True) is True
+        assert not logger.critical.called
+
 
 class TestDaemonCmdlineMatch:
     def test_matches_module_invocation(self):
