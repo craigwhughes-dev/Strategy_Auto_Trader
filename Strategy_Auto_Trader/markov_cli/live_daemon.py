@@ -618,6 +618,19 @@ def execute_signals_with_retry(
             )
             if daemon_state is not None:
                 daemon_state["halt_new_entries"] = True
+                # A mid-run interrupt leaves an in-flight marker exactly like a
+                # startup crash does. Flag it so the main loop re-enters the
+                # startup-reconciliation retry branch (which verifies against
+                # the broker's open orders before clearing) on its own, instead
+                # of requiring a manual daemon restart to recover.
+                daemon_state["needs_reconciliation"] = True
+                # Remember which tickers never got a resolved outcome so they
+                # can be re-evaluated fresh (not replayed at a stale price) the
+                # moment reconciliation clears, instead of waiting for next
+                # hour's cycle. A second interrupt in the same market before
+                # the first is retried just overwrites — the newest unresolved
+                # set is the authoritative one.
+                daemon_state.setdefault("pending_retry_tickers", {})[market_name] = exc.unresolved
                 save_state(daemon_state)
             try:
                 if send_interrupt_alert is None:
@@ -690,6 +703,149 @@ def execute_signals_with_retry(
     return [], [], ticker_list
 
 
+def _evaluate_ticker(
+    ticker: str,
+    overrides: dict[str, dict],
+    defaults: dict,
+    logger: logging.Logger,
+    market_name: str,
+    *,
+    pin_open_strategy: bool,
+) -> dict:
+    """Build ticker_cfg and run process_ticker for a single ticker.
+
+    pin_open_strategy=True carries an already-open position's strategy
+    forward over a watchlist override (must-run / retry paths); the
+    round-robin candidate scan leaves it False since nothing is open yet.
+    """
+    from .batch import process_ticker
+
+    ticker_cfg = {"ticker": ticker, **overrides.get(ticker, {})}
+    if pin_open_strategy:
+        from ..output.trade_state import get_open_strategy
+        pinned_strategy = get_open_strategy(ticker)
+        if pinned_strategy:
+            ticker_cfg["strategy"] = pinned_strategy
+    result = process_ticker(ticker_cfg, defaults, send_email=True)
+    if not str(result.get("status", "")).startswith("OK"):
+        logger.warning(f"[{market_name}] {ticker} processing failed: {result.get('status')}")
+    return result
+
+
+def _execute_processed_tickers(
+    market_name: str,
+    processed: list[dict],
+    config: dict,
+    daemon_state: dict,
+    portfolio: object,
+    broker: object,
+    logger: logging.Logger,
+    protective_stops: bool = False,
+    stop_buffer_pct: float = 1.5,
+) -> None:
+    """Execute signals once for a batch of already-processed tickers."""
+    if not processed:
+        return
+    # Include all tickers with OK status. signal_reader will validate files exist.
+    # SELL signals are prioritized (safer to exit existing positions) over strict validation.
+    ticker_list = [p["ticker"] for p in processed if p.get("status") == "OK"]
+    if not ticker_list:
+        return
+
+    # Dry-run broker fills at supplied prices — feed it this cycle's closes
+    # so the trade log records real prices instead of 0.0.
+    if hasattr(broker, "set_prices"):
+        broker.set_prices({
+            p["ticker"]: p["result"]["close"]
+            for p in processed
+            if p.get("result") and p["result"].get("close")
+        })
+    logger.info(f"[{market_name}] Executing signals for {len(ticker_list)} processed tickers...")
+    try:
+        limit_tracker = portfolio.get_limit_tracker()
+        exec_cfg = config.get("execution", {})
+        daily_buy_limit = exec_cfg.get("daily_buy_limit", 2)
+        daily_sell_limit = exec_cfg.get("daily_sell_limit")
+        if daemon_state.get("halt_new_entries"):
+            logger.warning(f"[{market_name}] Reconciliation mismatch unresolved — new entries blocked")
+            daily_buy_limit = 0
+        elif daemon_state.get("paused_by_user"):
+            logger.info(f"[{market_name}] Buying paused by user — new entries blocked")
+            daily_buy_limit = 0
+        market_currency = get_market_currency(market_name, config)
+        buys, sells, skipped = execute_signals_with_retry(
+            market_name, ticker_list, DATA_DIR, portfolio, limit_tracker, broker,
+            daily_buy_limit, daily_sell_limit, logger,
+            market_currency=market_currency,
+            daemon_state=daemon_state,
+            protective_stops=protective_stops,
+            stop_buffer_pct=stop_buffer_pct,
+        )
+        logger.info(f"  BUY:  {len(buys)}, SELL: {len(sells)}, Skipped: {len(skipped)}")
+        for b in buys:
+            logger.info(f"    BUY: {b}")
+        for s in sells:
+            logger.info(f"    SELL: {s}")
+        portfolio.save()
+    except Exception as e:
+        logger.error(f"  Error executing signals (unrecoverable): {e}")
+
+
+def retry_pending_tickers(
+    config: dict,
+    daemon_state: dict,
+    portfolio: object,
+    broker: object,
+    logger: logging.Logger,
+    protective_stops: bool = False,
+    stop_buffer_pct: float = 1.5,
+) -> None:
+    """Re-evaluate and execute tickers left unresolved by an execution interrupt.
+
+    Runs immediately once reconciliation confirms clear, rather than waiting
+    for that market's next hourly cycle. Re-evaluates fresh (not a replay of
+    the stale signal) so a long outage naturally reflects whatever's true now
+    instead of firing at a stale price. One-shot: the pending record is
+    popped *before* the attempt (consumed), not after — a fresh interrupt
+    during the retry writes its own new pending_retry_tickers entry (via
+    execute_signals_with_retry's own interrupt handler), and popping after
+    the attempt would clobber that fresh write. This is bounded by requiring
+    reconciliation to clear again before the next attempt fires, not a loop.
+    """
+    pending = daemon_state.get("pending_retry_tickers", {})
+    if not pending:
+        return
+
+    for market_name in list(pending.keys()):
+        market_cfg = config.get("markets", {}).get(market_name)
+        if market_cfg is None:
+            daemon_state.get("pending_retry_tickers", {}).pop(market_name, None)
+            continue
+        if not is_trading_hours(market_cfg, logger):
+            logger.info(f"[{market_name}] Market closed — deferring interrupted-ticker retry to next open")
+            continue
+
+        tickers = daemon_state.get("pending_retry_tickers", {}).pop(market_name, [])
+        in_scope = load_in_scope_tickers(market_name, logger)
+        overrides = load_ticker_overrides(market_name, logger)
+        defaults = {"signal_reports_only": True, **market_cfg.get("defaults", {})}
+        retry_tickers = [t for t in tickers if t in in_scope]
+        if not retry_tickers:
+            save_daemon_state(daemon_state)
+            continue
+
+        logger.info(f"[{market_name}] Retrying previously-interrupted ticker(s) immediately: {retry_tickers}")
+        retried = [
+            _evaluate_ticker(ticker, overrides, defaults, logger, market_name, pin_open_strategy=True)
+            for ticker in retry_tickers
+        ]
+        _execute_processed_tickers(
+            market_name, retried, config, daemon_state, portfolio, broker, logger,
+            protective_stops=protective_stops, stop_buffer_pct=stop_buffer_pct,
+        )
+        save_daemon_state(daemon_state)
+
+
 def process_cycle(
     market_name: str,
     market_cfg: dict,
@@ -706,9 +862,6 @@ def process_cycle(
 
     Returns number of tickers processed.
     """
-    from .batch import process_ticker
-    from ..output.trade_state import get_open_strategy
-
     if last_cycle_hour is None:
         last_cycle_hour = {}
 
@@ -748,13 +901,7 @@ def process_cycle(
         _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
 
         logger.debug(f"  Processing {ticker}")
-        ticker_cfg = {"ticker": ticker, **overrides.get(ticker, {})}
-        pinned_strategy = get_open_strategy(ticker)
-        if pinned_strategy:
-            ticker_cfg["strategy"] = pinned_strategy
-        result = process_ticker(ticker_cfg, defaults, send_email=True)
-        if not str(result.get("status", "")).startswith("OK"):
-            logger.warning(f"[{market_name}] {ticker} processing failed: {result.get('status')}")
+        result = _evaluate_ticker(ticker, overrides, defaults, logger, market_name, pin_open_strategy=True)
         processed.append(result)
 
     # Stage 2: candidates (round-robin through rest)
@@ -783,10 +930,7 @@ def process_cycle(
             _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
 
             logger.debug(f"  Processing {ticker}")
-            ticker_cfg = {"ticker": ticker, **overrides.get(ticker, {})}
-            result = process_ticker(ticker_cfg, defaults, send_email=True)
-            if not str(result.get("status", "")).startswith("OK"):
-                logger.warning(f"[{market_name}] {ticker} processing failed: {result.get('status')}")
+            result = _evaluate_ticker(ticker, overrides, defaults, logger, market_name, pin_open_strategy=False)
             processed.append(result)
             n_attempted += 1
 
@@ -795,49 +939,10 @@ def process_cycle(
         )
 
     # Execute signals once for all processed tickers this cycle
-    if processed:
-        from .execute import execute_signals
-        # Include all tickers with OK status. signal_reader will validate files exist.
-        # SELL signals are prioritized (safer to exit existing positions) over strict validation.
-        ticker_list = [p["ticker"] for p in processed if p.get("status") == "OK"]
-        if ticker_list:
-            # Dry-run broker fills at supplied prices — feed it this cycle's closes
-            # so the trade log records real prices instead of 0.0.
-            if hasattr(broker, "set_prices"):
-                broker.set_prices({
-                    p["ticker"]: p["result"]["close"]
-                    for p in processed
-                    if p.get("result") and p["result"].get("close")
-                })
-            logger.info(f"[{market_name}] Executing signals for {len(ticker_list)} processed tickers...")
-            try:
-                limit_tracker = portfolio.get_limit_tracker()
-                exec_cfg = config.get("execution", {})
-                daily_buy_limit = exec_cfg.get("daily_buy_limit", 2)
-                daily_sell_limit = exec_cfg.get("daily_sell_limit")
-                if daemon_state.get("halt_new_entries"):
-                    logger.warning(f"[{market_name}] Reconciliation mismatch unresolved — new entries blocked")
-                    daily_buy_limit = 0
-                elif daemon_state.get("paused_by_user"):
-                    logger.info(f"[{market_name}] Buying paused by user — new entries blocked")
-                    daily_buy_limit = 0
-                market_currency = get_market_currency(market_name, config)
-                buys, sells, skipped = execute_signals_with_retry(
-                    market_name, ticker_list, DATA_DIR, portfolio, limit_tracker, broker,
-                    daily_buy_limit, daily_sell_limit, logger,
-                    market_currency=market_currency,
-                    daemon_state=daemon_state,
-                    protective_stops=protective_stops,
-                    stop_buffer_pct=stop_buffer_pct,
-                )
-                logger.info(f"  BUY:  {len(buys)}, SELL: {len(sells)}, Skipped: {len(skipped)}")
-                for b in buys:
-                    logger.info(f"    BUY: {b}")
-                for s in sells:
-                    logger.info(f"    SELL: {s}")
-                portfolio.save()
-            except Exception as e:
-                logger.error(f"  Error executing signals (unrecoverable): {e}")
+    _execute_processed_tickers(
+        market_name, processed, config, daemon_state, portfolio, broker, logger,
+        protective_stops=protective_stops, stop_buffer_pct=stop_buffer_pct,
+    )
 
     elapsed = time.time() - cycle_start
     logger.info(f"[{market_name}] Cycle done: {len(processed)} tickers processed, "
@@ -1366,13 +1471,23 @@ def main(argv: list[str] | None = None) -> int:
                 # Check overnight screening
                 check_overnight_screening(config, daemon_state, logger)
 
-                # Startup reconciliation — run on every poll until resolved (live mode only)
-                if not dry_run and not startup_reconciliation_done:
+                # Startup reconciliation — run on every poll until resolved (live mode
+                # only). Also re-entered whenever a mid-run execution interrupt sets
+                # needs_reconciliation, so a dropped socket self-heals within one poll
+                # interval instead of requiring a daemon restart.
+                if not dry_run and (not startup_reconciliation_done or daemon_state.get("needs_reconciliation")):
                     if run_startup_reconciliation(daemon_state, portfolio, broker, logger):
                         startup_reconciliation_done = True
+                        daemon_state["needs_reconciliation"] = False
+                        save_daemon_state(daemon_state)
                         logger.info("Startup reconciliation complete — resuming normal entry evaluation")
                         if args.protective_stops:
                             check_protective_stops(portfolio, broker, logger, args.stop_buffer_pct)
+                        retry_pending_tickers(
+                            config, daemon_state, portfolio, broker, logger,
+                            protective_stops=args.protective_stops,
+                            stop_buffer_pct=args.stop_buffer_pct,
+                        )
 
                 # Nightly broker/state reconciliation (real broker only)
                 if not dry_run:

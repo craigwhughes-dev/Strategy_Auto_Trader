@@ -1161,6 +1161,48 @@ def test_main_startup_reconciliation_retries_until_done(monkeypatch, config, tmp
     assert len(startup_recon_calls) == 2  # Called twice: fails, retries, succeeds
 
 
+def test_main_retries_pending_tickers_after_reconciliation_clears(monkeypatch, config, tmp_path):
+    """Once startup reconciliation succeeds, retry_pending_tickers is invoked —
+    this is what lets an interrupted ticker fire again within one poll interval
+    instead of waiting for that market's next hourly cycle."""
+    from Strategy_Auto_Trader.core import self_check
+
+    monkeypatch.setattr(live_daemon, "setup_logging", lambda: mock.Mock())
+    monkeypatch.setattr(live_daemon, "load_config", lambda: config)
+    monkeypatch.setattr(live_daemon, "validate_startup_environment", lambda logger: True)
+    monkeypatch.setattr(live_daemon, "acquire_process_lock",
+                        lambda logger, takeover=False: True)
+    monkeypatch.setattr(live_daemon, "release_process_lock", lambda logger: None)
+    monkeypatch.setattr(live_daemon, "kill_stray_daemons", lambda logger: 0)
+    monkeypatch.setattr(live_daemon, "cleanup_incomplete_runs", lambda d, l: 0)
+    monkeypatch.setattr(self_check, "run_startup_checks", lambda **kwargs: None)
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(live_daemon, "run_startup_reconciliation", lambda *a, **k: True)
+
+    retry_calls = []
+    monkeypatch.setattr(live_daemon, "retry_pending_tickers",
+                        lambda *a, **k: retry_calls.append(1))
+
+    loop_count = [0]
+
+    def fake_check_overnight(*args):
+        loop_count[0] += 1
+        if loop_count[0] >= 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(live_daemon, "check_overnight_screening", fake_check_overnight)
+    monkeypatch.setattr(live_daemon, "check_nightly_reconciliation", lambda *a, **k: None)
+    monkeypatch.setattr(live_daemon, "process_manual_commands_wrapper", lambda *a, **k: None)
+    monkeypatch.setattr(live_daemon, "_write_app_status_snapshot_safe", lambda *a, **k: None)
+    monkeypatch.setattr(live_daemon, "is_trading_hours", lambda *a, **k: False)
+    monkeypatch.setattr(live_daemon.time, "sleep", lambda s: None)
+
+    config["execution"]["dry_run"] = False
+    assert live_daemon.main([]) == 0
+
+    assert retry_calls  # retry_pending_tickers was invoked after reconciliation succeeded
+
+
 class TestNightlyRoundup:
     """Nightly roundup email collection and sending."""
 
@@ -1445,6 +1487,8 @@ class TestExecuteSignalsWithRetry:
         )
 
         assert daemon_state["halt_new_entries"] is True
+        assert daemon_state["needs_reconciliation"] is True
+        assert daemon_state["pending_retry_tickers"] == {"ftse": ["MSFT", "GOOG"]}
         assert result == (["AAPL x100 @ 150.0"], [], ["MSFT", "GOOG"])
         assert logger.critical.called
         assert not broker.disconnect.called  # Should not retry
@@ -1483,7 +1527,44 @@ class TestExecuteSignalsWithRetry:
         )
 
         assert daemon_state["halt_new_entries"] is True
+        assert daemon_state["needs_reconciliation"] is True
+        assert daemon_state["pending_retry_tickers"] == {"ftse": ["MSFT"]}
         assert result == ([], ["AAPL x100 @ 145.0"], ["MSFT"])
+
+    def test_pending_retry_tickers_overwritten_on_second_interrupt_same_market(self, monkeypatch):
+        """A second interrupt in the same market before the first is retried
+        overwrites the pending list — the newest unresolved set is authoritative,
+        no merge logic."""
+        from Strategy_Auto_Trader.markov_cli import execute as execute_mod
+
+        broker = mock.Mock()
+        logger = mock.Mock()
+        daemon_state = {"halt_new_entries": False}
+
+        def make_fake_execute(unresolved):
+            def fake_execute(*args, **kwargs):
+                raise execute_mod.ExecutionInterrupted(
+                    RuntimeError("Socket lost"), buys=[], sells=[], skipped=[], unresolved=unresolved,
+                )
+            return fake_execute
+
+        live_daemon.execute_signals_with_retry(
+            "ftse", ["AAPL"], None, None, None, broker,
+            2, None, logger, daemon_state=daemon_state,
+            execute_signals=make_fake_execute(["AAPL"]),
+            save_state=lambda s: None,
+            send_interrupt_alert=lambda *a, **k: None,
+        )
+        assert daemon_state["pending_retry_tickers"] == {"ftse": ["AAPL"]}
+
+        live_daemon.execute_signals_with_retry(
+            "ftse", ["MSFT", "GOOG"], None, None, None, broker,
+            2, None, logger, daemon_state=daemon_state,
+            execute_signals=make_fake_execute(["MSFT", "GOOG"]),
+            save_state=lambda s: None,
+            send_interrupt_alert=lambda *a, **k: None,
+        )
+        assert daemon_state["pending_retry_tickers"] == {"ftse": ["MSFT", "GOOG"]}
 
     def test_execution_interrupted_no_orders_still_halts_and_alerts(self, monkeypatch):
         """ExecutionInterrupted with empty buys/sells still halts — unresolved's
@@ -1524,6 +1605,7 @@ class TestExecuteSignalsWithRetry:
         )
 
         assert daemon_state["halt_new_entries"] is True
+        assert daemon_state["pending_retry_tickers"] == {"ftse": ["AAPL", "MSFT"]}
         assert result == ([], [], ["AAPL", "MSFT"])
         assert call_count[0] == 1  # No retry — halted on first interrupt
         assert not broker.disconnect.called  # Should not retry
@@ -2221,6 +2303,178 @@ def test_process_cycle_logs_warning_on_round_robin_fail_status(monkeypatch):
     assert logger.warning.called
     calls = [c for c in logger.warning.call_args_list if "processing failed" in str(c)]
     assert len(calls) > 0
+
+
+class TestRetryPendingTickers:
+    """retry_pending_tickers: immediate re-evaluation of interrupted trades,
+    instead of waiting for that market's next hourly cycle."""
+
+    def _config(self):
+        return {
+            "markets": {"ftse": {}},
+            "execution": {"daily_buy_limit": 2},
+        }
+
+    def test_noop_when_none_pending(self, monkeypatch):
+        daemon_state = {}
+        called = []
+        monkeypatch.setattr(live_daemon, "is_trading_hours", lambda *a, **k: called.append(1) or True)
+
+        live_daemon.retry_pending_tickers(
+            self._config(), daemon_state, portfolio=mock.Mock(), broker=mock.Mock(), logger=mock.Mock(),
+        )
+
+        assert not called  # never even looked at trading hours — nothing pending
+
+    def test_reevaluates_fresh_and_executes_via_execute_signals_with_retry(self, monkeypatch):
+        """Must re-run process_ticker (fresh signal), and go through
+        execute_signals_with_retry — not a bespoke call to execute_signals."""
+        from Strategy_Auto_Trader.markov_cli import batch
+
+        daemon_state = {"pending_retry_tickers": {"ftse": ["MNG.L"]}}
+        process_ticker_calls = []
+
+        def fake_process_ticker(ticker_cfg, defaults, send_email):
+            process_ticker_calls.append(ticker_cfg["ticker"])
+            return {"ticker": ticker_cfg["ticker"], "status": "OK", "result": {"close": 1.5}}
+
+        exec_calls = []
+
+        def fake_execute_signals_with_retry(*args, **kwargs):
+            exec_calls.append((args, kwargs))
+            return (["MNG.L x17 @ 1.5"], [], [])
+
+        monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
+        monkeypatch.setattr(live_daemon, "is_trading_hours", lambda *a, **k: True)
+        monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["MNG.L"])
+        monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: {})
+        monkeypatch.setattr(live_daemon, "execute_signals_with_retry", fake_execute_signals_with_retry)
+        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
+
+        live_daemon.retry_pending_tickers(
+            self._config(), daemon_state, portfolio=mock.Mock(), broker=mock.Mock(), logger=mock.Mock(),
+        )
+
+        assert process_ticker_calls == ["MNG.L"]
+        assert len(exec_calls) == 1
+        assert exec_calls[0][0][1] == ["MNG.L"]  # ticker_list positional arg
+
+    def test_skips_market_closed(self, monkeypatch):
+        """Market closed by the time reconciliation clears — don't fire, and
+        leave the pending record for a real next-cycle attempt."""
+        from Strategy_Auto_Trader.markov_cli import batch
+
+        daemon_state = {"pending_retry_tickers": {"ftse": ["MNG.L"]}}
+        process_ticker_calls = []
+        monkeypatch.setattr(batch, "process_ticker",
+                            lambda *a, **k: process_ticker_calls.append(1))
+        monkeypatch.setattr(live_daemon, "is_trading_hours", lambda *a, **k: False)
+        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
+
+        live_daemon.retry_pending_tickers(
+            self._config(), daemon_state, portfolio=mock.Mock(), broker=mock.Mock(), logger=mock.Mock(),
+        )
+
+        assert not process_ticker_calls
+        assert daemon_state["pending_retry_tickers"] == {"ftse": ["MNG.L"]}  # left in place
+
+    def test_drops_ticker_no_longer_in_scope(self, monkeypatch):
+        """Ticker removed from the watchlist since the interrupt — drop it,
+        don't evaluate it, and clear the pending record (one-shot)."""
+        from Strategy_Auto_Trader.markov_cli import batch
+
+        daemon_state = {"pending_retry_tickers": {"ftse": ["MNG.L"]}}
+        process_ticker_calls = []
+        monkeypatch.setattr(batch, "process_ticker",
+                            lambda *a, **k: process_ticker_calls.append(1))
+        monkeypatch.setattr(live_daemon, "is_trading_hours", lambda *a, **k: True)
+        monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: [])  # removed
+        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
+
+        live_daemon.retry_pending_tickers(
+            self._config(), daemon_state, portfolio=mock.Mock(), broker=mock.Mock(), logger=mock.Mock(),
+        )
+
+        assert not process_ticker_calls
+        assert daemon_state["pending_retry_tickers"] == {}
+
+    @pytest.mark.parametrize("exec_result", [
+        (["MNG.L x17 @ 1.5"], [], []),  # BUY fired
+        ([], ["MNG.L x17 @ 1.6"], []),  # SELL fired
+        ([], [], ["MNG.L(HOLD)"]),      # signal no longer warrants entry
+    ])
+    def test_clears_entry_after_attempt_regardless_of_outcome(self, monkeypatch, exec_result):
+        from Strategy_Auto_Trader.markov_cli import batch
+
+        daemon_state = {"pending_retry_tickers": {"ftse": ["MNG.L"]}}
+        monkeypatch.setattr(batch, "process_ticker",
+                            lambda ticker_cfg, defaults, send_email: {
+                                "ticker": ticker_cfg["ticker"], "status": "OK", "result": {"close": 1.5}})
+        monkeypatch.setattr(live_daemon, "is_trading_hours", lambda *a, **k: True)
+        monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["MNG.L"])
+        monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: {})
+        monkeypatch.setattr(live_daemon, "execute_signals_with_retry", lambda *a, **k: exec_result)
+        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
+
+        live_daemon.retry_pending_tickers(
+            self._config(), daemon_state, portfolio=mock.Mock(), broker=mock.Mock(), logger=mock.Mock(),
+        )
+
+        assert daemon_state["pending_retry_tickers"] == {}
+
+    def test_reinterrupt_during_retry_rearms_without_infinite_loop(self, monkeypatch):
+        """If the retry itself hits a fresh ExecutionInterrupted, halt/needs_reconciliation
+        get re-armed with a fresh pending list — bounded by requiring reconciliation
+        to clear again, not a runaway loop."""
+        from Strategy_Auto_Trader.markov_cli import batch, execute as execute_mod
+
+        daemon_state = {"pending_retry_tickers": {"ftse": ["MNG.L"]}, "halt_new_entries": False}
+        monkeypatch.setattr(batch, "process_ticker",
+                            lambda ticker_cfg, defaults, send_email: {
+                                "ticker": ticker_cfg["ticker"], "status": "OK", "result": {"close": 1.5}})
+        monkeypatch.setattr(live_daemon, "is_trading_hours", lambda *a, **k: True)
+        monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["MNG.L"])
+        monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: {})
+        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
+
+        def fake_execute_signals(*args, **kwargs):
+            raise execute_mod.ExecutionInterrupted(
+                RuntimeError("Socket disconnect again"), buys=[], sells=[], skipped=[],
+                unresolved=["MNG.L"],
+            )
+
+        monkeypatch.setattr(execute_mod, "execute_signals", fake_execute_signals)
+
+        live_daemon.retry_pending_tickers(
+            self._config(), daemon_state, portfolio=mock.Mock(), broker=mock.Mock(), logger=mock.Mock(),
+        )
+
+        assert daemon_state["halt_new_entries"] is True
+        assert daemon_state["needs_reconciliation"] is True
+        assert daemon_state["pending_retry_tickers"] == {"ftse": ["MNG.L"]}  # freshly re-set, not stuck
+
+    def test_batches_multiple_tickers_one_execute_call(self, monkeypatch):
+        from Strategy_Auto_Trader.markov_cli import batch
+
+        daemon_state = {"pending_retry_tickers": {"ftse": ["MNG.L", "AV.L"]}}
+        monkeypatch.setattr(batch, "process_ticker",
+                            lambda ticker_cfg, defaults, send_email: {
+                                "ticker": ticker_cfg["ticker"], "status": "OK", "result": {"close": 1.5}})
+        monkeypatch.setattr(live_daemon, "is_trading_hours", lambda *a, **k: True)
+        monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["MNG.L", "AV.L"])
+        monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: {})
+        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
+
+        exec_calls = []
+        monkeypatch.setattr(live_daemon, "execute_signals_with_retry",
+                            lambda *a, **k: exec_calls.append(a) or ([], [], []))
+
+        live_daemon.retry_pending_tickers(
+            self._config(), daemon_state, portfolio=mock.Mock(), broker=mock.Mock(), logger=mock.Mock(),
+        )
+
+        assert len(exec_calls) == 1
+        assert sorted(exec_calls[0][1]) == ["AV.L", "MNG.L"]
 
 
 if __name__ == "__main__":
