@@ -35,294 +35,24 @@ Usage:
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from . import full_scan
-from ..output.journal import LIVE_JOURNAL, TradeRecord, append_trades, extract_trades_from_detail
-from ..plugins.context_adjuster import SentimentAdjuster
+from ..output.journal import LIVE_JOURNAL, TradeRecord, append_trades
 from ..plugins.costs import COST_MODEL_CHOICES, make_cost_model
 from ..plugins.interest import IbkrTieredInterest
-from ..plugins.persistent_hmm import PersistentHMMRegimeModel
-from ..quant_hmm.consolidated_engine import consolidated_backtest
-from ..quant_hmm.data_cache import fetch_hourly_cached
-from ..quant_hmm.vol_screen import rolling_trend_quality
-from ..strategy.base.registry import resolve_strategy, wants_low_trend_quality
-
-_HMM_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "state" / "hmm_cache"
-
-
-@dataclass
-class _Candidate:
-    """A single strategy's round-trip trade, before shared-capital arbitration."""
-    ticker: str
-    date_opened: pd.Timestamp
-    date_closed: pd.Timestamp
-    entry_score: float
-    kelly_fraction: float
-    return_pct: float
-    record: TradeRecord
-
-
-def _recent_win_rate(candidates: list[_Candidate], ticker: str, lookback_days: int = 60) -> float:
-    """Win-rate for a ticker over lookback_days window (measured from latest candidate).
-
-    Returns fraction of trades that were profitable (return_pct > 0), or 0.5 if
-    no trades in window."""
-    ticker_cands = [c for c in candidates if c.ticker == ticker]
-    if not ticker_cands:
-        return 0.5
-
-    if lookback_days:
-        latest = max(c.date_opened for c in ticker_cands)
-        cutoff = latest - pd.Timedelta(days=lookback_days)
-        ticker_cands = [c for c in ticker_cands if c.date_opened >= cutoff]
-
-    if not ticker_cands:
-        return 0.5
-
-    wins = sum(1 for c in ticker_cands if c.return_pct > 0)
-    return wins / len(ticker_cands)
-
-
-def _trend_quality_asof(
-    ticker: str, when: pd.Timestamp, trend_quality_by_ticker: dict[str, pd.Series]
-) -> float | None:
-    """Look up trend_quality as of `when` (last known score at/before that moment).
-
-    Returns None if there's no series or insufficient data."""
-    series = trend_quality_by_ticker.get(ticker)
-    if series is None or series.empty:
-        return None
-
-    lookup = when
-    idx_tz = getattr(series.index, "tz", None)
-    if idx_tz is not None and lookup.tzinfo is None:
-        lookup = lookup.tz_localize(idx_tz)
-    elif idx_tz is None and lookup.tzinfo is not None:
-        lookup = lookup.tz_localize(None)
-
-    try:
-        score = series.asof(lookup)
-    except Exception:
-        return None
-    if score is None or (isinstance(score, float) and np.isnan(score)):
-        return None
-    return float(score)
-
-
-def _ticker_ranking_score(
-    ticker: str,
-    candidates: list[_Candidate],
-    trend_quality_by_ticker: dict[str, pd.Series],
-    as_of_date: pd.Timestamp,
-    vol_weight: float = 0.7,
-    win_rate_weight: float = 0.3,
-    lookback_days: int = 60,
-) -> float:
-    """Hybrid score: vol_weight * trend_quality_normalized + win_rate_weight * win_rate.
-
-    trend_quality is clipped to [0,1]; win_rate is [0,1]. Returns [0,1] combined score."""
-    tq = _trend_quality_asof(ticker, as_of_date, trend_quality_by_ticker)
-    if tq is None:
-        tq = 0.5
-    tq_normalized = max(0.0, min(1.0, tq))
-
-    wr = _recent_win_rate(candidates, ticker, lookback_days)
-    return vol_weight * tq_normalized + win_rate_weight * wr
-
-
-def _filter_candidates_by_top_tickers(
-    candidates: list[_Candidate],
-    trend_quality_by_ticker: dict[str, pd.Series],
-    top_k: int,
-    vol_weight: float = 0.7,
-    win_rate_weight: float = 0.3,
-    lookback_days: int = 60,
-) -> tuple[list[_Candidate], dict[str, float]]:
-    """Keep only candidates from top-K tickers by hybrid (vol + win-rate) ranking.
-
-    Each ticker is scored as median of all its candidate entry-day scores, then
-    top-K are selected. Returns (filtered_candidates, ticker_scores_dict for diagnostics)."""
-    if top_k <= 0:
-        return candidates, {}
-
-    ticker_scores_by_date: dict[str, list[float]] = {}
-    for c in candidates:
-        score = _ticker_ranking_score(
-            c.ticker, candidates, trend_quality_by_ticker, c.date_opened,
-            vol_weight, win_rate_weight, lookback_days
-        )
-        ticker_scores_by_date.setdefault(c.ticker, []).append(score)
-
-    ticker_median_score = {
-        ticker: float(np.median(scores))
-        for ticker, scores in ticker_scores_by_date.items()
-    }
-
-    top_tickers = set(sorted(ticker_median_score.keys(),
-                             key=lambda t: -ticker_median_score[t])[:top_k])
-
-    filtered = [c for c in candidates if c.ticker in top_tickers]
-    return filtered, ticker_median_score
-
-
-def _run_ticker_backtest(
-    ticker: str, strategy_name: str, vol_filter_ok: bool = True,
-) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
-    """Fetch data and run one ticker's full-history backtest.
-
-    Shared by _fetch_and_extract (candidates only) and _fetch_extract_and_prices
-    (candidates + close-price series + rolling trend_quality, for mark-to-market
-    valuation and daily vol-filter rescreening) so the fetch + consolidated_backtest
-    call isn't duplicated between the two.
-
-    Returns (detail_df, hourly_ohlc_df), or (None, None) on missing/insufficient
-    data. The full OHLC frame (not just Close) is returned so callers needing
-    High/Low (e.g. for rolling_trend_quality) don't have to re-fetch.
-    """
-    df = fetch_hourly_cached(ticker, period="730d")
-    if df is None or df.empty:
-        return None, None
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    entry_s, exit_s = resolve_strategy(strategy_name, vol_filter_ok=vol_filter_ok)
-
-    safe_ticker = ticker.replace("/", "-").replace("\\", "-")
-    regime_model = PersistentHMMRegimeModel(
-        _HMM_CACHE_DIR / f"{safe_ticker}.pkl",
-        dates=df.index,
-        closes=df["Close"].values,
-    )
-
-    bt = consolidated_backtest(
-        df,
-        regime_model=regime_model,
-        context_adjuster=SentimentAdjuster(),
-        entry_strategy=entry_s,
-        exit_strategy=exit_s,
-    )
-    regime_model.save()
-    detail = bt.get("detail", pd.DataFrame())
-    if detail.empty:
-        return None, None
-    return detail, df
-
-
-def _daily_ohlc_from_hourly(df: pd.DataFrame) -> pd.DataFrame:
-    """Resample hourly OHLC bars to daily (High=max, Low=min, Close=last),
-    dropping non-trading days — input for rolling_trend_quality(), reusing
-    data already fetched for the backtest rather than a separate daily fetch."""
-    daily = df.resample("1D").agg({"High": "max", "Low": "min", "Close": "last"})
-    return daily.dropna(subset=["Close"])
-
-
-def _candidates_from_detail(
-    ticker: str, detail: pd.DataFrame, strategy_name: str, vol_filter_tag: str
-) -> list[_Candidate]:
-    """Extract round-trip trades from a backtest detail frame into _Candidate objects."""
-    trades = extract_trades_from_detail(
-        ticker, detail.reset_index(), strategy=strategy_name, vol_filter=vol_filter_tag
-    )
-    candidates = []
-    for t in trades:
-        try:
-            opened = pd.Timestamp(t.date_opened)
-            closed = pd.Timestamp(t.date_closed)
-        except Exception:
-            continue
-        candidates.append(_Candidate(
-            ticker=ticker,
-            date_opened=opened,
-            date_closed=closed,
-            entry_score=t.entry_score,
-            kelly_fraction=t.kelly_fraction,
-            return_pct=t.return_pct,
-            record=t,
-        ))
-    return candidates
-
-
-def _fetch_and_extract(
-    ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True,
-) -> list[_Candidate]:
-    """Run one ticker's full-history backtest and extract its round-trip trades.
-
-    vol_filter_ok is passed straight into the strategy's own built-in veto
-    (baked into every Entry class) — this is a bool, not a re-lookup, since
-    the caller has usually already screened the ticker once (efficiency).
-    """
-    detail, _df = _run_ticker_backtest(ticker, strategy_name, vol_filter_ok)
-    if detail is None:
-        print(f"  {ticker}: no data or insufficient data, skipping")
-        return []
-    return _candidates_from_detail(ticker, detail, strategy_name, vol_filter_tag)
-
-
-def _fetch_extract_and_prices(
-    ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True,
-) -> tuple[list[_Candidate], pd.Series | None, pd.Series | None]:
-    """Like _fetch_and_extract, but also returns the ticker's close-price series
-    (for mark-to-market valuation) and its rolling trend_quality series (for
-    daily vol-filter rescreening — see rolling_trend_quality()'s docstring for
-    why a single "as of today" snapshot can't be used across a historical
-    backtest). Top-level function so it's picklable for ProcessPoolExecutor."""
-    detail, df = _run_ticker_backtest(ticker, strategy_name, vol_filter_ok)
-    if detail is None:
-        return [], None, None
-    candidates = _candidates_from_detail(ticker, detail, strategy_name, vol_filter_tag)
-    trend_quality = rolling_trend_quality(_daily_ohlc_from_hourly(df))
-    return candidates, df["Close"], trend_quality
-
-
-def generate_candidates(
-    tickers: list[str],
-    strategy_name: str,
-    vol_filter_tag: str = "suitable",
-    vol_filter_ok: bool = True,
-    workers: int = 1,
-) -> tuple[list[_Candidate], dict[str, pd.Series], dict[str, pd.Series]]:
-    """Generate one strategy's candidate trades across a ticker list, optionally
-    in parallel, retaining each ticker's close-price series (mark-to-market)
-    and rolling trend_quality series (daily vol-filter rescreening — see
-    rolling_trend_quality()). Does not arbitrate against any capital pot, nor
-    apply the vol filter itself — see arbitrate() for capital arbitration
-    (re-runnable cheaply per pot size against the same candidates) and
-    main()'s per-candidate filtering step for the vol gate."""
-    all_candidates: list[_Candidate] = []
-    price_by_ticker: dict[str, pd.Series] = {}
-    trend_quality_by_ticker: dict[str, pd.Series] = {}
-
-    if workers > 1 and len(tickers) > 1:
-        with ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(_fetch_extract_and_prices, t, strategy_name, vol_filter_tag, vol_filter_ok): t
-                for t in tickers
-            }
-            for future in as_completed(futures):
-                ticker = futures[future]
-                cands, close, trend_quality = future.result()
-                all_candidates.extend(cands)
-                if close is not None:
-                    price_by_ticker[ticker] = close
-                if trend_quality is not None:
-                    trend_quality_by_ticker[ticker] = trend_quality
-    else:
-        for ticker in tickers:
-            cands, close, trend_quality = _fetch_extract_and_prices(ticker, strategy_name, vol_filter_tag, vol_filter_ok)
-            all_candidates.extend(cands)
-            if close is not None:
-                price_by_ticker[ticker] = close
-            if trend_quality is not None:
-                trend_quality_by_ticker[ticker] = trend_quality
-
-    all_candidates.sort(key=lambda c: c.date_opened)
-    return all_candidates, price_by_ticker, trend_quality_by_ticker
+from ..quant_hmm.ticker_ranking import (
+    Candidate,
+    fetch_and_extract,
+    filter_candidates_by_top_tickers,
+    generate_candidates,
+    trend_quality_asof,
+)
+from ..strategy.base.registry import wants_low_trend_quality
 
 
 def _position_value(pos: dict, day: pd.Timestamp, price_by_ticker: dict[str, pd.Series] | None) -> float:
@@ -366,7 +96,7 @@ def _max_drawdown(values: list[float]) -> float:
 
 
 def arbitrate(
-    candidates: list[_Candidate],
+    candidates: list[Candidate],
     initial_cash: float,
     trade_cost: float,
     kelly_fallback: float,
@@ -403,7 +133,7 @@ def arbitrate(
             "n_rejected_cash": 0,
         }
 
-    by_day: dict[pd.Timestamp, list[_Candidate]] = {}
+    by_day: dict[pd.Timestamp, list[Candidate]] = {}
     for c in candidates:
         day = c.date_opened.tz_localize(None).normalize()
         by_day.setdefault(day, []).append(c)
@@ -533,10 +263,10 @@ def simulate_strategy(
     """
     print(f"\n{'='*64}\n Strategy: {strategy_name}  (vol_filter={vol_filter_tag})\n{'='*64}")
 
-    all_candidates: list[_Candidate] = []
+    all_candidates: list[Candidate] = []
     for ticker in tickers:
         print(f"  fetching + backtesting {ticker}...")
-        cands = _fetch_and_extract(ticker, strategy_name, vol_filter_tag, vol_filter_ok)
+        cands = fetch_and_extract(ticker, strategy_name, vol_filter_tag, vol_filter_ok)
         cutoff = pd.Timestamp(start_date)
         # Normalize to naive timestamps for comparison (hourly data is tz-aware)
         cands = [c for c in cands if c.date_opened.tz_localize(None) >= cutoff]
@@ -564,11 +294,11 @@ def simulate_strategy(
 
 
 def _filter_candidates_by_daily_trend_quality(
-    candidates: list[_Candidate],
+    candidates: list[Candidate],
     trend_quality_by_ticker: dict[str, pd.Series],
     min_trend_quality: float,
     wants_low: bool,
-) -> list[_Candidate]:
+) -> list[Candidate]:
     """Keep only candidates whose ticker's trend_quality, as of their own
     entry day, passes the threshold — the daily-rescreen equivalent of
     overnight_scope.py's stage-1 vol screen (screen_market(), which re-runs
@@ -581,7 +311,7 @@ def _filter_candidates_by_daily_trend_quality(
     """
     kept = []
     for c in candidates:
-        score = _trend_quality_asof(c.ticker, c.date_opened, trend_quality_by_ticker)
+        score = trend_quality_asof(c.ticker, c.date_opened, trend_quality_by_ticker)
         if score is None:
             kept.append(c)
             continue
@@ -642,6 +372,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="Weight for trend_quality in hybrid rank (0-1). Default: 0.7.")
     parser.add_argument("--win-rate-weight", type=float, default=0.3,
                         help="Weight for recent win-rate in hybrid rank (0-1). Default: 0.3.")
+    parser.add_argument("--dump-ticker-scores", default=None,
+                        help="Write the --top-k hybrid ticker_scores dict to this path as JSON "
+                             "(ground truth for diffing against rank_universe_cli.py's live output). "
+                             "No effect without --top-k > 0.")
     parser.add_argument("--lookback-days", type=int, default=60,
                         help="Window for computing recent win-rate (days). Default: 60.")
     parser.add_argument("--journal", default=None,
@@ -707,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.top_k > 0:
             n_before = len(candidates)
-            candidates, ticker_scores = _filter_candidates_by_top_tickers(
+            candidates, ticker_scores = filter_candidates_by_top_tickers(
                 candidates, trend_quality_by_ticker, args.top_k,
                 vol_weight=args.vol_weight, win_rate_weight=args.win_rate_weight,
                 lookback_days=args.lookback_days,
@@ -720,6 +454,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"      {t}: score={ticker_scores.get(t, 0):.3f}")
             if len(top_tickers_list) > 5:
                 print(f"      ... and {len(top_tickers_list) - 5} more")
+
+            if args.dump_ticker_scores:
+                dump_path = Path(args.dump_ticker_scores)
+                dump_path.parent.mkdir(parents=True, exist_ok=True)
+                dump_path.write_text(json.dumps(ticker_scores, indent=2), encoding="utf-8")
+                print(f"  ticker_scores dumped to {dump_path}")
 
         if candidates:
             earliest = min(c.date_opened for c in candidates)

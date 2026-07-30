@@ -156,6 +156,8 @@ def run_startup_checks(
     *,
     require_hmm: bool = True,
     require_broker: bool = False,
+    broker_host: str = "127.0.0.1",
+    broker_port: int = 7497,
     logger: logging.Logger | None = None,
 ) -> list[str]:
     """Run applicable checks; raise SelfCheckError listing every failure.
@@ -171,7 +173,10 @@ def run_startup_checks(
         checks.append(("HMM fit", check_hmm_fit))
     if require_broker:
         checks.append(("broker module", check_broker_module))
-        checks.append(("broker connectivity", check_broker_connectivity))
+        checks.append((
+            "broker connectivity",
+            lambda: check_broker_connectivity(host=broker_host, port=broker_port),
+        ))
 
     passed: list[str] = []
     failures: list[str] = []

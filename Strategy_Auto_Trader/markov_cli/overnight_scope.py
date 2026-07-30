@@ -56,7 +56,107 @@ def load_execution_state() -> dict:
         return {}
 
 
-def screen_market(market_name: str, market_cfg: dict, exec_state: dict) -> dict:
+def _top_k_state_path() -> Path:
+    return STATE_DIR / "top_k_universe.json"
+
+
+def _load_previous_top_k_set() -> set[str] | None:
+    """Fallback source when a ranking run fails: reuse the last successful
+    night's top-K ticker set rather than leaving markets unscreened by top-K
+    entirely. Returns None if no prior state exists (first-ever run, or it
+    was never successful)."""
+    path = _top_k_state_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return set(data.get("tickers", []))
+    except Exception:
+        return None
+
+
+def compute_global_top_k(config: dict, exec_state: dict) -> set[str] | None:
+    """Rank the full combined universe once (in a separate subprocess) and
+    return the global top-K ticker set, or None if top_k_screen is
+    disabled/unconfigured (callers then apply no top-K filtering — vol/
+    sentiment screen alone still applies, matching pre-top-K behavior).
+
+    Ranking runs in a standalone subprocess (rank_universe_cli.py), not an
+    in-process ProcessPoolExecutor pool, so it never touches this process's
+    IBKR connection and a hang gets a real OS-level kill via the subprocess
+    timeout rather than an after-the-fact log line.
+
+    On any failure (subprocess timeout, non-zero exit, malformed output):
+    falls back to the previous night's top-K set; if none exists either,
+    returns None (degrades to vol/sentiment-only scope) — a market is never
+    left with zero tickers, and this process never blocks indefinitely.
+    """
+    import subprocess
+    import sys
+    import tempfile
+    import time
+
+    cfg = config.get("top_k_screen", {})
+    if not cfg.get("enabled", False):
+        return None
+
+    k = cfg.get("k", 70)
+    strategy = cfg.get("strategy", "optimised")
+    timeout_seconds = cfg.get("timeout_seconds", 18000)
+    open_positions = set(exec_state.get("positions", {}).keys())
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        output_path = Path(tmp_dir) / "top_k_scores.json"
+        cmd = [
+            sys.executable, "-m", "Strategy_Auto_Trader.markov_cli.rank_universe_cli",
+            "--strategy", strategy,
+            "--vol-weight", str(cfg.get("vol_weight", 0.7)),
+            "--win-rate-weight", str(cfg.get("win_rate_weight", 0.3)),
+            "--lookback-days", str(cfg.get("lookback_days", 60)),
+            "--workers", str(cfg.get("workers", 4)),
+            "--output", str(output_path),
+        ]
+
+        start = time.time()
+        try:
+            result = subprocess.run(
+                cmd, cwd=ROOT, timeout=timeout_seconds,
+                capture_output=True, text=True,
+            )
+            elapsed = time.time() - start
+            if result.returncode != 0:
+                print(f"  top_k_screen: rank_universe_cli exited {result.returncode} "
+                      f"after {elapsed/60:.1f} min, falling back to previous night's set. "
+                      f"stderr: {result.stderr[-500:]}")
+                return _load_previous_top_k_set()
+            scores = json.loads(output_path.read_text(encoding="utf-8"))
+        except subprocess.TimeoutExpired:
+            print(f"  top_k_screen: ranking exceeded {timeout_seconds/3600:.1f}h timeout, "
+                  f"falling back to previous night's set")
+            return _load_previous_top_k_set()
+        except Exception as e:
+            print(f"  top_k_screen: ranking failed ({e}), falling back to previous night's set")
+            return _load_previous_top_k_set()
+
+        print(f"  top_k_screen: ranked {len(scores)} tickers in {elapsed/60:.1f} min")
+
+    top_tickers = set(sorted(scores.keys(), key=lambda t: -scores[t])[:k])
+    top_tickers |= open_positions  # never drop an open position for falling outside top-K
+
+    from ..core.atomic_io import atomic_write_json
+    atomic_write_json(_top_k_state_path(), {
+        "date": datetime.now(timezone.utc).date().isoformat(),
+        "k": k,
+        "strategy": strategy,
+        "tickers": sorted(top_tickers),
+        "scores": scores,
+        "status": "ok",
+    })
+    return top_tickers
+
+
+def screen_market(market_name: str, market_cfg: dict, exec_state: dict,
+                   global_top_k: set[str] | None = None) -> dict:
     """Screen tickers for a single market.
 
     Returns dict with:
@@ -155,6 +255,21 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict) -> dict:
                     "reason": f"sentiment:{label}({score:.2f})"
                 })
 
+    # Stage 3: global top-K ranking intersection (computed once for both
+    # markets by main(), not per-market — see compute_global_top_k())
+    if global_top_k is not None:
+        before = len(stage1_tickers)
+        stage1_tickers = {
+            t for t in stage1_tickers
+            if t in global_top_k or t in open_positions
+        }
+        already_excluded = {e["ticker"] for e in excluded}
+        for ticker in all_tickers:
+            if ticker not in stage1_tickers and ticker not in open_positions and ticker not in already_excluded:
+                excluded.append({"ticker": ticker, "reason": "top_k_screen"})
+        print(f"  top-K filter for {market_name}: {len(stage1_tickers)}/{before} survive "
+              f"(global top-{len(global_top_k)} intersected with market watchlist)")
+
     # Final kept list: stage1 plus any open positions
     kept = sorted(list(stage1_tickers) + [t for t in open_positions if t in all_tickers])
 
@@ -216,6 +331,24 @@ def generate_scoped_watchlist(
         json.dump(scoped_watchlist, f, indent=2)
 
 
+#: Top-level config keys that screen_market() expects to find on market_cfg
+#: (vol_screen/sentiment_screen/exempt_if_open_position are documented as
+#: shared-across-markets defaults, but screen_market() only ever looks at
+#: market_cfg — main() must merge them in, or a market_cfg without its own
+#: override silently gets the function's hardcoded fallbacks instead of the
+#: configured values (e.g. max_downside_vol has no code-level default, so it
+#: silently becomes None/unenforced). Market-level keys win if ever set.
+_MARKET_MERGE_KEYS = ("vol_screen", "sentiment_screen", "exempt_if_open_position")
+
+
+def _with_merged_defaults(market_cfg: dict, config: dict) -> dict:
+    """Return market_cfg with top-level shared blocks merged in under it
+    (market-level values, if present, take precedence)."""
+    merged = {key: config[key] for key in _MARKET_MERGE_KEYS if key in config}
+    merged.update(market_cfg)
+    return merged
+
+
 def main() -> int:
     """Run overnight scope screening for all markets."""
     config = load_config()
@@ -225,9 +358,12 @@ def main() -> int:
     print(f" Overnight scope screening")
     print(f"{'='*64}\n")
 
-    for market_name, market_cfg in config.get("markets", {}).items():
+    global_top_k = compute_global_top_k(config, exec_state)
+
+    for market_name, raw_market_cfg in config.get("markets", {}).items():
         print(f" {market_name}")
-        result = screen_market(market_name, market_cfg, exec_state)
+        market_cfg = _with_merged_defaults(raw_market_cfg, config)
+        result = screen_market(market_name, market_cfg, exec_state, global_top_k=global_top_k)
 
         write_scope_result(market_name, result)
         generate_scoped_watchlist(

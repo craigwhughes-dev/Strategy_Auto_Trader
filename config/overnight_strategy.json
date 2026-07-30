@@ -34,6 +34,16 @@
     "exclude_labels": ["bearish"]
   },
   "exempt_if_open_position": true,
+  "top_k_screen": {
+    "enabled": true,
+    "k": 70,
+    "strategy": "optimised",
+    "vol_weight": 0.7,
+    "win_rate_weight": 0.3,
+    "lookback_days": 60,
+    "workers": 4,
+    "timeout_seconds": 18000
+  },
   "daytime": {
     "cycle_buffer_minutes": 5,
     "max_seconds_per_cycle": 1500,
@@ -45,5 +55,10 @@
     "daily_buy_limit": null,
     "daily_sell_limit": null,
     "dry_run": false
+  },
+  "broker": {
+    "host": "127.0.0.1",
+    "port": 4002,
+    "client_id": 1
   }
 }

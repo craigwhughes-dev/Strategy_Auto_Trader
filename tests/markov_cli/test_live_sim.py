@@ -1,36 +1,12 @@
 from __future__ import annotations
 
-from concurrent.futures import Future
+import json
 from unittest import mock
 
 import pandas as pd
 import pytest
 
 from Strategy_Auto_Trader.output.journal import TradeRecord
-
-
-class _ImmediateExecutor:
-    """Stand-in for ProcessPoolExecutor that runs submitted work synchronously,
-    in-process. Lets tests exercise the parallel dispatch/collection wiring in
-    generate_candidates() without real multiprocessing (which on Windows uses
-    spawn and can't pick up mock.patch effects in child processes)."""
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-    def submit(self, fn, *args, **kwargs):
-        fut = Future()
-        try:
-            fut.set_result(fn(*args, **kwargs))
-        except Exception as exc:  # pragma: no cover - defensive
-            fut.set_exception(exc)
-        return fut
 
 
 @pytest.fixture
@@ -53,13 +29,13 @@ def ts_base():
 
 
 def make_candidate(ticker, day_offset, entry_score, kelly_fraction, return_pct, record, ts_base):
-    """Helper to construct a _Candidate dataclass."""
-    from Strategy_Auto_Trader.markov_cli.live_sim import _Candidate
+    """Helper to construct a Candidate dataclass."""
+    from Strategy_Auto_Trader.markov_cli.live_sim import Candidate
 
     date_opened = ts_base + pd.Timedelta(days=day_offset)
     date_closed = date_opened + pd.Timedelta(days=5)
 
-    return _Candidate(
+    return Candidate(
         ticker=ticker,
         date_opened=date_opened,
         date_closed=date_closed,
@@ -75,7 +51,7 @@ class TestSimulateStrategy:
     def test_empty_candidates_returns_empty_executed(self, base_record, ts_base):
         from Strategy_Auto_Trader.markov_cli.live_sim import simulate_strategy
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_and_extract", return_value=[]):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", return_value=[]):
             result = simulate_strategy(
                 tickers=["TEST"],
                 strategy_name="test",
@@ -93,7 +69,7 @@ class TestSimulateStrategy:
 
         cand = make_candidate("TEST", 0, 1.0, 0.1, 0.05, base_record, ts_base)
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_and_extract", return_value=[cand]):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", return_value=[cand]):
             result = simulate_strategy(
                 tickers=["TEST"],
                 strategy_name="test",
@@ -111,7 +87,7 @@ class TestSimulateStrategy:
 
         cand = make_candidate("TEST", 0, 1.0, 0.1, 0.05, base_record, ts_base)
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_and_extract", return_value=[cand]):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", return_value=[cand]):
             result = simulate_strategy(
                 tickers=["TEST"],
                 strategy_name="test",
@@ -139,7 +115,7 @@ class TestSimulateStrategy:
 
         # cash = 11.0: trade_cost=1.0, kelly_fallback=100.0
         # alloc will be min(100, 11 - 1) = 10
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_and_extract", return_value=[cand]):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", return_value=[cand]):
             result = simulate_strategy(
                 tickers=["TEST"],
                 strategy_name="test",
@@ -166,7 +142,7 @@ class TestSimulateStrategy:
         )
         cand = make_candidate("TEST", 0, 1.0, 0.25, 0.10, rec, ts_base)
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_and_extract", return_value=[cand]):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", return_value=[cand]):
             result = simulate_strategy(
                 tickers=["TEST"],
                 strategy_name="test",
@@ -195,7 +171,7 @@ class TestSimulateStrategy:
         )
         cand = make_candidate("TEST", 0, 1.0, 0.0, 0.05, rec, ts_base)
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_and_extract", return_value=[cand]):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", return_value=[cand]):
             result = simulate_strategy(
                 tickers=["TEST"],
                 strategy_name="test",
@@ -225,7 +201,7 @@ class TestSimulateStrategy:
         cand = make_candidate("TEST", 0, 1.0, 0.5, 0.10, rec, ts_base)
 
         # Initial cash 100: 0.5 * 100 = 50, clamped by (100 - 1) = 99, so 50 is used
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_and_extract", return_value=[cand]):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", return_value=[cand]):
             result = simulate_strategy(
                 tickers=["TEST"],
                 strategy_name="test",
@@ -257,7 +233,7 @@ class TestSimulateStrategy:
         # cash=1.5, trade_cost=1.0: kelly_fallback would be min(100, 0.5) = 0.5
         # But alloc = min(0.5, 1.5 - 1) = min(0.5, 0.5) = 0.5 > 0, so admitted
         # Let's make it negative: cash=1.0 exactly, so 1.0 - 1.0 = 0
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_and_extract", return_value=[cand]):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", return_value=[cand]):
             result = simulate_strategy(
                 tickers=["TEST"],
                 strategy_name="test",
@@ -292,7 +268,7 @@ class TestSimulateStrategy:
         cand1 = make_candidate("A", 0, 3.0, 0.1, 0.05, rec1, ts_base)
         cand2 = make_candidate("B", 0, 1.0, 0.1, 0.05, rec2, ts_base)
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_and_extract", side_effect=[[cand1], [cand2]]):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", side_effect=[[cand1], [cand2]]):
             result = simulate_strategy(
                 tickers=["A", "B"],
                 strategy_name="test",
@@ -330,7 +306,7 @@ class TestSimulateStrategy:
         cand1 = make_candidate("A", 0, 2.0, 0.1, 0.05, rec1, ts_base)
         cand2 = make_candidate("B", 0, 2.0, 0.1, 0.05, rec2, ts_base)
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_and_extract", side_effect=[[cand1], [cand2]]):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", side_effect=[[cand1], [cand2]]):
             result = simulate_strategy(
                 tickers=["A", "B"],
                 strategy_name="test",
@@ -360,7 +336,7 @@ class TestSimulateStrategy:
             records.append(rec)
             candidates.append(make_candidate(f"T{i}", 0, float(i), 0.1, 0.05, rec, ts_base))
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_and_extract", side_effect=[[c] for c in candidates]):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", side_effect=[[c] for c in candidates]):
             result = simulate_strategy(
                 tickers=[f"T{i}" for i in range(3)],
                 strategy_name="test",
@@ -390,7 +366,7 @@ class TestSimulateStrategy:
             records.append(rec)
             candidates.append(make_candidate(f"T{i}", 0, float(4 - i), 0.1, 0.05, rec, ts_base))
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_and_extract", side_effect=[[c] for c in candidates]):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", side_effect=[[c] for c in candidates]):
             result = simulate_strategy(
                 tickers=[f"T{i}" for i in range(4)],
                 strategy_name="test",
@@ -404,7 +380,7 @@ class TestSimulateStrategy:
 
     def test_cash_release_on_position_close_same_day(self, base_record, ts_base):
         """A position closing on day D frees cash for a new entry on the same day."""
-        from Strategy_Auto_Trader.markov_cli.live_sim import simulate_strategy, _Candidate
+        from Strategy_Auto_Trader.markov_cli.live_sim import simulate_strategy, Candidate
 
         # Day 0: candidate opens, closes on day 0 (immediate)
         rec_close_day0 = TradeRecord(
@@ -415,7 +391,7 @@ class TestSimulateStrategy:
             kelly_fraction=0.1,
             return_pct=0.10,
         )
-        cand_close_day0 = _Candidate(
+        cand_close_day0 = Candidate(
             ticker="CLOSE",
             date_opened=ts_base,
             date_closed=ts_base,  # Closes same day
@@ -436,7 +412,7 @@ class TestSimulateStrategy:
         )
         cand_entry = make_candidate("ENTRY", 0, 2.0, 0.1, 0.05, rec_entry, ts_base)
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_and_extract", side_effect=[[cand_close_day0], [cand_entry]]):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", side_effect=[[cand_close_day0], [cand_entry]]):
             result = simulate_strategy(
                 tickers=["CLOSE", "ENTRY"],
                 strategy_name="test",
@@ -451,7 +427,7 @@ class TestSimulateStrategy:
 
     def test_cash_not_released_for_future_close(self, base_record, ts_base):
         """A position closing on day D does not free cash for entry on day D-1."""
-        from Strategy_Auto_Trader.markov_cli.live_sim import simulate_strategy, _Candidate
+        from Strategy_Auto_Trader.markov_cli.live_sim import simulate_strategy, Candidate
 
         # Day 0: candidate opens, closes on day 1
         rec = TradeRecord(
@@ -462,7 +438,7 @@ class TestSimulateStrategy:
             kelly_fraction=0.5,  # 50% of cash
             return_pct=0.10,
         )
-        cand = _Candidate(
+        cand = Candidate(
             ticker="TEST",
             date_opened=ts_base,
             date_closed=ts_base + pd.Timedelta(days=1),  # Closes day 1
@@ -483,7 +459,7 @@ class TestSimulateStrategy:
         )
         cand2 = make_candidate("TEST2", 0, 0.5, 0.5, 0.05, rec2, ts_base)
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_and_extract", return_value=[cand, cand2]):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", return_value=[cand, cand2]):
             result = simulate_strategy(
                 tickers=["TEST"],
                 strategy_name="test",
@@ -511,7 +487,7 @@ class TestSimulateStrategy:
         )
         cand = make_candidate("TEST", 0, 1.0, 0.0, 0.20, rec, ts_base)
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_and_extract", return_value=[cand]):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", return_value=[cand]):
             result = simulate_strategy(
                 tickers=["TEST"],
                 strategy_name="test",
@@ -553,7 +529,7 @@ class TestSimulateStrategy:
         )
         cand1 = make_candidate("TEST1", 1, 1.0, 0.2, 0.10, rec1, ts_base)
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_and_extract", side_effect=[[cand0], [cand1]]):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", side_effect=[[cand0], [cand1]]):
             result = simulate_strategy(
                 tickers=["TEST0", "TEST1"],
                 strategy_name="test",
@@ -567,7 +543,7 @@ class TestSimulateStrategy:
 
     def test_start_date_filter_excludes_earlier_candidates(self, base_record, ts_base):
         """Candidates before start_date are excluded."""
-        from Strategy_Auto_Trader.markov_cli.live_sim import simulate_strategy, _Candidate
+        from Strategy_Auto_Trader.markov_cli.live_sim import simulate_strategy, Candidate
 
         # Day -1 (before start_date)
         rec_before = TradeRecord(
@@ -578,7 +554,7 @@ class TestSimulateStrategy:
             kelly_fraction=0.1,
             return_pct=0.05,
         )
-        cand_before = _Candidate(
+        cand_before = Candidate(
             ticker="BEFORE",
             date_opened=ts_base - pd.Timedelta(days=1),
             date_closed=ts_base + pd.Timedelta(days=4),
@@ -599,7 +575,7 @@ class TestSimulateStrategy:
         )
         cand_after = make_candidate("AFTER", 0, 1.0, 0.1, 0.05, rec_after, ts_base)
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_and_extract", return_value=[cand_before, cand_after]):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", return_value=[cand_before, cand_after]):
             result = simulate_strategy(
                 tickers=["TEST"],
                 strategy_name="test",
@@ -615,13 +591,13 @@ class TestSimulateStrategy:
 
     def test_interest_accrues_on_idle_cash_across_day_gap(self, ts_base):
         """A long idle gap between trades earns interest, growing the pool for the next entry."""
-        from Strategy_Auto_Trader.markov_cli.live_sim import simulate_strategy, _Candidate
+        from Strategy_Auto_Trader.markov_cli.live_sim import simulate_strategy, Candidate
 
         rec1 = TradeRecord(
             date_opened="2026-01-12", ticker="A", strategy="test",
             entry_score=1.0, kelly_fraction=0.0, return_pct=0.0,
         )
-        cand1 = _Candidate(
+        cand1 = Candidate(
             ticker="A", date_opened=ts_base, date_closed=ts_base,  # opens and closes day 0
             entry_score=1.0, kelly_fraction=0.0, return_pct=0.0, record=rec1,
         )
@@ -630,14 +606,14 @@ class TestSimulateStrategy:
             date_opened="2026-07-31", ticker="B", strategy="test",
             entry_score=1.0, kelly_fraction=0.1, return_pct=0.10,
         )
-        cand2 = _Candidate(
+        cand2 = Candidate(
             ticker="B", date_opened=ts_base + pd.Timedelta(days=200),
             date_closed=ts_base + pd.Timedelta(days=205),
             entry_score=1.0, kelly_fraction=0.1, return_pct=0.10, record=rec2,
         )
 
         with mock.patch(
-            "Strategy_Auto_Trader.markov_cli.live_sim._fetch_and_extract",
+            "Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract",
             side_effect=[[cand1], [cand2]],
         ):
             result = simulate_strategy(
@@ -667,11 +643,11 @@ class TestFilterCandidatesByDailyTrendQuality:
         is kept, not dropped — matches resolve_strategy()'s documented
         'no ticker context -> permissive' default."""
         from Strategy_Auto_Trader.markov_cli.live_sim import (
-            _filter_candidates_by_daily_trend_quality, _Candidate,
+            _filter_candidates_by_daily_trend_quality, Candidate,
         )
 
         rec = TradeRecord(date_opened="2026-01-12", ticker="NODATA", strategy="test")
-        cand = _Candidate(ticker="NODATA", date_opened=ts_base, date_closed=ts_base,
+        cand = Candidate(ticker="NODATA", date_opened=ts_base, date_closed=ts_base,
                            entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec)
 
         kept = _filter_candidates_by_daily_trend_quality(
@@ -681,11 +657,11 @@ class TestFilterCandidatesByDailyTrendQuality:
 
     def test_nan_score_before_min_periods_is_permissive(self, ts_base):
         from Strategy_Auto_Trader.markov_cli.live_sim import (
-            _filter_candidates_by_daily_trend_quality, _Candidate,
+            _filter_candidates_by_daily_trend_quality, Candidate,
         )
 
         rec = TradeRecord(date_opened="2026-01-12", ticker="EARLY", strategy="test")
-        cand = _Candidate(ticker="EARLY", date_opened=ts_base, date_closed=ts_base,
+        cand = Candidate(ticker="EARLY", date_opened=ts_base, date_closed=ts_base,
                            entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec)
         series = pd.Series([float("nan")], index=[ts_base])
 
@@ -696,14 +672,14 @@ class TestFilterCandidatesByDailyTrendQuality:
 
     def test_below_threshold_dropped_above_kept_standard_direction(self, ts_base):
         from Strategy_Auto_Trader.markov_cli.live_sim import (
-            _filter_candidates_by_daily_trend_quality, _Candidate,
+            _filter_candidates_by_daily_trend_quality, Candidate,
         )
 
         rec_choppy = TradeRecord(date_opened="2026-01-12", ticker="CHOPPY", strategy="test")
-        cand_choppy = _Candidate(ticker="CHOPPY", date_opened=ts_base, date_closed=ts_base,
+        cand_choppy = Candidate(ticker="CHOPPY", date_opened=ts_base, date_closed=ts_base,
                                   entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec_choppy)
         rec_trend = TradeRecord(date_opened="2026-01-12", ticker="TRENDY", strategy="test")
-        cand_trend = _Candidate(ticker="TRENDY", date_opened=ts_base, date_closed=ts_base,
+        cand_trend = Candidate(ticker="TRENDY", date_opened=ts_base, date_closed=ts_base,
                                  entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec_trend)
 
         trend_quality_by_ticker = {
@@ -720,14 +696,14 @@ class TestFilterCandidatesByDailyTrendQuality:
         """A choppy_vol-style strategy (wants_low=True) keeps the low-scoring
         ticker and drops the high-scoring one — inverse of the standard case."""
         from Strategy_Auto_Trader.markov_cli.live_sim import (
-            _filter_candidates_by_daily_trend_quality, _Candidate,
+            _filter_candidates_by_daily_trend_quality, Candidate,
         )
 
         rec_choppy = TradeRecord(date_opened="2026-01-12", ticker="CHOPPY", strategy="test")
-        cand_choppy = _Candidate(ticker="CHOPPY", date_opened=ts_base, date_closed=ts_base,
+        cand_choppy = Candidate(ticker="CHOPPY", date_opened=ts_base, date_closed=ts_base,
                                   entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec_choppy)
         rec_trend = TradeRecord(date_opened="2026-01-12", ticker="TRENDY", strategy="test")
-        cand_trend = _Candidate(ticker="TRENDY", date_opened=ts_base, date_closed=ts_base,
+        cand_trend = Candidate(ticker="TRENDY", date_opened=ts_base, date_closed=ts_base,
                                  entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec_trend)
 
         trend_quality_by_ticker = {
@@ -745,17 +721,17 @@ class TestFilterCandidatesByDailyTrendQuality:
         in-scope on one entry day and out-of-scope on another, using only
         the trend_quality known as of each candidate's own entry day."""
         from Strategy_Auto_Trader.markov_cli.live_sim import (
-            _filter_candidates_by_daily_trend_quality, _Candidate,
+            _filter_candidates_by_daily_trend_quality, Candidate,
         )
 
         day1 = pd.Timestamp("2026-01-01", tz="UTC")
         day2 = pd.Timestamp("2026-06-01", tz="UTC")
 
         rec1 = TradeRecord(date_opened="2026-01-01", ticker="SHIFT", strategy="test")
-        cand_early = _Candidate(ticker="SHIFT", date_opened=day1, date_closed=day1,
+        cand_early = Candidate(ticker="SHIFT", date_opened=day1, date_closed=day1,
                                  entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec1)
         rec2 = TradeRecord(date_opened="2026-06-01", ticker="SHIFT", strategy="test")
-        cand_late = _Candidate(ticker="SHIFT", date_opened=day2, date_closed=day2,
+        cand_late = Candidate(ticker="SHIFT", date_opened=day2, date_closed=day2,
                                 entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec2)
 
         # Trending early in the year, choppy by June.
@@ -892,48 +868,44 @@ class TestMainCLI:
 
         assert mock_arb.call_args_list[0][1]["max_trades_per_day"] == 0
 
+    def test_dump_ticker_scores_writes_json(self, base_record, ts_base, tmp_path):
+        from Strategy_Auto_Trader.markov_cli.live_sim import main
 
-class TestGenerateCandidates:
+        cand = make_candidate("TEST", 0, 1.0, 0.1, 0.05, base_record, ts_base)
+        dump_path = tmp_path / "scores.json"
 
-    def test_sequential_and_parallel_dispatch_produce_identical_candidates(self, base_record, ts_base):
-        """generate_candidates(workers=1) and workers>1 must return the same
-        candidates from the same underlying per-ticker function — regression
-        guard for the parallel dispatch/collection wiring."""
-        from Strategy_Auto_Trader.markov_cli.live_sim import generate_candidates, _Candidate
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates",
+                        return_value=([cand], {}, {})):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.arbitrate",
+                            return_value=dict(_EMPTY_ARBITRATE_RESULT)):
+                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
+                    main([
+                        "--tickers", "TEST", "--strategies", "default",
+                        "--top-k", "1",
+                        "--dump-ticker-scores", str(dump_path),
+                    ])
 
-        def fake_fetch(ticker, strategy_name, vol_filter_tag, vol_filter_ok=True):
-            rec = TradeRecord(date_opened="2026-01-12", ticker=ticker, strategy=strategy_name,
-                               entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
-            cand = _Candidate(
-                ticker=ticker, date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=1),
-                entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec,
-            )
-            close = pd.Series([100.0, 101.0], index=[ts_base, ts_base + pd.Timedelta(days=1)])
-            trend_quality = pd.Series([0.5, 0.5], index=[ts_base, ts_base + pd.Timedelta(days=1)])
-            return [cand], close, trend_quality
+        assert dump_path.exists()
+        scores = json.loads(dump_path.read_text())
+        assert "TEST" in scores
 
-        tickers = ["A", "B", "C"]
+    def test_dump_ticker_scores_noop_without_top_k(self, base_record, ts_base, tmp_path):
+        from Strategy_Auto_Trader.markov_cli.live_sim import main
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_extract_and_prices", side_effect=fake_fetch):
-            seq_candidates, seq_prices, seq_tq = generate_candidates(tickers, "test", workers=1)
+        cand = make_candidate("TEST", 0, 1.0, 0.1, 0.05, base_record, ts_base)
+        dump_path = tmp_path / "scores.json"
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_extract_and_prices", side_effect=fake_fetch):
-            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.ProcessPoolExecutor", _ImmediateExecutor):
-                par_candidates, par_prices, par_tq = generate_candidates(tickers, "test", workers=4)
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates",
+                        return_value=([cand], {}, {})):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.arbitrate",
+                            return_value=dict(_EMPTY_ARBITRATE_RESULT)):
+                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
+                    main([
+                        "--tickers", "TEST", "--strategies", "default",
+                        "--dump-ticker-scores", str(dump_path),
+                    ])
 
-        assert {c.ticker for c in seq_candidates} == {c.ticker for c in par_candidates} == set(tickers)
-        assert len(seq_candidates) == len(par_candidates) == 3
-        assert set(seq_prices.keys()) == set(par_prices.keys()) == set(tickers)
-        assert set(seq_tq.keys()) == set(par_tq.keys()) == set(tickers)
-
-    def test_workers_one_does_not_use_process_pool(self):
-        from Strategy_Auto_Trader.markov_cli.live_sim import generate_candidates
-
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._fetch_extract_and_prices", return_value=([], None, None)):
-            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.ProcessPoolExecutor") as mock_pool:
-                generate_candidates(["A"], "test", workers=1)
-
-        mock_pool.assert_not_called()
+        assert not dump_path.exists()
 
 
 class TestArbitrate:
@@ -942,13 +914,13 @@ class TestArbitrate:
         """max_trades_per_day <= 0 admits every same-day candidate cash allows,
         not just one — the convention this run needs so cash, not an arbitrary
         daily count, is the binding constraint under test."""
-        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate, _Candidate
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate, Candidate
 
         candidates = []
         for i in range(5):
             rec = TradeRecord(date_opened="2026-01-12", ticker=f"T{i}", strategy="test",
                                entry_score=float(i), kelly_fraction=0.1, return_pct=0.05)
-            candidates.append(_Candidate(
+            candidates.append(Candidate(
                 ticker=f"T{i}", date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=1),
                 entry_score=float(i), kelly_fraction=0.1, return_pct=0.05, record=rec,
             ))
@@ -960,11 +932,11 @@ class TestArbitrate:
         assert result["n_admitted"] == 5
 
     def test_negative_max_trades_per_day_is_also_unlimited(self, ts_base):
-        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate, _Candidate
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate, Candidate
 
         rec = TradeRecord(date_opened="2026-01-12", ticker="A", strategy="test",
                            entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
-        cand = _Candidate(ticker="A", date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=1),
+        cand = Candidate(ticker="A", date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=1),
                            entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec)
 
         result = arbitrate([cand], initial_cash=1_000.0, trade_cost=1.0,
@@ -974,13 +946,13 @@ class TestArbitrate:
     def test_admission_diagnostics_count_candidates_and_rejections(self, ts_base):
         """n_candidates/n_admitted/n_rejected_cash support a 'capital wasn't the
         constraint' conclusion with evidence, not just peak-vs-pot eyeballing."""
-        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate, _Candidate
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate, Candidate
 
         candidates = []
         for i in range(3):
             rec = TradeRecord(date_opened="2026-01-12", ticker=f"T{i}", strategy="test",
                                entry_score=float(3 - i), kelly_fraction=0.5, return_pct=0.05)
-            candidates.append(_Candidate(
+            candidates.append(Candidate(
                 ticker=f"T{i}", date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=5),
                 entry_score=float(3 - i), kelly_fraction=0.5, return_pct=0.05, record=rec,
             ))
@@ -1014,11 +986,11 @@ class TestMarkToMarket:
         current price, not frozen at its entry cost basis — the panel-reviewed
         fix for the mark-to-cost bias that would otherwise misstate portfolio
         value/drawdown for a real funding decision."""
-        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate, _Candidate
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate, Candidate
 
         rec = TradeRecord(date_opened="2026-01-12", ticker="RISER", strategy="test",
                            entry_score=1.0, kelly_fraction=0.5, return_pct=0.20)
-        cand = _Candidate(
+        cand = Candidate(
             ticker="RISER", date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=10),
             entry_score=1.0, kelly_fraction=0.5, return_pct=0.20, record=rec,
         )
@@ -1055,12 +1027,12 @@ class TestMarkToMarket:
     def test_missing_price_data_falls_back_to_cost_basis(self, ts_base):
         """No price_by_ticker entry for a ticker (or price_by_ticker=None
         entirely) falls back to cost-basis valuation rather than crashing."""
-        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate, _Candidate
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate, Candidate
 
         rec = TradeRecord(date_opened="2026-01-12", ticker="NODATA", strategy="test",
                            entry_score=1.0, kelly_fraction=0.5, return_pct=0.10)
         rec.entry_price = 50.0
-        cand = _Candidate(
+        cand = Candidate(
             ticker="NODATA", date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=10),
             entry_score=1.0, kelly_fraction=0.5, return_pct=0.10, record=rec,
         )

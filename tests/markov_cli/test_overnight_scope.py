@@ -338,5 +338,193 @@ def test_screen_market_overrides_round_trips_through_write_scope_result(tmp_path
             assert persisted["overrides"]["T2"]["strategy"] == "conservative"
 
 
+def test_with_merged_defaults_merges_top_level_blocks_market_wins():
+    """The config-merge bug fix: main() must merge top-level vol_screen/
+    sentiment_screen/exempt_if_open_position into market_cfg before
+    screen_market() reads them, with market-level keys taking precedence."""
+    config = {
+        "vol_screen": {"enabled": True, "max_downside_vol": 0.25},
+        "sentiment_screen": {"enabled": True, "min_sentiment_score": -0.3},
+        "exempt_if_open_position": True,
+    }
+    market_cfg = {"watchlist": "x.json"}  # no own overrides
+
+    merged = overnight_scope._with_merged_defaults(market_cfg, config)
+
+    assert merged["vol_screen"]["max_downside_vol"] == 0.25
+    assert merged["sentiment_screen"]["min_sentiment_score"] == -0.3
+    assert merged["exempt_if_open_position"] is True
+    assert merged["watchlist"] == "x.json"
+
+
+def test_with_merged_defaults_market_level_override_wins():
+    config = {"vol_screen": {"enabled": True, "max_downside_vol": 0.25}}
+    market_cfg = {"watchlist": "x.json", "vol_screen": {"enabled": False}}
+
+    merged = overnight_scope._with_merged_defaults(market_cfg, config)
+
+    assert merged["vol_screen"] == {"enabled": False}
+
+
+class TestComputeGlobalTopK:
+
+    def test_disabled_returns_none(self):
+        config = {"top_k_screen": {"enabled": False}}
+        assert overnight_scope.compute_global_top_k(config, {}) is None
+
+    def test_missing_config_block_returns_none(self):
+        assert overnight_scope.compute_global_top_k({}, {}) is None
+
+    def test_success_writes_state_and_returns_top_k(self, tmp_path):
+        config = {"top_k_screen": {"enabled": True, "k": 1}}
+
+        def fake_run(cmd, cwd, timeout, capture_output, text):
+            output_path = Path(cmd[cmd.index("--output") + 1])
+            output_path.write_text(json.dumps({"A": 0.9, "B": 0.1}), encoding="utf-8")
+            return mock.Mock(returncode=0, stderr="")
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.STATE_DIR", tmp_path):
+            with mock.patch("subprocess.run", side_effect=fake_run):
+                result = overnight_scope.compute_global_top_k(config, {})
+
+        assert result == {"A"}
+        state_file = tmp_path / "top_k_universe.json"
+        assert state_file.exists()
+        state = json.loads(state_file.read_text())
+        assert state["status"] == "ok"
+        assert state["tickers"] == ["A"]
+
+    def test_open_position_exempt_even_outside_top_k(self, tmp_path):
+        config = {"top_k_screen": {"enabled": True, "k": 1}}
+        exec_state = {"positions": {"LOW_SCORE": {}}}
+
+        def fake_run(cmd, cwd, timeout, capture_output, text):
+            output_path = Path(cmd[cmd.index("--output") + 1])
+            output_path.write_text(json.dumps({"A": 0.9, "LOW_SCORE": 0.1}), encoding="utf-8")
+            return mock.Mock(returncode=0, stderr="")
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.STATE_DIR", tmp_path):
+            with mock.patch("subprocess.run", side_effect=fake_run):
+                result = overnight_scope.compute_global_top_k(config, exec_state)
+
+        assert "LOW_SCORE" in result
+
+    def test_timeout_falls_back_to_previous_state(self, tmp_path):
+        import subprocess as subprocess_mod
+
+        prior = {"date": "2026-07-29", "k": 70, "strategy": "optimised",
+                 "tickers": ["PRIOR_A", "PRIOR_B"], "scores": {}, "status": "ok"}
+        (tmp_path / "top_k_universe.json").write_text(json.dumps(prior), encoding="utf-8")
+
+        config = {"top_k_screen": {"enabled": True, "k": 70}}
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.STATE_DIR", tmp_path):
+            with mock.patch("subprocess.run", side_effect=subprocess_mod.TimeoutExpired(cmd="x", timeout=1)):
+                result = overnight_scope.compute_global_top_k(config, {})
+
+        assert result == {"PRIOR_A", "PRIOR_B"}
+
+    def test_nonzero_exit_falls_back_to_previous_state(self, tmp_path):
+        prior = {"date": "2026-07-29", "k": 70, "strategy": "optimised",
+                 "tickers": ["PRIOR_A"], "scores": {}, "status": "ok"}
+        (tmp_path / "top_k_universe.json").write_text(json.dumps(prior), encoding="utf-8")
+
+        config = {"top_k_screen": {"enabled": True, "k": 70}}
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.STATE_DIR", tmp_path):
+            with mock.patch("subprocess.run", return_value=mock.Mock(returncode=1, stderr="boom")):
+                result = overnight_scope.compute_global_top_k(config, {})
+
+        assert result == {"PRIOR_A"}
+
+    def test_failure_with_no_prior_state_returns_none(self, tmp_path):
+        config = {"top_k_screen": {"enabled": True, "k": 70}}
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.STATE_DIR", tmp_path):
+            with mock.patch("subprocess.run", return_value=mock.Mock(returncode=1, stderr="boom")):
+                result = overnight_scope.compute_global_top_k(config, {})
+
+        assert result is None
+
+
+def test_screen_market_top_k_filter_excludes_non_top_k():
+    market_cfg = {
+        "watchlist": "config/watchlist.json",
+        "vol_screen": {"enabled": False},
+        "sentiment_screen": {"enabled": False},
+        "exempt_if_open_position": True,
+    }
+
+    with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_watchlist") as mock_wl:
+        mock_wl.return_value = {"tickers": [{"ticker": "KEPT"}, {"ticker": "DROPPED"}]}
+
+        result = overnight_scope.screen_market("test", market_cfg, {}, global_top_k={"KEPT"})
+
+        assert "KEPT" in result["kept"]
+        assert "DROPPED" not in result["kept"]
+        assert any(e["ticker"] == "DROPPED" and e["reason"] == "top_k_screen" for e in result["excluded"])
+
+
+def test_screen_market_top_k_filter_open_position_exempt():
+    market_cfg = {
+        "watchlist": "config/watchlist.json",
+        "vol_screen": {"enabled": False},
+        "sentiment_screen": {"enabled": False},
+        "exempt_if_open_position": True,
+    }
+    exec_state = {"positions": {"NOT_TOP_K": {}}}
+
+    with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_watchlist") as mock_wl:
+        mock_wl.return_value = {"tickers": [{"ticker": "NOT_TOP_K"}]}
+
+        result = overnight_scope.screen_market("test", market_cfg, exec_state, global_top_k={"SOMETHING_ELSE"})
+
+        assert "NOT_TOP_K" in result["kept"]
+
+
+def test_screen_market_top_k_none_is_noop():
+    """global_top_k=None (disabled) must produce identical kept list to
+    calling without the parameter at all — regression guard, since this is
+    a live prod code path being modified."""
+    market_cfg = {
+        "watchlist": "config/watchlist.json",
+        "vol_screen": {"enabled": False},
+        "sentiment_screen": {"enabled": False},
+        "exempt_if_open_position": True,
+    }
+
+    with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_watchlist") as mock_wl:
+        mock_wl.return_value = {"tickers": [{"ticker": "A"}, {"ticker": "B"}]}
+
+        without_param = overnight_scope.screen_market("test", market_cfg, {})
+        with_none = overnight_scope.screen_market("test", market_cfg, {}, global_top_k=None)
+
+        assert without_param["kept"] == with_none["kept"] == ["A", "B"]
+
+
+def test_main_calls_compute_global_top_k_once_not_per_market(tmp_path):
+    """Ranking is global, not per-market — must be computed once and shared,
+    not recomputed once per market (which would silently double the nightly
+    compute budget)."""
+    config = {
+        "markets": {
+            "ftse": {"watchlist": "config/watchlist_ftse.json", "defaults": {}},
+            "sp500": {"watchlist": "config/watchlist_sp500.json", "defaults": {}},
+        },
+        "top_k_screen": {"enabled": True, "k": 70},
+    }
+
+    with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_config", return_value=config):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_execution_state", return_value={}):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.compute_global_top_k", return_value={"A"}) as mock_topk:
+                with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.screen_market",
+                                 return_value={"kept": [], "excluded": [], "open_positions": []}):
+                    with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.write_scope_result"):
+                        with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.generate_scoped_watchlist"):
+                            overnight_scope.main()
+
+    mock_topk.assert_called_once()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

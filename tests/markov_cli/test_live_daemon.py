@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 from zoneinfo import ZoneInfo
@@ -213,6 +213,61 @@ def test_check_overnight_screening_skips_if_already_run():
         with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.main") as mock_overnight:
             live_daemon.check_overnight_screening(config, daemon_state, logger)
             assert not mock_overnight.called
+
+
+def test_top_k_screen_health_no_state_file_is_noop(monkeypatch, tmp_path):
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    logger = mock.Mock()
+
+    with mock.patch("Strategy_Auto_Trader.output.emailer.send_top_k_screen_alert") as mock_alert:
+        live_daemon._check_top_k_screen_health(logger)
+
+    mock_alert.assert_not_called()
+
+
+def test_top_k_screen_health_status_ok_no_alert(monkeypatch, tmp_path):
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    (tmp_path / "top_k_universe.json").write_text(
+        json.dumps({"date": datetime.now(timezone.utc).date().isoformat(), "status": "ok"}),
+        encoding="utf-8",
+    )
+    logger = mock.Mock()
+
+    with mock.patch("Strategy_Auto_Trader.output.emailer.send_top_k_screen_alert") as mock_alert:
+        live_daemon._check_top_k_screen_health(logger)
+
+    mock_alert.assert_not_called()
+
+
+def test_top_k_screen_health_fallback_status_sends_alert(monkeypatch, tmp_path):
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    today = datetime.now(timezone.utc).date().isoformat()
+    (tmp_path / "top_k_universe.json").write_text(
+        json.dumps({"date": today, "status": "fallback"}), encoding="utf-8",
+    )
+    logger = mock.Mock()
+
+    with mock.patch("Strategy_Auto_Trader.output.emailer.send_top_k_screen_alert") as mock_alert:
+        live_daemon._check_top_k_screen_health(logger)
+
+    mock_alert.assert_called_once_with("fallback", today)
+
+
+def test_top_k_screen_health_stale_state_sends_alert_even_if_status_ok(monkeypatch, tmp_path):
+    """A state file more than a day old means the ranking has been failing
+    for multiple nights — flag it as stale even if its own status says ok
+    (that status reflects the run that PRODUCED it, not its current age)."""
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    old_date = (datetime.now(timezone.utc).date() - timedelta(days=3)).isoformat()
+    (tmp_path / "top_k_universe.json").write_text(
+        json.dumps({"date": old_date, "status": "ok"}), encoding="utf-8",
+    )
+    logger = mock.Mock()
+
+    with mock.patch("Strategy_Auto_Trader.output.emailer.send_top_k_screen_alert") as mock_alert:
+        live_daemon._check_top_k_screen_health(logger)
+
+    mock_alert.assert_called_once_with("stale", old_date)
 
 
 def _run_process_cycle_capture_defaults(monkeypatch, market_cfg):

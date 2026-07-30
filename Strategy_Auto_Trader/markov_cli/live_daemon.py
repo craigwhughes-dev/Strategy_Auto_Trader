@@ -726,7 +726,12 @@ def _evaluate_ticker(
         pinned_strategy = get_open_strategy(ticker)
         if pinned_strategy:
             ticker_cfg["strategy"] = pinned_strategy
-    result = process_ticker(ticker_cfg, defaults, send_email=True)
+    # Phase-1 signal alerts fire off trade_state.json's own "did we alert a BUY"
+    # memory, not the broker's real fill state — Phase 2 (execute_signals) can
+    # decline an admitted BUY on cash/quota/hours, so an alerted SELL can arrive
+    # for a position never actually opened. Emails off; state (record_buy/
+    # record_sell, needed by pin_open_strategy above) still updates.
+    result = process_ticker(ticker_cfg, defaults, send_email=False)
     if not str(result.get("status", "")).startswith("OK"):
         logger.warning(f"[{market_name}] {ticker} processing failed: {result.get('status')}")
     return result
@@ -969,14 +974,51 @@ def check_overnight_screening(
 
     if now.hour == run_hour and now.minute >= run_minute:
         logger.info("Running overnight scope screening...")
+        t0 = time.time()
         try:
             from .overnight_scope import main as run_overnight_scope
             run_overnight_scope()
             daemon_state["last_overnight_date"] = today
             save_daemon_state(daemon_state)
-            logger.info("Overnight scope screening complete")
+            logger.info(f"Overnight scope screening complete ({time.time() - t0:.0f}s)")
         except Exception as e:
             logger.error(f"Error in overnight screening: {e}")
+        _check_top_k_screen_health(logger)
+
+
+def _check_top_k_screen_health(logger: logging.Logger) -> None:
+    """After overnight_scope runs, check state/top_k_universe.json's status —
+    a fallback or stale ranking degrades silently (still trades, just on a
+    non-fresh ticker set) unless surfaced here via the same alert-email path
+    reconciliation mismatches use."""
+    state_path = STATE_DIR / "top_k_universe.json"
+    if not state_path.exists():
+        return
+    try:
+        with open(state_path, encoding="utf-8") as f:
+            state = json.load(f)
+    except Exception as e:
+        logger.warning(f"  Could not read top_k_universe.json: {e}")
+        return
+
+    status = state.get("status")
+    state_date = state.get("date")
+    is_stale = False
+    if state_date:
+        try:
+            age_days = (datetime.now(timezone.utc).date() - datetime.fromisoformat(state_date).date()).days
+            is_stale = age_days > 1
+        except Exception:
+            pass
+
+    if status != "ok" or is_stale:
+        effective_status = "stale" if is_stale else (status or "unknown")
+        logger.warning(f"  top_k_screen status={effective_status} (state date {state_date})")
+        try:
+            from ..output.emailer import send_top_k_screen_alert
+            send_top_k_screen_alert(effective_status, state_date)
+        except Exception as e:
+            logger.error(f"  top_k_screen alert email failed: {e}")
 
 
 def check_protective_stops(
@@ -1428,8 +1470,14 @@ def main(argv: list[str] | None = None) -> int:
         broker = NullBroker(prices={})
     else:
         from ..broker.ibkr_adapter import IBKRAdapter
-        logger.info("Using IBKRAdapter (live paper trading)")
-        broker = IBKRAdapter()
+        broker_cfg = config.get("broker", {})
+        broker = IBKRAdapter(
+            host=broker_cfg.get("host", "127.0.0.1"),
+            port=broker_cfg.get("port", 7497),
+            client_id=broker_cfg.get("client_id", 1),
+        )
+        logger.info(f"Using IBKRAdapter (live paper trading) at "
+                    f"{broker._host}:{broker._port}")
 
     # Set up portfolio
     from ..broker.portfolio import PortfolioManager

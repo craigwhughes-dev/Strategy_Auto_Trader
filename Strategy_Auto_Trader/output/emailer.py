@@ -241,6 +241,35 @@ def send_reconciliation_alert(discrepancies: list[str]) -> None:
     print(f"  Reconciliation alert sent: {subject}")
 
 
+def send_top_k_screen_alert(status: str, state_date: str | None) -> None:
+    """Alert that the nightly top-K ranking degraded — either it fell back to
+    a previous night's ticker set (status="fallback") or that fallback set
+    itself is now stale (status="stale", state_date more than a day old)."""
+    if status == "stale":
+        headline = "Top-K screen: stale fallback"
+        detail = (f"The nightly top-K ranking has been failing for more than a day — "
+                  f"still trading on the set from {state_date}.")
+    else:
+        headline = "Top-K screen: fell back to previous night's set"
+        detail = "Tonight's ranking run failed or timed out; reused the last successful set."
+
+    html = f"""<html><body style="margin:0;padding:20px;background:#0f1117;font-family:system-ui,sans-serif;color:#e0e0e0">
+<div style="max-width:700px;margin:0 auto">
+  <h1 style="color:#ffb74d;margin:0 0 4px">{headline}</h1>
+  <div style="color:#888;margin-bottom:16px">state/top_k_universe.json status: {status}</div>
+  <div style="background:#2a2410;border:1px solid #4a3a1a;border-radius:8px;padding:12px 16px;margin:16px 0">
+    <p style="color:#ddd;margin:0">{detail}</p>
+  </div>
+  <p style="color:#ddd">Trading continues on the fallback ticker set — this is not a halt.
+  Check the daemon log around the nightly overnight-scope run for the underlying failure
+  (subprocess timeout, non-zero exit, or malformed output).</p>
+</div></body></html>"""
+
+    subject = f"Top-K screen degraded: {status}"
+    _send(subject, html)
+    print(f"  Top-K screen alert sent: {subject}")
+
+
 def send_execution_interrupted_alert(
     market_name: str, error: Exception, buys: list[str], sells: list[str], unresolved: list[str]
 ) -> None:

@@ -6,7 +6,7 @@ Usage:
     # Dry run — NullBroker, no state written, safe to run any time
     uv run python -m Strategy_Auto_Trader.markov_cli.execute --dry-run
 
-    # Paper account — TWS must be running on localhost:7497
+    # Paper account — IB Gateway/TWS must be running (see config/overnight_strategy.json "broker")
     uv run python -m Strategy_Auto_Trader.markov_cli.execute
 """
 
@@ -356,12 +356,24 @@ def main(argv: list[str] | None = None) -> int:
 
     args = _build_arg_parser().parse_args(argv)
 
+    broker_cfg = {}
+    config_path = CONFIG_DIR / "overnight_strategy.json"
+    if config_path.exists():
+        with open(config_path, encoding="utf-8") as f:
+            broker_cfg = json.load(f).get("broker", {})
+    broker_host = broker_cfg.get("host", "127.0.0.1")
+    broker_port = broker_cfg.get("port", 7497)
+    broker_client_id = broker_cfg.get("client_id", 1)
+
     if not args.dry_run:
         # Execution reads precomputed signals (no HMM here), but a real
         # order run must verify the broker library before touching state.
         from ..core.self_check import SelfCheckError, run_startup_checks
         try:
-            run_startup_checks(require_hmm=False, require_broker=True)
+            run_startup_checks(
+                require_hmm=False, require_broker=True,
+                broker_host=broker_host, broker_port=broker_port,
+            )
         except SelfCheckError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
@@ -396,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
         broker = NullBroker(prices=prices)
     else:
         from ..broker.ibkr_adapter import IBKRAdapter
-        broker = IBKRAdapter()
+        broker = IBKRAdapter(host=broker_host, port=broker_port, client_id=broker_client_id)
 
     broker.connect()
     try:

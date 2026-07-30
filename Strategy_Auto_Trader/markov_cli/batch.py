@@ -307,7 +307,12 @@ def _get_entry_price(ticker: str, buy_date_str: str) -> float | None:
 def process_ticker(
     ticker_cfg: dict, defaults: dict, send_email: bool
 ) -> dict:
-    """Run model for a single ticker, collect results, email if signal fires, journal trades.
+    """Run model for a single ticker, collect results, journal trades, email if send_email and signal fires.
+
+    trade_state.json (record_buy/record_sell) is always updated on a signal,
+    regardless of send_email — live_daemon's must-run path pins an open
+    position's strategy off this state and needs it kept current even with
+    per-ticker alert emails disabled.
 
     Returns dict with keys: ticker, status, time, result (if successful).
     """
@@ -327,42 +332,44 @@ def process_ticker(
             trades = extract_trades_from_csv(ticker, csv_path, strategy=strategy_name)
             journal_trade_count = append_trades(BACKTEST_JOURNAL, trades)
 
-            if send_email and result["trade_event"] in ("BUY", "SELL"):
+            if result["trade_event"] in ("BUY", "SELL"):
                 from ..output.trade_state import record_buy, record_sell, has_open_buy
 
                 if _should_send_buy_alert(result):
-                    try:
-                        from ..output.emailer import send_trade_alert
-                        send_trade_alert(result)
-                        record_buy(ticker, {
-                            "strategy": strategy_name,
-                            "signal": result["trade_event"],
-                            "score": result["signal_score"],
-                            "gate_flag": result["quality_gate"],
-                            "price": result["close"],
-                            "regime": result["regime_signal"],
-                            "rsi": result["rsi"],
-                            "volume_ratio": result["volume_ratio"],
-                            "kelly_fraction": result["kelly_fraction"],
-                            "stop_level": result["stop_level"],
-                            "target_level": result["target_level"],
-                            "portfolio_value": result["portfolio_value"],
-                            "bh_return": result["bh_return"],
-                        })
-                    except Exception as exc:
-                        logger.warning(f"BUY alert email failed for {ticker}: {exc}")
+                    if send_email:
+                        try:
+                            from ..output.emailer import send_trade_alert
+                            send_trade_alert(result)
+                        except Exception as exc:
+                            logger.warning(f"BUY alert email failed for {ticker}: {exc}")
+                    record_buy(ticker, {
+                        "strategy": strategy_name,
+                        "signal": result["trade_event"],
+                        "score": result["signal_score"],
+                        "gate_flag": result["quality_gate"],
+                        "price": result["close"],
+                        "regime": result["regime_signal"],
+                        "rsi": result["rsi"],
+                        "volume_ratio": result["volume_ratio"],
+                        "kelly_fraction": result["kelly_fraction"],
+                        "stop_level": result["stop_level"],
+                        "target_level": result["target_level"],
+                        "portfolio_value": result["portfolio_value"],
+                        "bh_return": result["bh_return"],
+                    })
                 elif _should_send_sell_alert(result, ticker):
-                    try:
-                        from ..output.emailer import send_trade_alert
-                        send_trade_alert(result)
-                        record_sell(ticker, {
-                            "price": result["close"],
-                            "reason": result["sell_reason"] or result["quality_gate_reason"],
-                            "strategy_return": result["strategy_return"],
-                            "bh_return": result["bh_return"],
-                        })
-                    except Exception as exc:
-                        logger.warning(f"SELL alert email failed for {ticker}: {exc}")
+                    if send_email:
+                        try:
+                            from ..output.emailer import send_trade_alert
+                            send_trade_alert(result)
+                        except Exception as exc:
+                            logger.warning(f"SELL alert email failed for {ticker}: {exc}")
+                    record_sell(ticker, {
+                        "price": result["close"],
+                        "reason": result["sell_reason"] or result["quality_gate_reason"],
+                        "strategy_return": result["strategy_return"],
+                        "bh_return": result["bh_return"],
+                    })
                 elif result["trade_event"] == "SELL":
                     print(f"  SELL skipped (no prior BUY since reference date)")
 
