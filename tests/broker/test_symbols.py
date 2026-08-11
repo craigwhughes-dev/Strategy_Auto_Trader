@@ -86,14 +86,14 @@ class TestSizingPrice:
         assert sizing_price("LLOY.L", 54.32) == pytest.approx(0.5432)
 
     def test_quantity_flow_lse(self):
-        """£250 slot × 0.1 Kelly on a 700p (£7) stock buys 3 shares, not 1."""
+        """£10,000 cash × 0.1 Kelly on a 700p (£7) stock buys 142 shares."""
         from pathlib import Path
 
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
 
-        pm = PortfolioManager(10_000, 40, Path("nonexistent_state.json"))
+        pm = PortfolioManager(10_000, Path("nonexistent_state.json"))
         qty = pm.compute_quantity(0.1, sizing_price("HSBA.L", 700.0))
-        assert qty == 3
+        assert qty == 142
 
 
 class TestNormalizeFillPrice:

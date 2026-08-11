@@ -21,8 +21,9 @@ class TestRun:
         assert not hasattr(args, "take_profit_pct")
         assert not hasattr(args, "buy_threshold")
         assert args.use_kelly is True
-        assert args.regime_smooth == 24
-        assert args.min_hold_bars == 48
+        assert args.interval == "1h"
+        assert args.regime_smooth is None   # resolved by _resolve_interval_defaults
+        assert args.min_hold_bars is None   # resolved by _resolve_interval_defaults
         assert args.skip_unused_indicators is True
         assert args.hmm_cache is True
 
@@ -143,3 +144,63 @@ class TestRun:
         out = capsys.readouterr().out
         assert "Sharpe (annualised)" in out
         assert "Strategy P&L" in out
+
+    # -- daily-bar interval support -----------------------------------------
+
+    def test_interval_defaults_to_1h(self):
+        from Strategy_Auto_Trader.markov_cli.run import _build_arg_parser
+        args = _build_arg_parser().parse_args(["--ticker", "SPY"])
+        assert args.interval == "1h"
+
+    def test_resolve_interval_defaults_hourly(self):
+        from Strategy_Auto_Trader.markov_cli.run import (
+            _build_arg_parser, _resolve_interval_defaults,
+        )
+        args = _build_arg_parser().parse_args(["--ticker", "SPY"])
+        _resolve_interval_defaults(args)
+        assert args.regime_smooth == 24
+        assert args.min_hold_bars == 48
+
+    def test_resolve_interval_defaults_daily(self):
+        from Strategy_Auto_Trader.markov_cli.run import (
+            _build_arg_parser, _resolve_interval_defaults,
+        )
+        args = _build_arg_parser().parse_args(["--ticker", "SPY", "--interval", "1d"])
+        _resolve_interval_defaults(args)
+        assert args.regime_smooth == 5
+        assert args.min_hold_bars == 5
+
+    def test_resolve_interval_defaults_explicit_values_respected(self):
+        from Strategy_Auto_Trader.markov_cli.run import (
+            _build_arg_parser, _resolve_interval_defaults,
+        )
+        args = _build_arg_parser().parse_args([
+            "--ticker", "SPY", "--interval", "1d",
+            "--regime-smooth", "10", "--min-hold-bars", "20",
+        ])
+        _resolve_interval_defaults(args)
+        assert args.regime_smooth == 10
+        assert args.min_hold_bars == 20
+
+    def test_fetch_daily_called_for_1d_interval(self, tmp_path):
+        import pandas as pd
+        from Strategy_Auto_Trader.markov_cli import run as run_mod
+
+        daily_df = pd.DataFrame({
+            "Open": [100.0] * 300,
+            "High": [101.0] * 300,
+            "Low": [99.0] * 300,
+            "Close": [100.0 + i * 0.01 for i in range(300)],
+            "Volume": [1_000_000] * 300,
+        }, index=pd.bdate_range("2000-01-01", periods=300))
+
+        with mock.patch.object(run_mod, "fetch_daily", return_value=daily_df) as mock_fd, \
+             mock.patch.object(run_mod, "fetch_hourly") as mock_fh, \
+             mock.patch.object(run_mod, "consolidated_backtest",
+                               return_value={"n_bars": 0, "detail": pd.DataFrame()}), \
+             mock.patch.object(run_mod, "_make_run_dir", return_value=tmp_path), \
+             mock.patch.object(run_mod, "_write_quality_gate"):
+            run_mod.main(["--ticker", "SPY", "--interval", "1d"])
+
+        mock_fd.assert_called_once()
+        mock_fh.assert_not_called()

@@ -72,7 +72,7 @@ class TestProtectiveStops:
     def test_portfolio_record_entry_includes_stop_fields(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         fill = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", fill, 0.10, 185.0, 224.0)
         assert pm.positions["AAPL"]["stop_perm_id"] is None
@@ -81,7 +81,7 @@ class TestProtectiveStops:
     def test_portfolio_set_stop_order_updates_position(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         fill = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", fill, 0.10, 185.0, 224.0)
         pm.set_stop_order("AAPL", 100001, 185.0)
@@ -91,7 +91,7 @@ class TestProtectiveStops:
     def test_portfolio_clear_stop_order_resets_fields(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         fill = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", fill, 0.10, 185.0, 224.0)
         pm.set_stop_order("AAPL", 100001, 185.0)
@@ -102,7 +102,7 @@ class TestProtectiveStops:
     def test_portfolio_record_exit_with_stop_loss_type(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         buy = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", buy, 0.10, 185.0, 224.0)
         pm.set_stop_order("AAPL", 100001, 185.0)
@@ -114,7 +114,7 @@ class TestProtectiveStops:
     def test_portfolio_record_exit_with_strategy_exit_type(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         buy = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", buy, 0.10, 185.0, 224.0)
         sell = FillResult("AAPL", "SELL", 210.0, 10, "2026-07-02T00:00:00+00:00")
@@ -125,7 +125,7 @@ class TestProtectiveStops:
     def test_portfolio_record_exit_default_exit_type(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         buy = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", buy, 0.10, 185.0, 224.0)
         sell = FillResult("AAPL", "SELL", 210.0, 10, "2026-07-02T00:00:00+00:00")
@@ -136,13 +136,13 @@ class TestProtectiveStops:
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
         path = tmp_path / "state.json"
-        pm = PortfolioManager(20_000, 5, path)
+        pm = PortfolioManager(20_000, path)
         fill = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", fill, 0.10, 185.0, 224.0)
         pm.set_stop_order("AAPL", 100001, 185.0)
         pm.save()
 
-        pm2 = PortfolioManager(20_000, 5, path)
+        pm2 = PortfolioManager(20_000, path)
         assert pm2.positions["AAPL"]["stop_perm_id"] == 100001
         assert pm2.positions["AAPL"]["stop_price"] == 185.0
 
@@ -167,7 +167,7 @@ class TestProtectiveStops:
             "trades_today": {"date": "2026-07-02", "buys": 0, "sells": 0},
         }
         path.write_text(json.dumps(old_state), encoding="utf-8")
-        pm = PortfolioManager(20_000, 5, path)
+        pm = PortfolioManager(20_000, path)
         assert pm.positions["AAPL"]["stop_perm_id"] is None
         assert pm.positions["AAPL"]["stop_price"] is None
 
@@ -196,7 +196,7 @@ class TestProtectiveStops:
         )
 
         state_path = tmp_path / "execution_state.json"
-        portfolio = PortfolioManager(20_000, 5, state_path)
+        portfolio = PortfolioManager(20_000, state_path)
         broker = NullBroker(prices={"AAPL": 195.0})
         limit_tracker = portfolio.get_limit_tracker()
 
@@ -231,7 +231,7 @@ class TestProtectiveStops:
         )
 
         state_path = tmp_path / "execution_state.json"
-        portfolio = PortfolioManager(20_000, 5, state_path)
+        portfolio = PortfolioManager(20_000, state_path)
         broker = NullBroker(prices={"AAPL": 195.0})
         limit_tracker = portfolio.get_limit_tracker()
 
@@ -270,7 +270,7 @@ class TestProtectiveStops:
         )
 
         state_path = tmp_path / "execution_state.json"
-        portfolio = PortfolioManager(20_000, 5, state_path)
+        portfolio = PortfolioManager(20_000, state_path)
         broker = NullBroker(prices={"AAPL": 195.0})
         limit_tracker = portfolio.get_limit_tracker()
 
@@ -316,7 +316,7 @@ class TestProtectiveStops:
 
         logger = logging.getLogger(__name__)
         state_path = tmp_path / "state.json"
-        portfolio = PortfolioManager(20_000, 5, state_path)
+        portfolio = PortfolioManager(20_000, state_path)
         broker = NullBroker(prices={"AAPL": 195.0})
 
         fill = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-01T00:00:00+00:00")
@@ -335,7 +335,7 @@ class TestProtectiveStops:
 
         logger = logging.getLogger(__name__)
         state_path = tmp_path / "state.json"
-        portfolio = PortfolioManager(20_000, 5, state_path)
+        portfolio = PortfolioManager(20_000, state_path)
         broker = NullBroker(prices={"AAPL": 195.0, "MSFT": 300.0})
 
         req = StopOrderRequest("MSFT", 5, 285.0)
@@ -380,7 +380,7 @@ class TestProtectiveStops:
         )
 
         state_path = tmp_path / "execution_state.json"
-        portfolio = PortfolioManager(20_000, 5, state_path)
+        portfolio = PortfolioManager(20_000, state_path)
         broker = TestBroker(prices={"AAPL": 195.0})
         limit_tracker = portfolio.get_limit_tracker()
 
@@ -448,7 +448,7 @@ class TestProtectiveStops:
         )
 
         state_path = tmp_path / "execution_state.json"
-        portfolio = PortfolioManager(20_000, 5, state_path)
+        portfolio = PortfolioManager(20_000, state_path)
         broker = TestBroker(prices={"AAPL": 195.0})
         limit_tracker = portfolio.get_limit_tracker()
 
@@ -500,7 +500,7 @@ class TestProtectiveStops:
 
         logger = logging.getLogger(__name__)
         state_path = tmp_path / "state.json"
-        portfolio = PortfolioManager(20_000, 5, state_path)
+        portfolio = PortfolioManager(20_000, state_path)
         broker = TestBroker(prices={"AAPL": 195.0})
 
         fill = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-01T00:00:00+00:00")
@@ -528,7 +528,7 @@ class TestProtectiveStops:
 
         logger = logging.getLogger(__name__)
         state_path = tmp_path / "state.json"
-        portfolio = PortfolioManager(20_000, 5, state_path)
+        portfolio = PortfolioManager(20_000, state_path)
         broker = NullBroker(prices={"AAPL": 195.0})
 
         fill = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-01T00:00:00+00:00")
@@ -553,7 +553,7 @@ class TestProtectiveStops:
         from Strategy_Auto_Trader.broker.types import FillResult
 
         state_path = tmp_path / "state.json"
-        portfolio = PortfolioManager(20_000, 5, state_path)
+        portfolio = PortfolioManager(20_000, state_path)
         broker = NullBroker()
 
         fill = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-01T00:00:00+00:00")

@@ -35,6 +35,21 @@ def fetch_hourly(ticker: str, period: str = "730d") -> pd.DataFrame | None:
     return df
 
 
+def fetch_daily(ticker: str) -> pd.DataFrame | None:
+    """Fetch daily OHLCV data from yfinance (max history, ~20–30 years)."""
+    import yfinance as yf
+    try:
+        df = yf.download(ticker, period="max", interval="1d",
+                         progress=False, auto_adjust=True)
+    except Exception:
+        return None
+    if df.empty:
+        return None
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df
+
+
 def fit_hmm_expanding(
     returns: np.ndarray,
     n_components: int = 3,
@@ -239,14 +254,14 @@ _HOURS_PER_YEAR = 1700
 _MIN_DOWNSIDE_BARS = 20
 
 
-def _sharpe(r: np.ndarray) -> float:
+def _sharpe(r: np.ndarray, bars_per_year: int = _HOURS_PER_YEAR) -> float:
     std = np.std(r, ddof=1)
     if std == 0 or not np.isfinite(std):
         return float("nan")
-    return float(np.mean(r) / std * np.sqrt(_HOURS_PER_YEAR))
+    return float(np.mean(r) / std * np.sqrt(bars_per_year))
 
 
-def _sortino(r: np.ndarray) -> float:
+def _sortino(r: np.ndarray, bars_per_year: int = _HOURS_PER_YEAR) -> float:
     """Annualised Sortino ratio: mean return over downside deviation.
 
     Full-sample convention: downside deviation is the RMS of min(r, 0) over
@@ -257,10 +272,11 @@ def _sortino(r: np.ndarray) -> float:
     downside_dev = float(np.sqrt(np.mean(np.minimum(r, 0.0) ** 2)))
     if downside_dev == 0 or not np.isfinite(downside_dev):
         return float("nan")
-    return float(np.mean(r) / downside_dev * np.sqrt(_HOURS_PER_YEAR))
+    return float(np.mean(r) / downside_dev * np.sqrt(bars_per_year))
 
 
-def _information_ratio(strat_ret: np.ndarray, bh_ret: np.ndarray) -> float:
+def _information_ratio(strat_ret: np.ndarray, bh_ret: np.ndarray,
+                       bars_per_year: int = _HOURS_PER_YEAR) -> float:
     """Annualised Information Ratio: mean active return over tracking error.
 
     Active return is strategy minus benchmark (buy & hold) per bar. Measures
@@ -272,7 +288,7 @@ def _information_ratio(strat_ret: np.ndarray, bh_ret: np.ndarray) -> float:
     te = np.std(active, ddof=1)
     if te == 0 or not np.isfinite(te):
         return float("nan")
-    return float(np.mean(active) / te * np.sqrt(_HOURS_PER_YEAR))
+    return float(np.mean(active) / te * np.sqrt(bars_per_year))
 
 
 def _capture_ratio(strat_ret: np.ndarray, bh_ret: np.ndarray, *, up: bool) -> float:
@@ -294,14 +310,14 @@ def _capture_ratio(strat_ret: np.ndarray, bh_ret: np.ndarray, *, up: bool) -> fl
     return strat / bench
 
 
-def _calmar(equity: np.ndarray) -> float:
+def _calmar(equity: np.ndarray, bars_per_year: int = _HOURS_PER_YEAR) -> float:
     """Calmar ratio: annualised return / |max drawdown| of the equity curve."""
     if len(equity) == 0 or equity[-1] <= 0:
         return float("nan")
     max_dd = _max_dd(equity)
     if not np.isfinite(max_dd) or max_dd == 0:
         return float("nan")
-    years = len(equity) / _HOURS_PER_YEAR
+    years = len(equity) / bars_per_year
     ann_return = float(equity[-1]) ** (1 / years) - 1
     return float(ann_return / abs(max_dd))
 
@@ -374,19 +390,20 @@ def _build_quant_backtest_stats(
     current_kelly: float,
     transaction_costs_total: float = 0.0,
     interest_earned: float = 0.0,
+    bars_per_year: int = _HOURS_PER_YEAR,
 ) -> dict:
     n_buys = (detail["trade_event"] == "BUY").sum()
     n_sells = (detail["trade_event"] == "SELL").sum()
     final_portfolio = portfolio_values[-1] if portfolio_values else initial_cash
 
     return {
-        "sharpe_strategy": _sharpe(strat_ret),
-        "sharpe_bh": _sharpe(bh_ret),
-        "sortino_strategy": _sortino(strat_ret),
-        "sortino_bh": _sortino(bh_ret),
-        "calmar_strategy": _calmar(strat_equity),
-        "calmar_bh": _calmar(bh_equity),
-        "information_ratio": _information_ratio(strat_ret, bh_ret),
+        "sharpe_strategy": _sharpe(strat_ret, bars_per_year),
+        "sharpe_bh": _sharpe(bh_ret, bars_per_year),
+        "sortino_strategy": _sortino(strat_ret, bars_per_year),
+        "sortino_bh": _sortino(bh_ret, bars_per_year),
+        "calmar_strategy": _calmar(strat_equity, bars_per_year),
+        "calmar_bh": _calmar(bh_equity, bars_per_year),
+        "information_ratio": _information_ratio(strat_ret, bh_ret, bars_per_year),
         "up_capture": _capture_ratio(strat_ret, bh_ret, up=True),
         "down_capture": _capture_ratio(strat_ret, bh_ret, up=False),
         "total_return_strategy": float(strat_equity[-1] - 1) if len(strat_equity) else 0,
@@ -426,6 +443,7 @@ def quant_backtest(
     regime_smooth: int = 24,
     min_hold_bars: int = 48,
     currency: str = "GBP",
+    bars_per_year: int = _HOURS_PER_YEAR,
 ) -> dict:
     """Walk-forward backtest using HMM regime probabilities on hourly data.
 
@@ -592,6 +610,7 @@ def quant_backtest(
         detail, strat_ret, bh_ret, strat_equity, bh_equity, initial_cash,
         portfolio_values, trade_results, current_kelly,
         transaction_costs_total=total_costs, interest_earned=total_interest,
+        bars_per_year=bars_per_year,
     )
 
 

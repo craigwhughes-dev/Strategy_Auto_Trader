@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ..quant_hmm.quant_engine import fetch_hourly
+from ..quant_hmm.quant_engine import fetch_daily, fetch_hourly
 from ..quant_hmm.consolidated_engine import consolidated_backtest
 from ..core.quality_gate import _apply_quality_gate  # noqa: F401 — available for custom gate logic
 from ..core.momentum import composite_signal, exit_indicators, momentum_signals
@@ -66,10 +66,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                              "selected strategy's own default; -3.0 for 'default')")
     parser.add_argument("--volume-min-ratio", type=float, default=0.8,
                         help="Volume / 100-bar average minimum for entry (default: 0.8)")
-    parser.add_argument("--regime-smooth", type=int, default=24,
-                        help="P(Bull) smoothing window in bars (default: 24)")
-    parser.add_argument("--min-hold-bars", type=int, default=48,
-                        help="Minimum bars held before regime-exit or signal-SELL (default: 48)")
+    parser.add_argument("--interval", default="1h", choices=["1h", "1d"],
+                        help="Bar interval: '1h' hourly ~730d history (default), "
+                             "'1d' daily max history (~20–30yr for multi-cycle research). "
+                             "Daily mode uses different defaults: regime-smooth=5, "
+                             "min-hold-bars=5, min-train-bars=252, bars-per-year=252.")
+    parser.add_argument("--regime-smooth", type=int, default=None,
+                        help="P(Bull) smoothing window in bars "
+                             "(default: 24 for 1h, 5 for 1d)")
+    parser.add_argument("--min-hold-bars", type=int, default=None,
+                        help="Minimum bars held before regime-exit or signal-SELL "
+                             "(default: 48 for 1h, 5 for 1d)")
 
     # Stop-loss / take-profit — default: the selected strategy's own value.
     parser.add_argument("--stop-loss-pct", type=float, default=argparse.SUPPRESS,
@@ -138,6 +145,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         help="Only render the chart, HTML daily summary and company lookup "
                              "when the current signal is BUY or SELL (used by the live "
                              "daemon to keep hourly cycles fast)")
+    parser.add_argument("--no-email", dest="no_email", action="store_true", default=False,
+                        help="Suppress trade alert emails even when SMTP_PASSWORD is set "
+                             "(used by batch/daemon which handle email decisions externally)")
 
     # Strategy selection (entry + exit as a named pair; supersedes --plugin-gate)
     parser.add_argument("--strategy", default="default",
@@ -249,6 +259,34 @@ def _backfill_tunable_defaults(args: argparse.Namespace) -> None:
             setattr(args, key, value)
 
 
+_DAILY_BAR_DEFAULTS = {
+    "regime_smooth": 5,    # 1 week vs 24 hours
+    "min_hold_bars": 5,    # 1 week vs 2 days
+}
+_HOURLY_BAR_DEFAULTS = {
+    "regime_smooth": 24,
+    "min_hold_bars": 48,
+}
+_DAILY_ENGINE_PARAMS = {
+    "min_train_bars": 252,   # 1 year of daily bars
+    "hmm_refit_bars": 100,   # ~4 months between refits
+    "bars_per_year": 252,
+}
+_HOURLY_ENGINE_PARAMS = {
+    "min_train_bars": 500,
+    "hmm_refit_bars": 500,
+    "bars_per_year": 1700,
+}
+
+
+def _resolve_interval_defaults(args: argparse.Namespace) -> None:
+    """Fill None-defaulted params with interval-appropriate values."""
+    bar_defaults = _DAILY_BAR_DEFAULTS if args.interval == "1d" else _HOURLY_BAR_DEFAULTS
+    for key, val in bar_defaults.items():
+        if getattr(args, key, None) is None:
+            setattr(args, key, val)
+
+
 def _write_quality_gate(run_dir: Path, flag: str, reason: str = "") -> None:
     payload = {"flag": flag, "reason": reason}
     (run_dir / "qualityGate.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -299,23 +337,34 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     entry_overrides, exit_overrides = _build_strategy_overrides(args)
     _backfill_tunable_defaults(args)
+    _resolve_interval_defaults(args)
 
-    print(f"\nstrategy-auto-trader (consolidated engine) — ticker={args.ticker}")
+    engine_params = _DAILY_ENGINE_PARAMS if args.interval == "1d" else _HOURLY_ENGINE_PARAMS
+
+    print(f"\nstrategy-auto-trader (consolidated engine) — ticker={args.ticker}, interval={args.interval}")
 
     run_dir = _make_run_dir(args.ticker)
     print(f"  run output directory: {run_dir}")
 
-    print(f"  fetching {args.ticker} hourly data from Yahoo Finance...")
     t0 = time.time()
-    df = fetch_hourly(args.ticker, period="730d")
-    if df is None or df.empty:
-        print(f"  ERROR: could not fetch hourly data for {args.ticker}")
-        _write_quality_gate(run_dir, "HOLD", "no data")
-        return 1
+    if args.interval == "1d":
+        print(f"  fetching {args.ticker} daily data from Yahoo Finance (max history)...")
+        df = fetch_daily(args.ticker)
+        if df is None or df.empty:
+            print(f"  ERROR: could not fetch daily data for {args.ticker}")
+            _write_quality_gate(run_dir, "HOLD", "no data")
+            return 1
+    else:
+        print(f"  fetching {args.ticker} hourly data from Yahoo Finance...")
+        df = fetch_hourly(args.ticker, period="730d")
+        if df is None or df.empty:
+            print(f"  ERROR: could not fetch hourly data for {args.ticker}")
+            _write_quality_gate(run_dir, "HOLD", "no data")
+            return 1
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    print(f"  fetched {len(df)} hourly bars | {df.index.min()} -> {df.index.max()}")
+    print(f"  fetched {len(df)} {args.interval} bars | {df.index.min()} -> {df.index.max()}")
 
     df.to_csv(run_dir / "inputData.csv")
 
@@ -334,13 +383,17 @@ def main(argv: list[str] | None = None) -> int:
     # entry_overrides/exit_overrides (built above, before SUPPRESS backfill)
     # carry only the CLI flags the user explicitly passed — everything else
     # falls through to the selected strategy's own defaults.
+    # Daily mode: vol screen is calibrated on hourly data — hourly TQ is
+    # irrelevant for daily-bar research, so bypass it unconditionally.
+    vol_filter_ok = True if args.interval == "1d" else None
     entry_s, exit_s = resolve_strategy(
         args.strategy, ticker=args.ticker,
+        vol_filter_ok=vol_filter_ok,
         entry_overrides=entry_overrides, exit_overrides=exit_overrides,
     )
 
     regime_model = None
-    if args.hmm_cache:
+    if args.hmm_cache and args.interval == "1h":
         from ..plugins.persistent_hmm import PersistentHMMRegimeModel
         safe_ticker = args.ticker.replace("/", "-").replace("\\", "-")
         regime_model = PersistentHMMRegimeModel(
@@ -352,7 +405,8 @@ def main(argv: list[str] | None = None) -> int:
             bear_edge=args.exit_prob,
         )
 
-    print(f"\nRunning consolidated walk-forward backtest...")
+    interval_label = "daily multi-cycle" if args.interval == "1d" else "consolidated walk-forward"
+    print(f"\nRunning {interval_label} backtest...")
     bt = consolidated_backtest(
         df,
         regime_model=regime_model,
@@ -387,6 +441,9 @@ def main(argv: list[str] | None = None) -> int:
         entry_strategy=entry_s,
         exit_strategy=exit_s,
         skip_unused_indicators=args.skip_unused_indicators,
+        min_train_bars=engine_params["min_train_bars"],
+        hmm_refit_bars=engine_params["hmm_refit_bars"],
+        bars_per_year=engine_params["bars_per_year"],
     )
 
     if regime_model is not None:
@@ -546,9 +603,9 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"  Daily summary report skipped: {exc}")
 
-    # Send email if BUY or SELL signal
+    # Send email if BUY or SELL signal (suppressed when --no-email, e.g. daemon/batch callers)
     try:
-        if cur_flag in ("BUY", "SELL"):
+        if cur_flag in ("BUY", "SELL") and not args.no_email:
             import os
             if os.environ.get("SMTP_PASSWORD"):
                 from ..output.emailer import send_trade_alert

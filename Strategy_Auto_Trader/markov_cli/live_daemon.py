@@ -492,8 +492,12 @@ def load_ticker_overrides(market_name: str, logger: logging.Logger) -> dict[str,
         return {}
 
 
-def get_open_positions(market_name: str, all_tickers: list[str], logger: logging.Logger) -> list[str]:
-    """Get tickers with open positions in this market (intersection of exec state positions and market tickers)."""
+def get_open_positions(market_name: str, logger: logging.Logger) -> list[str]:
+    """Get tickers with open positions in this market, scoped by each
+    position's own recorded "market" field — not by watchlist membership,
+    which breaks silently if a ticker is dropped from its watchlist while a
+    position on it is still open (a position missing the field defaults to
+    matching the current market, the permissive/safe default for legacy data)."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     state_path = STATE_DIR / "execution_state.json"
     if not state_path.exists():
@@ -502,7 +506,10 @@ def get_open_positions(market_name: str, all_tickers: list[str], logger: logging
         with open(state_path, encoding="utf-8") as f:
             exec_state = json.load(f)
         positions = exec_state.get("positions", {})
-        open_in_market = [t for t in positions.keys() if t in all_tickers]
+        open_in_market = [
+            t for t, p in positions.items()
+            if p.get("market", market_name) == market_name
+        ]
         return sorted(open_in_market)
     except Exception as e:
         logger.error(f"  Error loading execution_state.json: {e}")
@@ -565,8 +572,7 @@ def execute_signals_with_retry(
     portfolio: object,
     limit_tracker: object,
     broker: object,
-    daily_buy_limit: int | None,
-    daily_sell_limit: int | None,
+    allow_new_entries: bool,
     logger: logging.Logger,
     max_retries: int = 3,
     market_currency: str = "",
@@ -598,7 +604,7 @@ def execute_signals_with_retry(
         try:
             return execute_signals(
                 ticker_list, data_dir, portfolio, limit_tracker, broker,
-                daily_buy_limit, daily_sell_limit,
+                allow_new_entries=allow_new_entries,
                 market_name=market_name,
                 market_currency=market_currency,
                 protective_stops=protective_stops,
@@ -768,19 +774,17 @@ def _execute_processed_tickers(
     logger.info(f"[{market_name}] Executing signals for {len(ticker_list)} processed tickers...")
     try:
         limit_tracker = portfolio.get_limit_tracker()
-        exec_cfg = config.get("execution", {})
-        daily_buy_limit = exec_cfg.get("daily_buy_limit", 2)
-        daily_sell_limit = exec_cfg.get("daily_sell_limit")
+        allow_new_entries = not (
+            daemon_state.get("halt_new_entries") or daemon_state.get("paused_by_user")
+        )
         if daemon_state.get("halt_new_entries"):
             logger.warning(f"[{market_name}] Reconciliation mismatch unresolved — new entries blocked")
-            daily_buy_limit = 0
         elif daemon_state.get("paused_by_user"):
             logger.info(f"[{market_name}] Buying paused by user — new entries blocked")
-            daily_buy_limit = 0
         market_currency = get_market_currency(market_name, config)
         buys, sells, skipped = execute_signals_with_retry(
             market_name, ticker_list, DATA_DIR, portfolio, limit_tracker, broker,
-            daily_buy_limit, daily_sell_limit, logger,
+            allow_new_entries, logger,
             market_currency=market_currency,
             daemon_state=daemon_state,
             protective_stops=protective_stops,
@@ -876,9 +880,12 @@ def process_cycle(
         logger.debug(f"  {market_name}: no in-scope tickers")
         return 0
 
-    # Open positions always run first
-    open_positions = get_open_positions(market_name, in_scope, logger)
-    must_run = [t for t in open_positions if t in in_scope]
+    # Open positions always run first — unconditionally, not filtered by
+    # in_scope, which can lag behind execution_state.json if a ticker was
+    # dropped from its watchlist since the last overnight_scope run (see
+    # get_open_positions()'s docstring).
+    open_positions = get_open_positions(market_name, logger)
+    must_run = list(open_positions)
 
     # Remaining budget for candidates
     max_seconds = config.get("daytime", {}).get("max_seconds_per_cycle", 1500)
@@ -980,10 +987,56 @@ def check_overnight_screening(
             run_overnight_scope()
             daemon_state["last_overnight_date"] = today
             save_daemon_state(daemon_state)
-            logger.info(f"Overnight scope screening complete ({time.time() - t0:.0f}s)")
+            elapsed = time.time() - t0
+            logger.info(f"Overnight scope screening complete ({elapsed:.0f}s)")
+            for mkt in config.get("markets", {}):
+                scope_path = STATE_DIR / f"in_scope_{mkt}.json"
+                if not scope_path.exists():
+                    continue
+                try:
+                    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+                    kept = scope.get("kept", [])
+                    excluded = scope.get("excluded", [])
+                    logger.info(f"  [{mkt}] in scope ({len(kept)}): {', '.join(kept)}")
+                    by_reason: dict[str, list[str]] = {}
+                    for e in excluded:
+                        by_reason.setdefault(e["reason"], []).append(e["ticker"])
+                    for reason, tickers in sorted(by_reason.items()):
+                        logger.info(f"  [{mkt}] excluded by {reason} ({len(tickers)}): {', '.join(tickers)}")
+                except Exception as exc:
+                    logger.warning(f"  Could not read scope summary for {mkt}: {exc}")
         except Exception as e:
             logger.error(f"Error in overnight screening: {e}")
         _check_top_k_screen_health(logger)
+        _check_orphaned_positions(config, logger)
+
+
+def _check_orphaned_positions(config: dict, logger: logging.Logger) -> None:
+    """After overnight_scope runs, check each market's in_scope_<market>.json
+    for orphaned_positions (open positions whose ticker fell out of the
+    watchlist file — see screen_market()'s docstring) and alert if any are
+    present. Non-halting: the position is already force-kept in scope by
+    screen_market(), this is visibility only."""
+    for market_name in config.get("markets", {}):
+        scope_path = STATE_DIR / f"in_scope_{market_name}.json"
+        if not scope_path.exists():
+            continue
+        try:
+            with open(scope_path, encoding="utf-8") as f:
+                scope = json.load(f)
+        except Exception as e:
+            logger.warning(f"  Could not read in_scope_{market_name}.json: {e}")
+            continue
+
+        orphaned = scope.get("orphaned_positions", [])
+        if orphaned:
+            logger.warning(f"  {market_name}: {len(orphaned)} open position(s) "
+                           f"missing from watchlist: {', '.join(orphaned)}")
+            try:
+                from ..output.emailer import send_orphaned_position_alert
+                send_orphaned_position_alert(market_name, orphaned)
+            except Exception as e:
+                logger.error(f"  orphaned-position alert email failed: {e}")
 
 
 def _check_top_k_screen_health(logger: logging.Logger) -> None:
@@ -1484,11 +1537,10 @@ def main(argv: list[str] | None = None) -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     state_path = STATE_DIR / "execution_state.json"
     capital_pot = float(exec_cfg.get("capital_pot", 20000))
-    max_positions = int(exec_cfg.get("max_positions", 5))
     # Determine primary market currency (from first market in config)
     primary_market = next(iter(config.get("markets", {}).keys()), "ftse")
     currency = get_market_currency(primary_market, config)
-    portfolio = PortfolioManager(capital_pot, max_positions, state_path, currency=currency)
+    portfolio = PortfolioManager(capital_pot, state_path, currency=currency)
 
     # Broker connection is async and can hang; skip it here and let it fail gracefully
     # when trades are attempted. Daemon can still process tickers and generate signals.

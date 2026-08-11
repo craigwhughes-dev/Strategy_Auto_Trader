@@ -1,4 +1,4 @@
-"""Daily trade limit tracking — enforces max BUY/SELL orders per day."""
+"""Daily trade count tracking — records BUY/SELL execution counts per day."""
 
 from __future__ import annotations
 
@@ -29,20 +29,6 @@ class DailyLimitTracker:
             self._state["trades_today"] = {"date": today, "buys": 0, "sells": 0}
         elif self._state["trades_today"].get("date") != today:
             self._state["trades_today"] = {"date": today, "buys": 0, "sells": 0}
-
-    def can_buy(self, daily_buy_limit: int | None) -> bool:
-        """True if today's BUY count is below limit (None = unlimited)."""
-        if daily_buy_limit is None:
-            return True
-        self._ensure_today()
-        return self._state["trades_today"]["buys"] < daily_buy_limit
-
-    def can_sell(self, daily_sell_limit: int | None) -> bool:
-        """True if today's SELL count is below limit (None = unlimited)."""
-        if daily_sell_limit is None:
-            return True
-        self._ensure_today()
-        return self._state["trades_today"]["sells"] < daily_sell_limit
 
     def record_buy(self) -> None:
         """Increment today's BUY count."""

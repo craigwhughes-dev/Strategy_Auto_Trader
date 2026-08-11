@@ -312,6 +312,7 @@ def consolidated_backtest(
     exit_strategy: ExitStrategyProtocol | None = None,
     skip_unused_indicators: bool = True,
     currency: str = "GBP",
+    bars_per_year: int = 1700,
 ) -> dict:
     """Walk-forward consolidated backtest on hourly data.
 
@@ -669,4 +670,5 @@ def consolidated_backtest(
         detail, strat_ret, bh_ret, strat_equity, bh_equity, initial_cash,
         portfolio_values, sizer_plugin.trade_results, sizer_plugin.current_kelly,
         transaction_costs_total=total_costs, interest_earned=total_interest,
+        bars_per_year=bars_per_year,
     )

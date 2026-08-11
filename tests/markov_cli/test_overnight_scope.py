@@ -22,15 +22,11 @@ def config():
                 "trading_start": "08:00",
                 "trading_end": "16:30",
                 "vol_screen": {"enabled": True, "min_trend_quality": 0.0, "period": "2y"},
-                "sentiment_screen": {"enabled": True, "min_sentiment_score": -0.3, "exclude_labels": ["bearish"]},
                 "exempt_if_open_position": True,
             }
         },
         "execution": {
             "capital_pot": 20000,
-            "max_positions": 5,
-            "daily_buy_limit": 2,
-            "daily_sell_limit": None,
         },
     }
 
@@ -68,7 +64,6 @@ def test_screen_market_vol_screen_excluded():
     market_cfg = {
         "watchlist": "config/watchlist.json",
         "vol_screen": {"enabled": True, "min_trend_quality": 0.0, "period": "2y"},
-        "sentiment_screen": {"enabled": False},
         "exempt_if_open_position": True,
     }
 
@@ -96,7 +91,6 @@ def test_screen_market_choppy_strategy_inverts_vol_screen():
         "watchlist": "config/watchlist.json",
         "defaults": {"strategy": "mean_reversion"},
         "vol_screen": {"enabled": True, "min_trend_quality": 0.0, "period": "2y"},
-        "sentiment_screen": {"enabled": False},
         "exempt_if_open_position": True,
     }
 
@@ -131,7 +125,6 @@ def test_screen_market_choppy_strategy_still_caps_downside_vol():
         "watchlist": "config/watchlist.json",
         "defaults": {"strategy": "choppy_vol"},
         "vol_screen": {"enabled": True, "min_trend_quality": 0.0, "max_downside_vol": 0.25, "period": "2y"},
-        "sentiment_screen": {"enabled": False},
         "exempt_if_open_position": True,
     }
 
@@ -163,7 +156,6 @@ def test_screen_market_non_choppy_strategy_unaffected():
         "watchlist": "config/watchlist.json",
         "defaults": {"strategy": "default"},
         "vol_screen": {"enabled": True, "min_trend_quality": 0.0, "period": "2y"},
-        "sentiment_screen": {"enabled": False},
         "exempt_if_open_position": True,
     }
 
@@ -191,7 +183,6 @@ def test_screen_market_open_position_exempt():
     market_cfg = {
         "watchlist": "config/watchlist.json",
         "vol_screen": {"enabled": True, "min_trend_quality": 0.0, "period": "2y"},
-        "sentiment_screen": {"enabled": False},
         "exempt_if_open_position": True,
     }
     exec_state = {"positions": {"OPEN_TICKER": {"quantity": 10}}}
@@ -209,37 +200,84 @@ def test_screen_market_open_position_exempt():
             assert "OPEN_TICKER" in result["open_positions"]
 
 
-def test_screen_market_sentiment_bearish_excluded():
-    """Bearish sentiment excluded (unless open position)."""
+def test_screen_market_open_position_kept_even_if_dropped_from_watchlist():
+    """An open position's ticker stays in kept (and is reported in
+    orphaned_positions) even if it's no longer in the watchlist file at
+    all — the actual gap being fixed (previously only worked if the ticker
+    was still watchlist-listed)."""
     market_cfg = {
         "watchlist": "config/watchlist.json",
         "vol_screen": {"enabled": False},
-        "sentiment_screen": {
-            "enabled": True,
-            "min_sentiment_score": -0.3,
-            "exclude_labels": ["bearish"],
-        },
         "exempt_if_open_position": True,
     }
+    exec_state = {"positions": {"ORPHANED_TICKER": {"market": "test"}}}
 
     with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_watchlist") as mock_wl:
-        with mock.patch("Strategy_Auto_Trader.quant_hmm.sentiment.composite_sentiment") as mock_sent:
-            mock_wl.return_value = {
-                "tickers": [{"ticker": "BULLISH"}, {"ticker": "BEARISH"}]
-            }
+        mock_wl.return_value = {"tickers": [{"ticker": "GOOD_TICKER"}]}  # ORPHANED_TICKER absent
 
-            def sentiment_side_effect(ticker):
-                if ticker == "BEARISH":
-                    return {"sentiment_label": "bearish", "sentiment_score": -0.5}
-                return {"sentiment_label": "bullish", "sentiment_score": 0.5}
+        result = overnight_scope.screen_market("test", market_cfg, exec_state)
 
-            mock_sent.side_effect = sentiment_side_effect
+        assert "ORPHANED_TICKER" in result["kept"]
+        assert "ORPHANED_TICKER" in result["orphaned_positions"]
+        assert "GOOD_TICKER" in result["kept"]
 
-            result = overnight_scope.screen_market("test", market_cfg, {})
 
-            assert "BULLISH" in result["kept"]
-            assert "BEARISH" not in result["kept"]
-            assert any(e["ticker"] == "BEARISH" for e in result["excluded"])
+def test_screen_market_orphaned_positions_empty_when_no_drift():
+    market_cfg = {
+        "watchlist": "config/watchlist.json",
+        "vol_screen": {"enabled": False},
+        "exempt_if_open_position": True,
+    }
+    exec_state = {"positions": {"OPEN_TICKER": {"market": "test"}}}
+
+    with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_watchlist") as mock_wl:
+        mock_wl.return_value = {"tickers": [{"ticker": "OPEN_TICKER"}]}
+
+        result = overnight_scope.screen_market("test", market_cfg, exec_state)
+
+        assert result["orphaned_positions"] == []
+
+
+def test_screen_market_position_scoped_by_market_field_not_leaked_across_markets():
+    """A position tagged for a different market must not appear in this
+    market's open_positions/kept — even if its ticker happens to also be in
+    this market's watchlist (market attribution is now by the position's own
+    recorded field, not by watchlist membership)."""
+    market_cfg = {
+        "watchlist": "config/watchlist.json",
+        "vol_screen": {"enabled": False},
+        "exempt_if_open_position": True,
+    }
+    exec_state = {"positions": {"CROSS_MARKET_TICKER": {"market": "other_market"}}}
+
+    with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_watchlist") as mock_wl:
+        mock_wl.return_value = {"tickers": [{"ticker": "CROSS_MARKET_TICKER"}]}
+
+        result = overnight_scope.screen_market("test", market_cfg, exec_state)
+
+        # Not in open_positions for "test" market, but stage1 (vol screen
+        # disabled) still keeps it since it's a normal watchlist ticker.
+        assert "CROSS_MARKET_TICKER" not in result["open_positions"]
+        assert "CROSS_MARKET_TICKER" in result["kept"]
+
+
+def test_screen_market_position_missing_market_field_defaults_to_current_market():
+    """Legacy position data without a "market" key defaults to matching the
+    current market rather than being silently excluded."""
+    market_cfg = {
+        "watchlist": "config/watchlist.json",
+        "vol_screen": {"enabled": False},
+        "exempt_if_open_position": True,
+    }
+    exec_state = {"positions": {"LEGACY_TICKER": {}}}  # no "market" key
+
+    with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_watchlist") as mock_wl:
+        mock_wl.return_value = {"tickers": []}  # not in watchlist at all
+
+        result = overnight_scope.screen_market("test", market_cfg, exec_state)
+
+        assert "LEGACY_TICKER" in result["kept"]
+        assert "LEGACY_TICKER" in result["orphaned_positions"]
 
 
 def test_generate_scoped_watchlist_merges_defaults(tmp_path):
@@ -250,9 +288,6 @@ def test_generate_scoped_watchlist_merges_defaults(tmp_path):
     }
     exec_cfg = {
         "capital_pot": 50000,
-        "max_positions": 3,
-        "daily_buy_limit": 5,
-        "daily_sell_limit": 2,
     }
 
     gen_dir = tmp_path / "generated"
@@ -271,9 +306,6 @@ def test_generate_scoped_watchlist_merges_defaults(tmp_path):
                 parsed = json.load(f)
 
             assert parsed["defaults"]["capital_pot"] == 50000
-            assert parsed["defaults"]["max_positions"] == 3
-            assert parsed["defaults"]["daily_buy_limit"] == 5
-            assert parsed["defaults"]["daily_sell_limit"] == 2
             assert parsed["defaults"]["strategy"] == "conservative"
 
 
@@ -282,7 +314,6 @@ def test_screen_market_overrides_populated_for_dict_tickers_with_override_keys()
     market_cfg = {
         "watchlist": "config/watchlist.json",
         "vol_screen": {"enabled": False},
-        "sentiment_screen": {"enabled": False},
         "exempt_if_open_position": True,
     }
 
@@ -311,7 +342,6 @@ def test_screen_market_overrides_round_trips_through_write_scope_result(tmp_path
     market_cfg = {
         "watchlist": "config/watchlist.json",
         "vol_screen": {"enabled": False},
-        "sentiment_screen": {"enabled": False},
         "exempt_if_open_position": True,
     }
 
@@ -340,11 +370,10 @@ def test_screen_market_overrides_round_trips_through_write_scope_result(tmp_path
 
 def test_with_merged_defaults_merges_top_level_blocks_market_wins():
     """The config-merge bug fix: main() must merge top-level vol_screen/
-    sentiment_screen/exempt_if_open_position into market_cfg before
-    screen_market() reads them, with market-level keys taking precedence."""
+    exempt_if_open_position into market_cfg before screen_market() reads
+    them, with market-level keys taking precedence."""
     config = {
         "vol_screen": {"enabled": True, "max_downside_vol": 0.25},
-        "sentiment_screen": {"enabled": True, "min_sentiment_score": -0.3},
         "exempt_if_open_position": True,
     }
     market_cfg = {"watchlist": "x.json"}  # no own overrides
@@ -352,7 +381,6 @@ def test_with_merged_defaults_merges_top_level_blocks_market_wins():
     merged = overnight_scope._with_merged_defaults(market_cfg, config)
 
     assert merged["vol_screen"]["max_downside_vol"] == 0.25
-    assert merged["sentiment_screen"]["min_sentiment_score"] == -0.3
     assert merged["exempt_if_open_position"] is True
     assert merged["watchlist"] == "x.json"
 
@@ -451,7 +479,6 @@ def test_screen_market_top_k_filter_excludes_non_top_k():
     market_cfg = {
         "watchlist": "config/watchlist.json",
         "vol_screen": {"enabled": False},
-        "sentiment_screen": {"enabled": False},
         "exempt_if_open_position": True,
     }
 
@@ -469,7 +496,6 @@ def test_screen_market_top_k_filter_open_position_exempt():
     market_cfg = {
         "watchlist": "config/watchlist.json",
         "vol_screen": {"enabled": False},
-        "sentiment_screen": {"enabled": False},
         "exempt_if_open_position": True,
     }
     exec_state = {"positions": {"NOT_TOP_K": {}}}
@@ -489,7 +515,6 @@ def test_screen_market_top_k_none_is_noop():
     market_cfg = {
         "watchlist": "config/watchlist.json",
         "vol_screen": {"enabled": False},
-        "sentiment_screen": {"enabled": False},
         "exempt_if_open_position": True,
     }
 

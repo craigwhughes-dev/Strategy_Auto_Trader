@@ -15,7 +15,6 @@ def run_strategy(strategy_name: str, tickers: list[str]) -> None:
             "initial_cash": 10000,
             "transaction_cost": 10,
             "capital_pot": 10000,
-            "max_positions": 50,
             "daily_buy_limit": None,
             "daily_sell_limit": None,
         },

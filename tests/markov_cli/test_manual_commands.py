@@ -65,7 +65,7 @@ def fake_portfolio(tmp_path):
     from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
 
     state_path = tmp_path / "state.json"
-    pm = PortfolioManager(20_000, 5, state_path)
+    pm = PortfolioManager(20_000, state_path)
     return pm
 
 

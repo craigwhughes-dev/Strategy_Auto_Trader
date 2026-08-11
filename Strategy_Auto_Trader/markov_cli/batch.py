@@ -27,6 +27,19 @@ class TimeoutError(Exception):
     pass
 
 
+def _run_in_child(argv: list[str], error_queue) -> None:
+    import traceback as _tb
+    try:
+        run_single(argv)
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            error_queue.put(_tb.format_exc())
+        raise
+    except Exception:
+        error_queue.put(_tb.format_exc())
+        raise
+
+
 def run_single_with_timeout(argv: list[str], timeout_seconds: int = 300) -> None:
     """Run backtest with timeout protection (5 minutes default).
 
@@ -38,7 +51,8 @@ def run_single_with_timeout(argv: list[str], timeout_seconds: int = 300) -> None
     Raises TimeoutError if run_single exceeds the limit.
     """
     ctx = multiprocessing.get_context("spawn")
-    proc = ctx.Process(target=run_single, args=(argv,))
+    error_queue = ctx.Queue()
+    proc = ctx.Process(target=_run_in_child, args=(argv, error_queue))
     proc.start()
     proc.join(timeout_seconds)
 
@@ -51,7 +65,13 @@ def run_single_with_timeout(argv: list[str], timeout_seconds: int = 300) -> None
         raise TimeoutError(f"Backtest exceeded time limit ({timeout_seconds}s)")
 
     if proc.exitcode != 0:
-        raise RuntimeError(f"run_single exited with code {proc.exitcode}")
+        tb = ""
+        try:
+            tb = error_queue.get_nowait()
+        except Exception:
+            pass
+        detail = f"\n{tb.strip()}" if tb else ""
+        raise RuntimeError(f"run_single exited with code {proc.exitcode}{detail}")
 
 DEFAULTS_FILE = Path(__file__).resolve().parent.parent.parent / "config" / "watchlist.json"
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
@@ -120,6 +140,10 @@ def _build_argv(ticker_cfg: dict, defaults: dict) -> list[str]:
     if merged.get("signal_reports_only", False):
         argv.append("--signal-reports-only")
 
+    # batch/daemon always suppress run.py's own email send — email decisions
+    # are made here in batch.py after the subprocess returns, not inside run.py.
+    argv.append("--no-email")
+
     strategy = merged.pop("strategy", None)
     if strategy:
         argv.extend(["--strategy", str(strategy)])
@@ -156,9 +180,17 @@ def _collect_results(ticker: str) -> dict | None:
     quality_gate = _read_quality_gate(latest)
     effective_signal = str(quality_gate.get("flag", last_row.get("trade_event", "?")))
 
+    # Parse YYYYMMDD from dir name (format: TICKER_YYYYMMDDTHHMMSSz)
+    run_date = ""
+    try:
+        run_date = latest.name.rsplit("_", 1)[-1][:8]
+    except Exception:
+        pass
+
     return {
         "ticker": ticker,
         "run_dir": str(latest),
+        "run_date": run_date,
         "current_signal": effective_signal,
         "trade_event": str(last_row.get("trade_event", "")) if pd.notna(last_row.get("trade_event")) else "",
         "close": float(last_row.get("close", 0)),

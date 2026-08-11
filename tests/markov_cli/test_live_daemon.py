@@ -56,9 +56,6 @@ def config():
         },
         "execution": {
             "capital_pot": 20000,
-            "max_positions": 5,
-            "daily_buy_limit": 2,
-            "daily_sell_limit": None,
             "dry_run": True,
         },
     }
@@ -154,23 +151,59 @@ def test_next_round_robin_empty_in_scope():
     assert cursor == 0
 
 
-def test_get_open_positions_filters_by_market_tickers():
-    """Open positions are filtered to only those in the market's ticker list."""
+def test_get_open_positions_filters_by_recorded_market_field():
+    """Open positions are filtered by each position's own "market" field,
+    not by watchlist/ticker-list membership."""
     exec_state = {
         "positions": {
-            "FTSE_TICKER": {"quantity": 10},
-            "SP500_TICKER": {"quantity": 5},
+            "FTSE_TICKER": {"quantity": 10, "market": "ftse"},
+            "SP500_TICKER": {"quantity": 5, "market": "sp500"},
         }
     }
-    market_tickers = ["FTSE_TICKER", "OTHER_FTSE"]
     logger = mock.Mock()
 
     with mock.patch("pathlib.Path.exists", return_value=True):
         with mock.patch("builtins.open", mock.mock_open(read_data=json.dumps(exec_state))):
-            result = live_daemon.get_open_positions("ftse", market_tickers, logger)
+            result = live_daemon.get_open_positions("ftse", logger)
 
             assert "FTSE_TICKER" in result
             assert "SP500_TICKER" not in result
+
+
+def test_get_open_positions_includes_ticker_dropped_from_watchlist():
+    """A position stays attributed to its market by the recorded "market"
+    field even if the ticker has been removed from that market's watchlist
+    entirely — this is the actual gap being fixed (previously used ticker-
+    list membership as a proxy, which silently dropped orphaned positions)."""
+    exec_state = {
+        "positions": {
+            "ORPHANED_TICKER": {"quantity": 10, "market": "ftse"},
+        }
+    }
+    logger = mock.Mock()
+
+    with mock.patch("pathlib.Path.exists", return_value=True):
+        with mock.patch("builtins.open", mock.mock_open(read_data=json.dumps(exec_state))):
+            result = live_daemon.get_open_positions("ftse", logger)
+
+            assert "ORPHANED_TICKER" in result
+
+
+def test_get_open_positions_missing_market_field_defaults_permissive():
+    """Legacy position data without a "market" field defaults to matching
+    the current market rather than being silently dropped."""
+    exec_state = {
+        "positions": {
+            "LEGACY_TICKER": {"quantity": 10},
+        }
+    }
+    logger = mock.Mock()
+
+    with mock.patch("pathlib.Path.exists", return_value=True):
+        with mock.patch("builtins.open", mock.mock_open(read_data=json.dumps(exec_state))):
+            result = live_daemon.get_open_positions("ftse", logger)
+
+            assert "LEGACY_TICKER" in result
 
 
 def test_check_overnight_screening_updates_state():
@@ -270,6 +303,62 @@ def test_top_k_screen_health_stale_state_sends_alert_even_if_status_ok(monkeypat
     mock_alert.assert_called_once_with("stale", old_date)
 
 
+def test_orphaned_positions_no_scope_file_is_noop(monkeypatch, tmp_path):
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    config = {"markets": {"ftse": {}}}
+    logger = mock.Mock()
+
+    with mock.patch("Strategy_Auto_Trader.output.emailer.send_orphaned_position_alert") as mock_alert:
+        live_daemon._check_orphaned_positions(config, logger)
+
+    mock_alert.assert_not_called()
+
+
+def test_orphaned_positions_empty_list_no_alert(monkeypatch, tmp_path):
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    (tmp_path / "in_scope_ftse.json").write_text(
+        json.dumps({"kept": [], "orphaned_positions": []}), encoding="utf-8",
+    )
+    config = {"markets": {"ftse": {}}}
+    logger = mock.Mock()
+
+    with mock.patch("Strategy_Auto_Trader.output.emailer.send_orphaned_position_alert") as mock_alert:
+        live_daemon._check_orphaned_positions(config, logger)
+
+    mock_alert.assert_not_called()
+
+
+def test_orphaned_positions_present_sends_alert(monkeypatch, tmp_path):
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    (tmp_path / "in_scope_ftse.json").write_text(
+        json.dumps({"kept": ["VOD.L"], "orphaned_positions": ["VOD.L"]}), encoding="utf-8",
+    )
+    config = {"markets": {"ftse": {}}}
+    logger = mock.Mock()
+
+    with mock.patch("Strategy_Auto_Trader.output.emailer.send_orphaned_position_alert") as mock_alert:
+        live_daemon._check_orphaned_positions(config, logger)
+
+    mock_alert.assert_called_once_with("ftse", ["VOD.L"])
+
+
+def test_orphaned_positions_checks_every_configured_market(monkeypatch, tmp_path):
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    (tmp_path / "in_scope_ftse.json").write_text(
+        json.dumps({"kept": [], "orphaned_positions": ["A"]}), encoding="utf-8",
+    )
+    (tmp_path / "in_scope_sp500.json").write_text(
+        json.dumps({"kept": [], "orphaned_positions": ["B"]}), encoding="utf-8",
+    )
+    config = {"markets": {"ftse": {}, "sp500": {}}}
+    logger = mock.Mock()
+
+    with mock.patch("Strategy_Auto_Trader.output.emailer.send_orphaned_position_alert") as mock_alert:
+        live_daemon._check_orphaned_positions(config, logger)
+
+    assert mock_alert.call_count == 2
+
+
 def _run_process_cycle_capture_defaults(monkeypatch, market_cfg):
     """Run process_cycle with stubbed I/O, capturing what process_ticker receives."""
     from Strategy_Auto_Trader.markov_cli import batch
@@ -284,7 +373,7 @@ def _run_process_cycle_capture_defaults(monkeypatch, market_cfg):
 
     monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
-    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
 
     config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
     live_daemon.process_cycle(
@@ -311,7 +400,7 @@ def test_process_cycle_feeds_closes_to_dry_run_broker(monkeypatch):
 
     monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
-    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
     monkeypatch.setattr(execute, "execute_signals",
                         lambda *a, **k: ([], [], []))
 
@@ -344,7 +433,7 @@ def test_process_cycle_checks_manual_commands_between_must_run_tickers(monkeypat
                          lambda ticker_cfg, defaults, send_email: {
                              "ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0})
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL", "MSFT"])
-    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: ["AAPL", "MSFT"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: ["AAPL", "MSFT"])
 
     config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
     live_daemon.process_cycle(
@@ -365,7 +454,7 @@ def test_process_cycle_checks_manual_commands_between_round_robin_tickers(monkey
                          lambda ticker_cfg, defaults, send_email: {
                              "ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0})
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL", "MSFT", "GOOGL"])
-    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
     monkeypatch.setattr(live_daemon, "next_round_robin_slice",
                          lambda market_name, candidates, daemon_state, logger: (candidates, 0))
 
@@ -393,7 +482,7 @@ def test_process_cycle_persists_partial_round_robin_progress_across_budget_cutof
 
     monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL", "MSFT", "GOOGL"])
-    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
     monkeypatch.setattr(live_daemon, "process_manual_commands_wrapper", lambda *a, **k: None)
 
     config = {"daytime": {"max_seconds_per_cycle": 10, "cycle_buffer_minutes": 0}}
@@ -442,7 +531,7 @@ def test_process_cycle_writes_status_snapshot_between_must_run_tickers(monkeypat
                          lambda ticker_cfg, defaults, send_email: {
                              "ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0})
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL", "MSFT"])
-    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: ["AAPL", "MSFT"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: ["AAPL", "MSFT"])
 
     config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
     live_daemon.process_cycle(
@@ -463,7 +552,7 @@ def test_process_cycle_writes_status_snapshot_between_round_robin_tickers(monkey
                          lambda ticker_cfg, defaults, send_email: {
                              "ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0})
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL", "MSFT", "GOOGL"])
-    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
     monkeypatch.setattr(live_daemon, "next_round_robin_slice",
                          lambda market_name, candidates, daemon_state, logger: (candidates, 0))
 
@@ -489,7 +578,7 @@ def test_process_cycle_passes_last_cycle_hour_through_to_snapshot(monkeypatch):
                          lambda ticker_cfg, defaults, send_email: {
                              "ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0})
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
-    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: ["AAPL"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: ["AAPL"])
 
     config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
     sentinel = {"test_market": 13}
@@ -1071,7 +1160,7 @@ class TestReconciliation:
 
 
 def test_process_cycle_halt_flag_blocks_new_entries(monkeypatch):
-    """halt_new_entries forces daily_buy_limit=0 into execute_signals."""
+    """halt_new_entries passes allow_new_entries=False into execute_signals."""
     from Strategy_Auto_Trader.markov_cli import batch, execute
 
     def fake_process_ticker(ticker_cfg, defaults, send_email):
@@ -1081,25 +1170,25 @@ def test_process_cycle_halt_flag_blocks_new_entries(monkeypatch):
     captured = {}
 
     def fake_execute_signals(tickers, data_dir, portfolio, limit_tracker,
-                             broker, daily_buy_limit, daily_sell_limit, **kwargs):
-        captured["daily_buy_limit"] = daily_buy_limit
+                             broker, allow_new_entries=True, **kwargs):
+        captured["allow_new_entries"] = allow_new_entries
         return [], [], []
 
     monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
     monkeypatch.setattr(execute, "execute_signals", fake_execute_signals)
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
-    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
 
     config = {
         "daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0},
-        "execution": {"daily_buy_limit": 5},
+        "execution": {},
     }
     daemon_state = {"cursors": {}, "halt_new_entries": True}
     live_daemon.process_cycle(
         "test_market", {}, config, daemon_state,
         portfolio=mock.Mock(), broker=mock.Mock(spec=[]), logger=mock.Mock(),
     )
-    assert captured["daily_buy_limit"] == 0
+    assert captured["allow_new_entries"] is False
 
 
 def test_main_refuses_to_start_when_self_check_fails(monkeypatch, config):
@@ -1333,7 +1422,7 @@ class TestExecuteSignalsWithRetry:
 
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL"], None, None, None, mock.Mock(),
-            2, None, mock.Mock(),
+            True, mock.Mock(),
             execute_signals=fake_execute
         )
         assert result == (["BUY"], ["SELL"], [])
@@ -1352,7 +1441,7 @@ class TestExecuteSignalsWithRetry:
 
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL"], None, None, None, broker,
-            2, None, logger, max_retries=3,
+            True, logger, max_retries=3,
             execute_signals=fake_execute
         )
 
@@ -1375,7 +1464,7 @@ class TestExecuteSignalsWithRetry:
 
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL"], None, None, None, broker,
-            2, None, logger, max_retries=3,
+            True, logger, max_retries=3,
             execute_signals=fake_execute
         )
 
@@ -1392,7 +1481,7 @@ class TestExecuteSignalsWithRetry:
 
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL", "MSFT"], None, None, None, broker,
-            2, None, logger, max_retries=2,
+            True, logger, max_retries=2,
             execute_signals=fake_execute
         )
 
@@ -1413,7 +1502,7 @@ class TestExecuteSignalsWithRetry:
 
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL"], None, None, None, broker,
-            2, None, logger,
+            True, logger,
             execute_signals=fake_execute
         )
 
@@ -1434,7 +1523,7 @@ class TestExecuteSignalsWithRetry:
 
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL"], None, None, None, broker,
-            2, None, logger,
+            True, logger,
             execute_signals=fake_execute
         )
 
@@ -1451,7 +1540,7 @@ class TestExecuteSignalsWithRetry:
         with pytest.raises(ValueError, match="Invalid ticker symbol"):
             live_daemon.execute_signals_with_retry(
                 "ftse", ["AAPL"], None, None, None, broker,
-                2, None, logger,
+                True, logger,
                 execute_signals=fake_execute
             )
 
@@ -1471,7 +1560,7 @@ class TestExecuteSignalsWithRetry:
 
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL"], None, None, None, broker,
-            2, None, logger,
+            True, logger,
             execute_signals=fake_execute
         )
 
@@ -1500,7 +1589,7 @@ class TestExecuteSignalsWithRetry:
 
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL"], None, None, None, broker,
-            2, None, logger, max_retries=4,
+            True, logger, max_retries=4,
             execute_signals=fake_execute
         )
 
@@ -1535,7 +1624,7 @@ class TestExecuteSignalsWithRetry:
 
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL", "MSFT", "GOOG"], None, None, None, broker,
-            2, None, logger, daemon_state=daemon_state,
+            True, logger, daemon_state=daemon_state,
             execute_signals=fake_execute,
             save_state=fake_save,
             send_interrupt_alert=mock_send_alert
@@ -1575,7 +1664,7 @@ class TestExecuteSignalsWithRetry:
 
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL", "MSFT"], None, None, None, broker,
-            2, None, logger, daemon_state=daemon_state,
+            True, logger, daemon_state=daemon_state,
             execute_signals=fake_execute,
             save_state=fake_save,
             send_interrupt_alert=mock_send_alert
@@ -1605,7 +1694,7 @@ class TestExecuteSignalsWithRetry:
 
         live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL"], None, None, None, broker,
-            2, None, logger, daemon_state=daemon_state,
+            True, logger, daemon_state=daemon_state,
             execute_signals=make_fake_execute(["AAPL"]),
             save_state=lambda s: None,
             send_interrupt_alert=lambda *a, **k: None,
@@ -1614,7 +1703,7 @@ class TestExecuteSignalsWithRetry:
 
         live_daemon.execute_signals_with_retry(
             "ftse", ["MSFT", "GOOG"], None, None, None, broker,
-            2, None, logger, daemon_state=daemon_state,
+            True, logger, daemon_state=daemon_state,
             execute_signals=make_fake_execute(["MSFT", "GOOG"]),
             save_state=lambda s: None,
             send_interrupt_alert=lambda *a, **k: None,
@@ -1653,7 +1742,7 @@ class TestExecuteSignalsWithRetry:
 
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL", "MSFT"], None, None, None, broker,
-            2, None, logger, daemon_state=daemon_state, max_retries=2,
+            True, logger, daemon_state=daemon_state, max_retries=2,
             execute_signals=fake_execute,
             save_state=fake_save,
             send_interrupt_alert=mock_send_alert,
@@ -1692,7 +1781,7 @@ class TestExecuteSignalsWithRetry:
 
         live_daemon.execute_signals_with_retry(
             "ftse", ["VOD.L"], None, None, None, broker,
-            2, None, logger, daemon_state=daemon_state,
+            True, logger, daemon_state=daemon_state,
             execute_signals=fake_execute,
             save_state=lambda s: None,
             send_interrupt_alert=mock_send_alert,
@@ -1729,7 +1818,7 @@ class TestExecuteSignalsWithRetry:
 
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["VOD.L"], None, None, None, broker,
-            2, None, logger, daemon_state=daemon_state, max_retries=3,
+            True, logger, daemon_state=daemon_state, max_retries=3,
             execute_signals=fake_execute,
             save_state=lambda s: None,
             send_interrupt_alert=mock_send_alert,
@@ -1762,7 +1851,7 @@ class TestExecuteSignalsWithRetry:
 
         result = live_daemon.execute_signals_with_retry(
             "ftse", ["AAPL", "MSFT"], None, None, None, broker,
-            2, None, logger,  # No daemon_state passed
+            True, logger,  # No daemon_state passed
             execute_signals=fake_execute,
             send_interrupt_alert=mock_send_alert
         )
@@ -1784,7 +1873,7 @@ class TestAppStatusSnapshot:
         monkeypatch.setattr("Strategy_Auto_Trader.markov_cli.live_daemon.os.getpid", lambda: 12345)
 
         # Create a portfolio with one position
-        pm = PortfolioManager(20_000, 5, tmp_path / "execution_state.json")
+        pm = PortfolioManager(20_000, tmp_path / "execution_state.json")
         fill = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", fill, 0.15, 185.0, 224.0, market="sp500", currency="USD")
 
@@ -1822,7 +1911,7 @@ class TestAppStatusSnapshot:
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
 
         monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
-        pm = PortfolioManager(20_000, 5, tmp_path / "execution_state.json")
+        pm = PortfolioManager(20_000, tmp_path / "execution_state.json")
         daemon_state = {}
         config = {"execution": {"dry_run": True}, "markets": {}}
 
@@ -1841,7 +1930,7 @@ class TestAppStatusSnapshot:
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
 
         monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
-        pm = PortfolioManager(20_000, 5, tmp_path / "execution_state.json")
+        pm = PortfolioManager(20_000, tmp_path / "execution_state.json")
         daemon_state = {
             "halt_new_entries": True,
             "reconciliation_discrepancies": ["SPY: broker=10, internal=5"],
@@ -2018,7 +2107,7 @@ class TestKillStrayDaemons:
 
 
 def test_process_cycle_paused_by_user_blocks_new_entries(monkeypatch):
-    """paused_by_user forces daily_buy_limit=0 into execute_signals."""
+    """paused_by_user passes allow_new_entries=False into execute_signals."""
     from Strategy_Auto_Trader.markov_cli import batch, execute
 
     def fake_process_ticker(ticker_cfg, defaults, send_email):
@@ -2028,29 +2117,29 @@ def test_process_cycle_paused_by_user_blocks_new_entries(monkeypatch):
     captured = {}
 
     def fake_execute_signals(tickers, data_dir, portfolio, limit_tracker,
-                             broker, daily_buy_limit, daily_sell_limit, **kwargs):
-        captured["daily_buy_limit"] = daily_buy_limit
+                             broker, allow_new_entries=True, **kwargs):
+        captured["allow_new_entries"] = allow_new_entries
         return [], [], []
 
     monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
     monkeypatch.setattr(execute, "execute_signals", fake_execute_signals)
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
-    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
 
     config = {
         "daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0},
-        "execution": {"daily_buy_limit": 5},
+        "execution": {},
     }
     daemon_state = {"cursors": {}, "paused_by_user": True}
     live_daemon.process_cycle(
         "test_market", {}, config, daemon_state,
         portfolio=mock.Mock(), broker=mock.Mock(spec=[]), logger=mock.Mock(),
     )
-    assert captured["daily_buy_limit"] == 0
+    assert captured["allow_new_entries"] is False
 
 
 def test_process_cycle_halt_and_paused_independent(monkeypatch):
-    """halt_new_entries and paused_by_user flags are independent."""
+    """halt_new_entries and paused_by_user both pass allow_new_entries=False."""
     from Strategy_Auto_Trader.markov_cli import batch, execute
 
     def fake_process_ticker(ticker_cfg, defaults, send_email):
@@ -2060,18 +2149,18 @@ def test_process_cycle_halt_and_paused_independent(monkeypatch):
     captured = []
 
     def fake_execute_signals(tickers, data_dir, portfolio, limit_tracker,
-                             broker, daily_buy_limit, daily_sell_limit, **kwargs):
-        captured.append(daily_buy_limit)
+                             broker, allow_new_entries=True, **kwargs):
+        captured.append(allow_new_entries)
         return [], [], []
 
     monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
     monkeypatch.setattr(execute, "execute_signals", fake_execute_signals)
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
-    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
 
     config = {
         "daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0},
-        "execution": {"daily_buy_limit": 5},
+        "execution": {},
     }
 
     # Test 1: halt_new_entries alone
@@ -2088,8 +2177,8 @@ def test_process_cycle_halt_and_paused_independent(monkeypatch):
         portfolio=mock.Mock(), broker=mock.Mock(spec=[]), logger=mock.Mock(),
     )
 
-    # Both should have resulted in daily_buy_limit=0
-    assert captured == [0, 0]
+    # Both should have blocked new entries
+    assert captured == [False, False]
 
 
 def test_write_app_status_snapshot_includes_paused_by_user(tmp_path, monkeypatch):
@@ -2098,7 +2187,7 @@ def test_write_app_status_snapshot_includes_paused_by_user(tmp_path, monkeypatch
     from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
 
     monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
-    pm = PortfolioManager(20_000, 5, tmp_path / "execution_state.json")
+    pm = PortfolioManager(20_000, tmp_path / "execution_state.json")
     daemon_state = {
         "paused_by_user": True,
     }
@@ -2116,7 +2205,7 @@ def test_write_app_status_snapshot_paused_by_user_defaults_false(tmp_path, monke
     from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
 
     monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
-    pm = PortfolioManager(20_000, 5, tmp_path / "execution_state.json")
+    pm = PortfolioManager(20_000, tmp_path / "execution_state.json")
     daemon_state = {}  # No paused_by_user key
     config = {"execution": {"dry_run": True}, "markets": {}}
 
@@ -2201,7 +2290,7 @@ def test_process_cycle_merges_overrides_into_must_run_ticker_cfg(monkeypatch):
 
     monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
-    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: ["AAPL"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: ["AAPL"])
     # Provide overrides via mock
     overrides_data = {"AAPL": {"strategy": "breakout_momentum"}}
     monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: overrides_data)
@@ -2228,7 +2317,7 @@ def test_process_cycle_merges_overrides_into_round_robin_ticker_cfg(monkeypatch)
 
     monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL", "MSFT"])
-    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
     # Provide overrides via mock
     overrides_data = {"MSFT": {"strategy": "conservative"}}
     monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: overrides_data)
@@ -2258,7 +2347,7 @@ def test_process_cycle_pins_already_open_strategy_over_watchlist_override(monkey
 
     monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
-    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: ["AAPL"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: ["AAPL"])
     # Override says "conservative" but pinned is "breakout_momentum"
     overrides_data = {"AAPL": {"strategy": "conservative"}}
     monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: overrides_data)
@@ -2290,7 +2379,7 @@ def test_process_cycle_no_pin_in_round_robin_stage(monkeypatch):
 
     monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["MSFT"])
-    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
     overrides_data = {"MSFT": {"strategy": "conservative"}}
     monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: overrides_data)
     monkeypatch.setattr(live_daemon, "next_round_robin_slice",
@@ -2317,7 +2406,7 @@ def test_process_cycle_logs_warning_on_must_run_fail_status(monkeypatch):
 
     monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
-    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: ["AAPL"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: ["AAPL"])
     monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: {})
 
     logger = mock.Mock()
@@ -2342,7 +2431,7 @@ def test_process_cycle_logs_warning_on_round_robin_fail_status(monkeypatch):
 
     monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["MSFT"])
-    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, a, l: [])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
     monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: {})
     monkeypatch.setattr(live_daemon, "next_round_robin_slice",
                        lambda market_name, candidates, daemon_state, logger: (["MSFT"], 0))
@@ -2367,7 +2456,7 @@ class TestRetryPendingTickers:
     def _config(self):
         return {
             "markets": {"ftse": {}},
-            "execution": {"daily_buy_limit": 2},
+            "execution": {},
         }
 
     def test_noop_when_none_pending(self, monkeypatch):

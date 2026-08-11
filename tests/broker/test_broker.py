@@ -48,31 +48,38 @@ class TestBroker:
 
     def test_portfolio_compute_quantity(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
-        # slot = 20000/5 = 4000, kelly=0.15, price=200 -> floor(4000*0.15/200) = 3
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
+        # cash=20000, kelly=0.15, price=200 -> floor(20000*0.15/200) = 15
         qty = pm.compute_quantity(0.15, 200.0)
-        assert qty == 3
+        assert qty == 15
 
     def test_portfolio_compute_quantity_min_one(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(1_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(1_000, tmp_path / "state.json")
         qty = pm.compute_quantity(0.01, 500.0)
         assert qty >= 1
 
-    def test_portfolio_at_capacity_blocks_open(self, tmp_path):
+    def test_portfolio_compute_quantity_zero_when_unaffordable(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        pm = PortfolioManager(100.0, tmp_path / "state.json")
+        # cash=100 < price=200 -> can't afford even 1 share
+        qty = pm.compute_quantity(0.99, 200.0)
+        assert qty == 0
+
+    def test_portfolio_no_position_count_cap(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 2, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         fa = FillResult("A", "BUY", 100.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("A", fa, 0.10, 95.0, 115.0)
         fb = FillResult("B", "BUY", 200.0, 5, "2026-07-01T00:00:00+00:00")
         pm.record_entry("B", fb, 0.10, 190.0, 230.0)
-        assert not pm.can_open("C")
+        assert pm.can_open("C")  # cash-gated only, no count cap
 
     def test_portfolio_same_ticker_blocks_open(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         fill = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", fill, 0.10, 185.0, 224.0)
         assert not pm.can_open("AAPL")
@@ -80,7 +87,7 @@ class TestBroker:
     def test_portfolio_record_entry_and_exit(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         buy = FillResult("MSFT", "BUY", 300.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("MSFT", buy, 0.12, 285.0, 345.0)
         assert "MSFT" in pm.positions
@@ -96,11 +103,11 @@ class TestBroker:
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
         path = tmp_path / "state.json"
-        pm = PortfolioManager(20_000, 5, path)
+        pm = PortfolioManager(20_000, path)
         fill = FillResult("SPY", "BUY", 500.0, 4, "2026-07-01T00:00:00+00:00")
         pm.record_entry("SPY", fill, 0.10, 475.0, 575.0)
         pm.save()
-        pm2 = PortfolioManager(20_000, 5, path)
+        pm2 = PortfolioManager(20_000, path)
         assert "SPY" in pm2.positions
         assert pm2.positions["SPY"]["fill_price"] == pytest.approx(500.0)
 
@@ -466,9 +473,9 @@ class TestBroker:
             json.dumps({"flag": flag}), encoding="utf-8"
         )
 
-    def _make_watchlist(self, path, tickers, capital_pot=20000, max_positions=5):
+    def _make_watchlist(self, path, tickers, capital_pot=20000):
         path.write_text(json.dumps({
-            "defaults": {"capital_pot": capital_pot, "max_positions": max_positions},
+            "defaults": {"capital_pot": capital_pot},
             "tickers": [{"ticker": t} for t in tickers],
         }), encoding="utf-8")
 
@@ -527,22 +534,22 @@ class TestBroker:
         ])
         assert not state_file.exists()
 
-    def test_execute_at_max_positions_skips_buy(self, tmp_path):
+    def test_execute_insufficient_cash_skips_buy(self, tmp_path):
         from Strategy_Auto_Trader.markov_cli.execute import main
         data_dir = tmp_path / "data"
         data_dir.mkdir()
-        self._make_signal_dir(data_dir, "AAPL", "BUY")
+        self._make_signal_dir(data_dir, "AAPL", "BUY", close=200.0)
         (tmp_path / "execution_state.json").write_text(json.dumps({
             "positions": {"MSFT": {
                 "entry_date": "2026-06-01", "fill_price": 300.0,
-                "quantity": 2, "kelly_fraction": 0.10,
+                "quantity": 2, "cost_value": 49_960.0, "kelly_fraction": 0.10,
                 "stop_level": 285.0, "target_level": 345.0,
             }},
             "trade_log": [],
             "trades_today": {"date": "2026-07-02", "buys": 0, "sells": 0},
         }), encoding="utf-8")
         wl = tmp_path / "watchlist.json"
-        self._make_watchlist(wl, ["AAPL"], max_positions=1)
+        self._make_watchlist(wl, ["AAPL"], capital_pot=50_000)
         rc = main([
             "--dry-run",
             "--data-dir", str(data_dir),
@@ -577,7 +584,7 @@ class TestBroker:
         state = json.loads((tmp_path / "execution_state.json").read_text())
         assert state["trades_today"]["buys"] == 0  # dry-run doesn't save
 
-    def test_daily_limit_ranks_by_kelly_fraction(self, tmp_path):
+    def test_ranks_by_kelly_fraction(self, tmp_path):
         from Strategy_Auto_Trader.markov_cli.execute import main
         from unittest.mock import patch, MagicMock
         data_dir = tmp_path / "data"
@@ -609,21 +616,8 @@ class TestBroker:
             assert rc == 0
             state = json.loads(state_file.read_text())
             buys = [t["ticker"] for t in state["trade_log"] if t["action"] == "BUY"]
-            assert buys == ["STRONG", "MEDIUM"]
-            assert "WEAK" not in buys
-
-    def test_daily_limit_resets_at_midnight(self):
-        from Strategy_Auto_Trader.broker.daily_limits import DailyLimitTracker
-        from datetime import datetime, timezone, timedelta
-        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
-        state = {
-            "positions": {},
-            "trades_today": {"date": yesterday, "buys": 5, "sells": 3},
-        }
-        tracker = DailyLimitTracker(state)
-        assert tracker.can_buy(2)
-        assert state["trades_today"]["buys"] == 0
-        assert state["trades_today"]["date"] == datetime.now(timezone.utc).date().isoformat()
+            # All three admitted; kelly_fraction ordering preserved
+            assert buys == ["STRONG", "MEDIUM", "WEAK"]
 
     def test_unlimited_sells_by_default(self, tmp_path):
         from Strategy_Auto_Trader.markov_cli.execute import main
@@ -705,125 +699,77 @@ class TestBroker:
 
     def test_bva_compute_quantity_zero_kelly(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         qty = pm.compute_quantity(0.0, 200.0)
         assert qty == 0
 
     def test_bva_compute_quantity_negative_kelly(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         qty = pm.compute_quantity(-0.1, 200.0)
         assert qty == 0
 
     def test_bva_compute_quantity_very_high_kelly(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         qty_normal = pm.compute_quantity(0.20, 200.0)
         qty_high = pm.compute_quantity(2.0, 200.0)
         assert qty_high > qty_normal
 
     def test_bva_compute_quantity_zero_price(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         qty = pm.compute_quantity(0.15, 0.0)
         assert qty == 0
 
     def test_bva_compute_quantity_negative_price(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         qty = pm.compute_quantity(0.15, -100.0)
         assert qty == 0
 
     def test_bva_compute_quantity_very_small_price(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         qty = pm.compute_quantity(0.15, 0.01)
         assert qty >= 1
 
     def test_bva_compute_quantity_very_large_price(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         qty = pm.compute_quantity(0.15, 50_000.0)
-        assert qty == 1
+        assert qty == 0  # price exceeds available cash, can't afford 1 share
 
     # -- BVA: PortfolioManager constructor -----
 
     def test_bva_portfolio_zero_capital(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(0.0, 5, tmp_path / "state.json")
+        pm = PortfolioManager(0.0, tmp_path / "state.json")
         qty = pm.compute_quantity(0.15, 200.0)
-        assert qty == 1
+        assert qty == 0  # can't afford 1 share with zero cash
 
     def test_bva_portfolio_negative_capital(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(-1000.0, 5, tmp_path / "state.json")
+        pm = PortfolioManager(-1000.0, tmp_path / "state.json")
         assert pm._capital_pot == -1000.0
 
-    def test_bva_portfolio_zero_max_positions(self, tmp_path):
-        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(20_000, 0, tmp_path / "state.json")
-        assert not pm.can_open("AAPL")
-
-    def test_bva_portfolio_one_position_capacity(self, tmp_path):
+    def test_bva_portfolio_open_position_still_allows_others(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 1, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         assert pm.can_open("AAPL")
         fill = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", fill, 0.10, 185.0, 224.0)
-        assert not pm.can_open("MSFT")
+        assert pm.can_open("MSFT")  # cash-gated only, no count cap
         assert not pm.can_open("AAPL")
-
-    def test_bva_portfolio_very_large_max_positions(self, tmp_path):
-        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(1_000_000, 1000, tmp_path / "state.json")
-        assert pm._max_positions == 1000
-        assert pm.can_open("AAPL")
 
     def test_bva_portfolio_very_large_capital_pot(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(1_000_000_000.0, 5, tmp_path / "state.json")
+        pm = PortfolioManager(1_000_000_000.0, tmp_path / "state.json")
         qty = pm.compute_quantity(0.15, 200.0)
         assert qty >= 1
 
     # -- BVA: DailyLimitTracker -----
-
-    def test_bva_daily_limit_zero_buys(self):
-        from Strategy_Auto_Trader.broker.daily_limits import DailyLimitTracker
-        state = {"trades_today": {"date": "2026-07-02", "buys": 0, "sells": 0}}
-        tracker = DailyLimitTracker(state)
-        assert not tracker.can_buy(0)
-        assert not tracker.can_buy(0)
-
-    def test_bva_daily_limit_one_buy(self):
-        from Strategy_Auto_Trader.broker.daily_limits import DailyLimitTracker
-        state = {"trades_today": {"date": "2026-07-02", "buys": 0, "sells": 0}}
-        tracker = DailyLimitTracker(state)
-        assert tracker.can_buy(1)
-        tracker.record_buy()
-        assert not tracker.can_buy(1)
-
-    def test_bva_daily_limit_zero_sells(self):
-        from Strategy_Auto_Trader.broker.daily_limits import DailyLimitTracker
-        state = {"trades_today": {"date": "2026-07-02", "buys": 0, "sells": 0}}
-        tracker = DailyLimitTracker(state)
-        assert not tracker.can_sell(0)
-
-    def test_bva_daily_limit_very_high_limit(self):
-        from Strategy_Auto_Trader.broker.daily_limits import DailyLimitTracker
-        state = {"trades_today": {"date": "2026-07-02", "buys": 0, "sells": 0}}
-        tracker = DailyLimitTracker(state)
-        assert tracker.can_buy(999)
-        for _ in range(100):
-            tracker.record_buy()
-        assert tracker.can_buy(999)
-
-    def test_bva_daily_limit_negative_limit_treated_as_unlimited(self):
-        from Strategy_Auto_Trader.broker.daily_limits import DailyLimitTracker
-        state = {"trades_today": {"date": "2026-07-02", "buys": 0, "sells": 0}}
-        tracker = DailyLimitTracker(state)
-        assert tracker.can_buy(None)
-        assert tracker.can_sell(None)
 
     def test_bva_daily_limit_counts_at_boundary(self):
         from Strategy_Auto_Trader.broker.daily_limits import DailyLimitTracker
@@ -892,34 +838,34 @@ class TestBroker:
 
     def test_bva_can_open_empty_portfolio(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         assert len(pm.positions) == 0
         assert pm.can_open("AAPL")
 
-    def test_bva_can_open_at_max_minus_one(self, tmp_path):
+    def test_bva_can_open_with_many_open_positions(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 3, tmp_path / "state.json")
-        for i, ticker in enumerate(["A", "B"]):
-            fill = FillResult(ticker, "BUY", 100.0 + i, 10, "2026-07-01T00:00:00+00:00")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
+        for i, ticker in enumerate(["A", "B", "C", "D", "E"]):
+            fill = FillResult(ticker, "BUY", 100.0 + i, 1, "2026-07-01T00:00:00+00:00")
             pm.record_entry(ticker, fill, 0.10, 90.0, 110.0)
-        assert len(pm.positions) == 2
-        assert pm.can_open("C")
+        assert len(pm.positions) == 5
+        assert pm.can_open("F")  # no position-count cap, cash-gated only
 
-    def test_bva_can_open_at_max_exact(self, tmp_path):
+    def test_bva_compute_quantity_cash_exactly_covers_one_share(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 2, tmp_path / "state.json")
-        for i, ticker in enumerate(["A", "B"]):
-            fill = FillResult(ticker, "BUY", 100.0 + i, 10, "2026-07-01T00:00:00+00:00")
-            pm.record_entry(ticker, fill, 0.10, 90.0, 110.0)
-        assert len(pm.positions) == 2
-        assert not pm.can_open("C")
+        pm = PortfolioManager(200.0, tmp_path / "state.json")
+        assert pm.compute_quantity(0.01, 200.0) == 1
+
+    def test_bva_compute_quantity_cash_just_below_one_share(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        pm = PortfolioManager(199.99, tmp_path / "state.json")
+        assert pm.compute_quantity(0.99, 200.0) == 0
 
     def test_bva_can_open_duplicate_ticker_in_positions(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         fill = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", fill, 0.10, 185.0, 224.0)
         assert not pm.can_open("AAPL")
@@ -929,7 +875,7 @@ class TestBroker:
     def test_bva_record_exit_zero_position_price(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         buy = FillResult("AAPL", "BUY", 100.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", buy, 0.10, 95.0, 105.0)
         sell = FillResult("AAPL", "SELL", 0.0, 10, "2026-07-02T00:00:00+00:00")
@@ -940,7 +886,7 @@ class TestBroker:
     def test_bva_record_exit_negative_price(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         buy = FillResult("AAPL", "BUY", 100.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", buy, 0.10, 95.0, 105.0)
         sell = FillResult("AAPL", "SELL", -50.0, 10, "2026-07-02T00:00:00+00:00")
@@ -951,7 +897,7 @@ class TestBroker:
     def test_bva_record_exit_huge_profit(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         buy = FillResult("AAPL", "BUY", 100.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", buy, 0.10, 95.0, 105.0)
         sell = FillResult("AAPL", "SELL", 10_000.0, 10, "2026-07-02T00:00:00+00:00")
@@ -962,7 +908,7 @@ class TestBroker:
     def test_bva_record_exit_one_share(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         buy = FillResult("AAPL", "BUY", 100.0, 1, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", buy, 0.10, 95.0, 105.0)
         sell = FillResult("AAPL", "SELL", 110.0, 1, "2026-07-02T00:00:00+00:00")
@@ -973,7 +919,7 @@ class TestBroker:
     def test_bva_record_exit_many_shares(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         buy = FillResult("AAPL", "BUY", 100.0, 100_000, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", buy, 0.10, 95.0, 105.0)
         sell = FillResult("AAPL", "SELL", 101.0, 100_000, "2026-07-02T00:00:00+00:00")
@@ -1016,7 +962,7 @@ class TestBroker:
     def test_bva_p_l_decimal_precision(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         buy = FillResult("AAPL", "BUY", 195.555, 3, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", buy, 0.10, 185.0, 224.0)
         sell = FillResult("AAPL", "SELL", 200.123, 3, "2026-07-02T00:00:00+00:00")
@@ -1099,26 +1045,10 @@ class TestBroker:
 
     # -- BVA: Null/None Handling -----
 
-    def test_bva_daily_limit_none_buy_limit(self):
-        from Strategy_Auto_Trader.broker.daily_limits import DailyLimitTracker
-        state = {"trades_today": {"date": "2026-07-02", "buys": 0, "sells": 0}}
-        tracker = DailyLimitTracker(state)
-        assert tracker.can_buy(None)
-        assert tracker.can_buy(None)
-
-    def test_bva_daily_limit_none_sell_limit(self):
-        from Strategy_Auto_Trader.broker.daily_limits import DailyLimitTracker
-        state = {"trades_today": {"date": "2026-07-02", "buys": 0, "sells": 0}}
-        tracker = DailyLimitTracker(state)
-        assert tracker.can_sell(None)
-        for _ in range(100):
-            tracker.record_sell()
-        assert tracker.can_sell(None)
-
     def test_bva_portfolio_missing_state_file(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         nonexistent = tmp_path / "nonexistent" / "state.json"
-        pm = PortfolioManager(20_000, 5, nonexistent)
+        pm = PortfolioManager(20_000, nonexistent)
         assert len(pm.positions) == 0
         assert len(pm.trade_log) == 0
 
@@ -1131,13 +1061,13 @@ class TestBroker:
 
     def test_bva_empty_positions_dict(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         assert isinstance(pm.positions, dict)
         assert len(pm.positions) == 0
 
     def test_bva_empty_trade_log_list(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         assert isinstance(pm.trade_log, list)
         assert len(pm.trade_log) == 0
 
@@ -1145,14 +1075,14 @@ class TestBroker:
 
     def test_bva_compute_quantity_float_kelly(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         qty1 = pm.compute_quantity(0.15, 200.0)
         qty2 = pm.compute_quantity(0.150, 200.0)
         assert qty1 == qty2
 
     def test_bva_compute_quantity_float_price(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         qty1 = pm.compute_quantity(0.15, 200.0)
         qty2 = pm.compute_quantity(0.15, 200.00)
         assert qty1 == qty2
@@ -1160,7 +1090,7 @@ class TestBroker:
     def test_bva_p_l_rounding_precision(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         buy = FillResult("AAPL", "BUY", 100.123, 7, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", buy, 0.10, 95.0, 110.0)
         sell = FillResult("AAPL", "SELL", 100.456, 7, "2026-07-02T00:00:00+00:00")
@@ -1169,25 +1099,13 @@ class TestBroker:
         expected = round((100.456 - 100.123) * 7, 2)
         assert pl == expected
 
-    def test_bva_daily_limit_boundary_transition(self):
-        from Strategy_Auto_Trader.broker.daily_limits import DailyLimitTracker
-        state = {"trades_today": {"date": "2026-07-02", "buys": 0, "sells": 0}}
-        tracker = DailyLimitTracker(state)
-        assert tracker.can_buy(2)
-        tracker.record_buy()
-        assert tracker.can_buy(2)
-        tracker.record_buy()
-        assert not tracker.can_buy(2)
-        buys, _ = tracker.get_today_counts()
-        assert buys == 2
-
     # -- Phase 0: market / currency / cost_value -----
 
     def test_portfolio_record_entry_with_market_currency(self, tmp_path):
         """record_entry stores market and currency fields."""
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         fill = FillResult("LLOY.L", "BUY", 450.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("LLOY.L", fill, 0.12, 425.0, 515.0, market="ftse", currency="GBP")
         assert "LLOY.L" in pm.positions
@@ -1200,7 +1118,7 @@ class TestBroker:
         """record_entry computes cost_value from fill_price and quantity."""
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         fill = FillResult("AAPL", "BUY", 123.45, 17, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", fill, 0.10, 100.0, 150.0, market="sp500", currency="USD")
         pos = pm.positions["AAPL"]
@@ -1214,7 +1132,7 @@ class TestBroker:
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
         from Strategy_Auto_Trader.plugins.costs import USD_GBP
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         fill = FillResult("AAPL", "BUY", 100.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", fill, 0.10, 95.0, 105.0)
         assert pm.positions["AAPL"]["entry_cost"] == pytest.approx(1.70 * USD_GBP)
@@ -1224,7 +1142,7 @@ class TestBroker:
         """UK ticker BUY adds 0.5% stamp duty on top of the tiered commission."""
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         fill = FillResult("LLOY.L", "BUY", 450.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("LLOY.L", fill, 0.12, 425.0, 515.0, market="ftse", currency="GBP")
         trade_value = 450.0 * 10
@@ -1237,7 +1155,7 @@ class TestBroker:
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
         from Strategy_Auto_Trader.plugins.costs import IbkrTieredCost
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         buy = FillResult("AAPL", "BUY", 300.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("AAPL", buy, 0.10, 285.0, 345.0)
         sell = FillResult("AAPL", "SELL", 330.0, 10, "2026-07-10T00:00:00+00:00")
@@ -1253,7 +1171,7 @@ class TestBroker:
         """record_entry works with empty market/currency (for backward compat)."""
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
         fill = FillResult("SPY", "BUY", 500.0, 4, "2026-07-01T00:00:00+00:00")
         pm.record_entry("SPY", fill, 0.10, 475.0, 575.0)  # No market/currency
         assert "SPY" in pm.positions
@@ -1267,12 +1185,12 @@ class TestBroker:
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
         path = tmp_path / "state.json"
-        pm = PortfolioManager(20_000, 5, path)
+        pm = PortfolioManager(20_000, path)
         fill = FillResult("BP.L", "BUY", 350.0, 15, "2026-07-01T00:00:00+00:00")
         pm.record_entry("BP.L", fill, 0.15, 325.0, 400.0, market="ftse", currency="GBP")
         pm.save()
 
-        pm2 = PortfolioManager(20_000, 5, path)
+        pm2 = PortfolioManager(20_000, path)
         assert "BP.L" in pm2.positions
         pos = pm2.positions["BP.L"]
         assert pos["market"] == "ftse"
@@ -1299,7 +1217,7 @@ class TestBroker:
         signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15,
                   "stop_level": 95.0, "target_level": 115.0}
         self._patched_signal_reader(monkeypatch, signal)
-        portfolio = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        portfolio = PortfolioManager(20_000, tmp_path / "state.json")
         broker = NullBroker(prices={"AAPL": 100.2})  # mild slippage above close
         buys, sells, skipped = execute_signals(
             ["AAPL"], tmp_path, portfolio, portfolio.get_limit_tracker(), broker,
@@ -1322,7 +1240,7 @@ class TestBroker:
         signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15,
                   "stop_level": 95.0, "target_level": 115.0}
         self._patched_signal_reader(monkeypatch, signal)
-        portfolio = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        portfolio = PortfolioManager(20_000, tmp_path / "state.json")
         broker = NullBroker(prices={"AAPL": 95.0})  # fills exactly at signal stop
         buys, sells, skipped = execute_signals(
             ["AAPL"], tmp_path, portfolio, portfolio.get_limit_tracker(), broker,
@@ -1344,7 +1262,7 @@ class TestBroker:
         signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15,
                   "stop_level": 95.0, "target_level": 115.0}
         self._patched_signal_reader(monkeypatch, signal)
-        portfolio = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        portfolio = PortfolioManager(20_000, tmp_path / "state.json")
         broker = NullBroker(prices={"AAPL": 90.0})  # well below the 95 stop
         buys, sells, skipped = execute_signals(
             ["AAPL"], tmp_path, portfolio, portfolio.get_limit_tracker(), broker,
@@ -1367,7 +1285,7 @@ class TestBroker:
         signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15,
                   "stop_level": 95.0, "target_level": 115.0}
         self._patched_signal_reader(monkeypatch, signal)
-        portfolio = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        portfolio = PortfolioManager(20_000, tmp_path / "state.json")
         broker = NullBroker(prices={"AAPL": 97.0})  # below close, above stop
         buys, sells, skipped = execute_signals(
             ["AAPL"], tmp_path, portfolio, portfolio.get_limit_tracker(), broker,
@@ -1384,7 +1302,7 @@ class TestBroker:
         signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15,
                   "stop_level": 95.0, "target_level": 115.0}
         self._patched_signal_reader(monkeypatch, signal)
-        portfolio = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        portfolio = PortfolioManager(20_000, tmp_path / "state.json")
         broker = MagicMock()
         broker.place_order.return_value = None  # Order not filled
         buys, sells, skipped = execute_signals(
@@ -1402,7 +1320,7 @@ class TestBroker:
         from Strategy_Auto_Trader.broker.types import FillResult
         from unittest.mock import MagicMock
         # Pre-seed portfolio with an open position
-        portfolio = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        portfolio = PortfolioManager(20_000, tmp_path / "state.json")
         entry_fill = FillResult("AAPL", "BUY", 100.0, 10, "2026-07-01T00:00:00+00:00")
         portfolio.record_entry("AAPL", entry_fill, 0.15, 95.0, 115.0)
 
@@ -1461,7 +1379,7 @@ class TestSlippageBps:
     def test_record_entry_logs_slippage(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000.0, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000.0, tmp_path / "state.json")
         fill = FillResult("AAPL", "BUY", 195.5, 10, "2026-07-06T00:00:00+00:00")
         pm.record_entry("AAPL", fill, 0.10, 185.0, 224.0, signal_price=195.0)
         log = pm.trade_log[-1]
@@ -1471,7 +1389,7 @@ class TestSlippageBps:
     def test_record_exit_logs_slippage(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000.0, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000.0, tmp_path / "state.json")
         buy = FillResult("MSFT", "BUY", 300.0, 10, "2026-07-01T00:00:00+00:00")
         pm.record_entry("MSFT", buy, 0.12, 285.0, 345.0, signal_price=300.0)
         sell = FillResult("MSFT", "SELL", 329.0, 10, "2026-07-06T00:00:00+00:00")
@@ -1483,7 +1401,7 @@ class TestSlippageBps:
     def test_record_entry_without_signal_price_none_slippage(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
-        pm = PortfolioManager(20_000.0, 5, tmp_path / "state.json")
+        pm = PortfolioManager(20_000.0, tmp_path / "state.json")
         fill = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-06T00:00:00+00:00")
         pm.record_entry("AAPL", fill, 0.10, 185.0, 224.0)
         assert pm.trade_log[-1]["slippage_bps"] is None
@@ -1499,7 +1417,7 @@ class TestSlippageBps:
         from unittest.mock import MagicMock
         import logging
 
-        portfolio = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        portfolio = PortfolioManager(20_000, tmp_path / "state.json")
         entry_fill = FillResult("AAPL", "BUY", 100.0, 10, "2026-07-01T00:00:00+00:00")
         portfolio.record_entry("AAPL", entry_fill, 0.15, 95.0, 115.0)
 
@@ -1524,7 +1442,7 @@ class TestSlippageBps:
         from unittest.mock import MagicMock
         import logging
 
-        portfolio = PortfolioManager(20_000, 5, tmp_path / "state.json")
+        portfolio = PortfolioManager(20_000, tmp_path / "state.json")
         # Add two positions
         fill_aapl = FillResult("AAPL", "BUY", 100.0, 10, "2026-07-01T00:00:00+00:00")
         portfolio.record_entry("AAPL", fill_aapl, 0.15, 95.0, 115.0)

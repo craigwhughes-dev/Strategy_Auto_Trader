@@ -4,7 +4,6 @@
     "initial_cash": 10000,
     "transaction_cost": 10,
     "capital_pot": 10000,
-    "max_positions": 50,
     "daily_buy_limit": null,
     "daily_sell_limit": null
   },

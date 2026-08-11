@@ -44,8 +44,6 @@ class TestExecutionInterrupted:
                 portfolio,
                 limit_tracker,
                 broker,
-                daily_buy_limit=5,
-                daily_sell_limit=None,
             )
 
         exc = exc_info.value
@@ -93,8 +91,6 @@ class TestExecutionInterrupted:
                 portfolio,
                 limit_tracker,
                 broker,
-                daily_buy_limit=2,
-                daily_sell_limit=5,
             )
 
         exc = exc_info.value
@@ -137,8 +133,6 @@ class TestExecutionInterrupted:
                 portfolio,
                 limit_tracker,
                 broker,
-                daily_buy_limit=2,
-                daily_sell_limit=None,
             )
 
         assert isinstance(exc_info.value.original, TimeoutError)
@@ -157,9 +151,8 @@ class TestExecutionInterrupted:
         broker = mock.Mock()
         data_dir = None
 
-        # Setup: AAPL skipped (daily limit), MSFT succeeds, GOOG error
-        limit_tracker.can_buy.side_effect = [False, True, True]
-        portfolio.can_open.side_effect = [True, True]
+        # Setup: AAPL skipped (no capacity), MSFT succeeds, GOOG error
+        portfolio.can_open.side_effect = [False, True, True]
         portfolio.compute_quantity.return_value = 10
 
         fill = FillResult("MSFT", "BUY", 350.0, 10, "2026-07-01T00:00:00Z")
@@ -180,12 +173,10 @@ class TestExecutionInterrupted:
                 portfolio,
                 limit_tracker,
                 broker,
-                daily_buy_limit=1,
-                daily_sell_limit=None,
             )
 
         exc = exc_info.value
-        assert "AAPL(daily limit reached)" in exc.skipped
+        assert "AAPL(at capacity)" in exc.skipped
         assert len(exc.buys) == 1  # MSFT was bought
         assert "GOOG" in exc.unresolved  # GOOG's order was interrupted
 
@@ -223,8 +214,6 @@ class TestExecutionInterrupted:
                 portfolio,
                 limit_tracker,
                 broker,
-                daily_buy_limit=5,
-                daily_sell_limit=None,
             )
 
         exc = exc_info.value
@@ -267,8 +256,6 @@ class TestExecuteSignalsNormal:
             portfolio,
             limit_tracker,
             broker,
-            daily_buy_limit=2,
-            daily_sell_limit=None,
         )
 
         assert len(buys) == 1
@@ -299,8 +286,6 @@ class TestExecuteSignalsNormal:
             portfolio,
             limit_tracker,
             broker,
-            daily_buy_limit=2,
-            daily_sell_limit=None,
         )
 
         assert buys == []
@@ -343,8 +328,6 @@ class TestInFlightMarkerIntegration:
             portfolio,
             limit_tracker,
             broker,
-            daily_buy_limit=2,
-            daily_sell_limit=None,
             marker_path=marker_path,
         )
 
@@ -381,8 +364,6 @@ class TestInFlightMarkerIntegration:
             portfolio,
             limit_tracker,
             broker,
-            daily_buy_limit=2,
-            daily_sell_limit=None,
             marker_path=marker_path,
         )
 
@@ -416,8 +397,6 @@ class TestInFlightMarkerIntegration:
             portfolio,
             limit_tracker,
             broker,
-            daily_buy_limit=2,
-            daily_sell_limit=None,
             marker_path=marker_path,
         )
 
@@ -454,8 +433,6 @@ class TestInFlightMarkerIntegration:
                 portfolio,
                 limit_tracker,
                 broker,
-                daily_buy_limit=2,
-                daily_sell_limit=None,
                 marker_path=marker_path,
             )
 

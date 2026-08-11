@@ -209,6 +209,7 @@ def arbitrate(
 
             rec = cand.record
             rec.pnl_usd = exit_proceeds - alloc - entry_fee
+            rec.position_size_gbp = alloc
             executed.append(rec)
             taken += 1
             n_admitted += 1

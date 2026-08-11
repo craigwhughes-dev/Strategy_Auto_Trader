@@ -1,8 +1,8 @@
 """Overnight scope screening — determine in-scope tickers for each market.
 
-Excludes tickers with poor volatility character (via vol_screen) and negative
-sentiment (via sentiment) unless they have an open position. Writes audit trail
-and generates scoped watchlists for the daemon to use.
+Excludes tickers with poor volatility character (via vol_screen) unless they
+have an open position. Writes audit trail and generates scoped watchlists for
+the daemon to use.
 
 Usage:
     uv run python -m Strategy_Auto_Trader.markov_cli.overnight_scope
@@ -75,11 +75,19 @@ def _load_previous_top_k_set() -> set[str] | None:
         return None
 
 
-def compute_global_top_k(config: dict, exec_state: dict) -> set[str] | None:
-    """Rank the full combined universe once (in a separate subprocess) and
-    return the global top-K ticker set, or None if top_k_screen is
+def compute_global_top_k(
+    config: dict,
+    exec_state: dict,
+    vol_kept: set[str] | None = None,
+) -> set[str] | None:
+    """Rank the combined universe once (in a separate subprocess) and return
+    the global top-K ticker set, or None if top_k_screen is
     disabled/unconfigured (callers then apply no top-K filtering — vol/
     sentiment screen alone still applies, matching pre-top-K behavior).
+
+    vol_kept: if provided, rank only these pre-screened tickers instead of
+    the full S&P500+FTSE universe — eliminates wasted ranking slots on tickers
+    that Stage 1 (vol_screen) would veto anyway.
 
     Ranking runs in a standalone subprocess (rank_universe_cli.py), not an
     in-process ProcessPoolExecutor pool, so it never touches this process's
@@ -116,6 +124,10 @@ def compute_global_top_k(config: dict, exec_state: dict) -> set[str] | None:
             "--workers", str(cfg.get("workers", 4)),
             "--output", str(output_path),
         ]
+        if vol_kept:
+            cmd += ["--tickers", ",".join(sorted(vol_kept | open_positions))]
+            print(f"  top_k_screen: ranking {len(vol_kept)} TQ-screened tickers "
+                  f"(+ {len(open_positions)} open positions)")
 
         start = time.time()
         try:
@@ -168,7 +180,6 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict,
       - overrides: {ticker: {override_key: value}} for tickers with a watchlist override
     """
     from ..quant_hmm.vol_screen import screen_tickers
-    from ..quant_hmm.sentiment import composite_sentiment
     from ..strategy.base.registry import wants_low_trend_quality
 
     watchlist = load_watchlist(market_cfg["watchlist"])
@@ -187,17 +198,19 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict,
     max_downside_vol = vol_cfg.get("max_downside_vol", None)
     vol_period = vol_cfg.get("period", "2y")
 
-    # Check sentiment config
-    sent_cfg = market_cfg.get("sentiment_screen", {})
-    do_sentiment_screen = sent_cfg.get("enabled", True)
-    min_sentiment_score = sent_cfg.get("min_sentiment_score", -0.3)
-    exclude_labels = set(sent_cfg.get("exclude_labels", ["bearish"]))
-
     # Check exemption rule
     exempt_if_open = market_cfg.get("exempt_if_open_position", True)
 
-    # Open positions in this market (heuristic: if position is open, keep it)
-    open_positions = list(exec_state.get("positions", {}).keys()) if exempt_if_open else []
+    # Open positions in this market, scoped by each position's own recorded
+    # "market" field (not by watchlist membership — a ticker can be dropped
+    # from its watchlist while a position on it is still open; watchlist
+    # membership is not a reliable proxy for "which market is this position
+    # in"). A position missing the field (legacy data) defaults to matching
+    # the current market rather than being silently dropped from consideration.
+    open_positions = [
+        t for t, p in exec_state.get("positions", {}).items()
+        if p.get("market", market_name) == market_name
+    ] if exempt_if_open else []
 
     kept: list[str] = []
     excluded: list[dict] = []
@@ -239,23 +252,7 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict,
     else:
         stage1_tickers = set(all_tickers)
 
-    # Stage 2: sentiment screen
-    if do_sentiment_screen:
-        print(f"  Sentiment-screening {len(stage1_tickers)} tickers for {market_name}...")
-        for ticker in list(stage1_tickers):
-            if ticker in open_positions:
-                continue
-            sent = composite_sentiment(ticker)
-            score = sent.get("sentiment_score", 0.0)
-            label = sent.get("sentiment_label", "neutral")
-            if label in exclude_labels or score < min_sentiment_score:
-                stage1_tickers.discard(ticker)
-                excluded.append({
-                    "ticker": ticker,
-                    "reason": f"sentiment:{label}({score:.2f})"
-                })
-
-    # Stage 3: global top-K ranking intersection (computed once for both
+    # Stage 2: global top-K ranking intersection (computed once for both
     # markets by main(), not per-market — see compute_global_top_k())
     if global_top_k is not None:
         before = len(stage1_tickers)
@@ -270,8 +267,19 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict,
         print(f"  top-K filter for {market_name}: {len(stage1_tickers)}/{before} survive "
               f"(global top-{len(global_top_k)} intersected with market watchlist)")
 
-    # Final kept list: stage1 plus any open positions
-    kept = sorted(list(stage1_tickers) + [t for t in open_positions if t in all_tickers])
+    # Final kept list: stage1 plus every open position, unconditionally — a
+    # position dropped from the watchlist file itself must still be kept in
+    # scope so the daemon can keep monitoring/exiting it (see orphaned below).
+    kept = sorted(set(stage1_tickers) | set(open_positions))
+
+    # Tickers with an open position that's no longer in the watchlist file at
+    # all — force-included above, but this is worth surfacing: it means the
+    # watchlist has drifted out from under a live position (see todo.md,
+    # 2026-07-30 entry). Not halt-worthy on its own, just needs visibility.
+    orphaned = sorted(t for t in open_positions if t not in all_tickers)
+    if orphaned:
+        print(f"  WARNING: {len(orphaned)} open position(s) not in {market_name}'s "
+              f"watchlist file, force-kept: {', '.join(orphaned)}")
 
     return {
         "market": market_name,
@@ -279,6 +287,7 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict,
         "kept": kept,
         "excluded": excluded,
         "open_positions": open_positions,
+        "orphaned_positions": orphaned,
         "overrides": overrides,
     }
 
@@ -308,9 +317,6 @@ def generate_scoped_watchlist(
     merged_defaults = {**original_defaults}
     merged_defaults.update({
         "capital_pot": execution_cfg.get("capital_pot", 20000),
-        "max_positions": execution_cfg.get("max_positions", 5),
-        "daily_buy_limit": execution_cfg.get("daily_buy_limit", 2),
-        "daily_sell_limit": execution_cfg.get("daily_sell_limit", None),
     })
 
     scoped_tickers = [
@@ -332,13 +338,13 @@ def generate_scoped_watchlist(
 
 
 #: Top-level config keys that screen_market() expects to find on market_cfg
-#: (vol_screen/sentiment_screen/exempt_if_open_position are documented as
-#: shared-across-markets defaults, but screen_market() only ever looks at
-#: market_cfg — main() must merge them in, or a market_cfg without its own
-#: override silently gets the function's hardcoded fallbacks instead of the
-#: configured values (e.g. max_downside_vol has no code-level default, so it
-#: silently becomes None/unenforced). Market-level keys win if ever set.
-_MARKET_MERGE_KEYS = ("vol_screen", "sentiment_screen", "exempt_if_open_position")
+#: (vol_screen/exempt_if_open_position are documented as shared-across-markets
+#: defaults, but screen_market() only ever looks at market_cfg — main() must
+#: merge them in, or a market_cfg without its own override silently gets the
+#: function's hardcoded fallbacks instead of the configured values (e.g.
+#: max_downside_vol has no code-level default, so it silently becomes
+#: None/unenforced). Market-level keys win if ever set.
+_MARKET_MERGE_KEYS = ("vol_screen", "exempt_if_open_position")
 
 
 def _with_merged_defaults(market_cfg: dict, config: dict) -> dict:
@@ -347,6 +353,34 @@ def _with_merged_defaults(market_cfg: dict, config: dict) -> dict:
     merged = {key: config[key] for key in _MARKET_MERGE_KEYS if key in config}
     merged.update(market_cfg)
     return merged
+
+
+def _collect_vol_kept_combined(config: dict) -> set[str]:
+    """Run vol_screen Stage 1 across all market watchlists and return the
+    combined set of tickers passing min_trend_quality (no downside_vol cap —
+    that key is intentionally absent from config). Used to pre-filter the
+    ranking universe so rank_universe_cli ranks only quality tickers."""
+    from ..quant_hmm.vol_screen import screen_tickers
+
+    vol_cfg = config.get("vol_screen", {})
+    if not vol_cfg.get("enabled", True):
+        return set()
+
+    min_tq = vol_cfg.get("min_trend_quality", 0.0)
+    period = vol_cfg.get("period", "2y")
+
+    combined: set[str] = set()
+    for market_cfg in config.get("markets", {}).values():
+        watchlist = load_watchlist(market_cfg["watchlist"])
+        tickers = [t["ticker"] if isinstance(t, dict) else t for t in watchlist.get("tickers", [])]
+        print(f"  Pre-screening {len(tickers)} {market_cfg['watchlist'].split('_')[1].split('.')[0]} "
+              f"tickers for ranking (min_trend_quality={min_tq})...")
+        kept, _ = screen_tickers(tickers, min_trend_quality=min_tq, max_downside_vol=None,
+                                 period=period, verbose=False)
+        combined.update(kept)
+
+    print(f"  Pre-screen: {len(combined)} tickers pass TQ≥{min_tq} across all markets")
+    return combined
 
 
 def main() -> int:
@@ -358,7 +392,11 @@ def main() -> int:
     print(f" Overnight scope screening")
     print(f"{'='*64}\n")
 
-    global_top_k = compute_global_top_k(config, exec_state)
+    # Pre-screen watchlists for TQ before ranking so rank_universe_cli ranks
+    # only quality tickers (avoids wasting k slots on tickers Stage 1 vetoes).
+    vol_kept_combined = _collect_vol_kept_combined(config)
+    global_top_k = compute_global_top_k(config, exec_state,
+                                         vol_kept=vol_kept_combined or None)
 
     for market_name, raw_market_cfg in config.get("markets", {}).items():
         print(f" {market_name}")
@@ -373,8 +411,13 @@ def main() -> int:
             config.get("execution", {}),
         )
 
-        print(f"   Kept: {len(result['kept'])} tickers")
-        print(f"   Excluded: {len(result['excluded'])} tickers")
+        print(f"   Kept ({len(result['kept'])}): {', '.join(result['kept'])}")
+        if result['excluded']:
+            by_reason: dict[str, list[str]] = {}
+            for e in result['excluded']:
+                by_reason.setdefault(e['reason'], []).append(e['ticker'])
+            for reason, tickers in sorted(by_reason.items()):
+                print(f"   Excluded by {reason} ({len(tickers)}): {', '.join(tickers)}")
         if result['open_positions']:
             print(f"   Open positions (exempt): {', '.join(result['open_positions'])}")
         print()

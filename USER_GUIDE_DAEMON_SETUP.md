@@ -110,7 +110,6 @@ Should complete with 0 errors.
   },
   "execution": {
     "capital_pot": 10000,
-    "max_positions": 5,
     "daily_buy_limit": 2,
     "daily_sell_limit": null,
     "dry_run": false
@@ -120,8 +119,7 @@ Should complete with 0 errors.
 
 **Key settings:**
 - `markets` — Define which markets to trade (timezone, hours, tickers)
-- `capital_pot` — Total capital per market
-- `max_positions` — Max concurrent positions
+- `capital_pot` — Total capital per market (positions are cash-gated only, no concurrent-position cap)
 - `dry_run` — `false` for real trading, `true` for dry-run (NullBroker)
 
 ---

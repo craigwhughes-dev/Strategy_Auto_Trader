@@ -4,10 +4,10 @@
 
 You now have a fully-automated, continuously-running paper trading daemon that:
 
-✅ Screens tickers overnight by volatility character and sentiment  
+✅ Screens tickers overnight by volatility character  
 ✅ Runs hourly market cycles during FTSE (08:00-16:30) and S&P500 (09:30-16:00) hours  
 ✅ Prioritizes open positions (checked every hour) and round-robins through remaining candidates  
-✅ Enforces daily buy/sell limits and position capacity across one shared IBKR paper account  
+✅ Enforces daily buy/sell limits across one shared IBKR paper account, cash-gated position sizing  
 ✅ Survives crashes with automatic Task Scheduler restart  
 
 ## Files You Need
@@ -18,7 +18,7 @@ You now have a fully-automated, continuously-running paper trading daemon that:
 - `CREATE_SCHEDULED_TASK.bat` — Command Prompt setup (alternative)
 
 **Config**:
-- `config/overnight_strategy.json` — All daemon config (vol thresholds, sentiment, hours, limits)
+- `config/overnight_strategy.json` — All daemon config (vol thresholds, hours, limits)
 
 **Daemon code**:
 - `Strategy_Auto_Trader/markov_cli/live_daemon.py` — Main loop (imports overnight_scope)
@@ -118,13 +118,10 @@ All settings in `config/overnight_strategy.json`:
 |---------|---------|---------|
 | `vol_screen.enabled` | true | Filter choppy tickers (Kaufman ER, autocorr, choppiness) |
 | `vol_screen.min_trend_quality` | 0.0 | Min trend-quality score (higher = stricter) |
-| `sentiment_screen.enabled` | true | Filter bearish tickers (P/C ratio, IV rank, VIX, insider, short interest) |
-| `sentiment_screen.exclude_labels` | ["bearish"] | Exclude tickers with these labels unless open |
 | `overnight_run_time` | "02:00" | When to screen (UTC) |
 | `daytime.max_seconds_per_cycle` | 1500 | Time budget per hourly cycle (1500s = 25 min) |
 | `daytime.poll_interval_seconds` | 60 | How often to check for new cycles |
 | `execution.capital_pot` | 20000 | Total paper account capital |
-| `execution.max_positions` | 5 | Max open positions at once |
 | `execution.daily_buy_limit` | 2 | Max BUY orders per day (both markets) |
 | `execution.daily_sell_limit` | null | Max SELL orders per day (null = unlimited) |
 | `execution.dry_run` | true | Safe default (no real orders until you flip to false) |
@@ -196,11 +193,11 @@ Daily rotating logs in `logs/daemon_<date>.log` show:
 
 **Weekly**:
 - Review `state/execution_state.json` trade_log for P&L
-- Check overnight screening exclusions (vol-screened tickers, sentiment-filtered)
+- Check overnight screening exclusions (vol-screened tickers)
 
 **Monthly**:
 - Analyze trading performance (trade_log, journal entries)
-- Adjust `overnight_strategy.json` if needed (vol thresholds, sentiment labels, limits)
+- Adjust `overnight_strategy.json` if needed (vol thresholds, limits)
 
 ## Troubleshooting
 
@@ -221,7 +218,7 @@ Daily rotating logs in `logs/daemon_<date>.log` show:
 ```cmd
 uv run python -m Strategy_Auto_Trader.markov_cli.overnight_scope
 ```
-Look for errors about yfinance, vol_screen, or sentiment.
+Look for errors about yfinance or vol_screen.
 
 **Fix**: Check internet connection, verify yfinance works
 
@@ -258,7 +255,6 @@ After deploying and running for a week:
 2. Check overnight screening exclusions in `state/in_scope_*.json`
 3. Adjust `overnight_strategy.json` if:
    - Too many tickers excluded → lower vol_screen.min_trend_quality
-   - Too many false negatives → raise sentiment_screen.min_sentiment_score
    - Running out of time budget → increase daytime.max_seconds_per_cycle or reduce tickers
 4. Later: Add market holiday calendar, per-market capital allocation, metrics dashboard
 

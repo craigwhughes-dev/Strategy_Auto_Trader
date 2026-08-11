@@ -413,10 +413,9 @@ The execution engine (`markov_cli/execute.py`) reads the latest signal for each 
 
 4. **Configure capital in `config/watchlist.json`** (under `"defaults"`):
    ```json
-   "capital_pot": 20000,
-   "max_positions": 5
+   "capital_pot": 20000
    ```
-   `capital_pot` is the total pot across all positions. Each position slot gets `capital_pot / max_positions`, scaled by the Kelly fraction.
+   `capital_pot` is the total pot across all positions. Each BUY sizes against currently available cash (`capital_pot` minus deployed positions), scaled by the Kelly fraction — no cap on concurrent position count, cash alone gates admission.
 
 ### Running
 
@@ -439,17 +438,16 @@ For each ticker in the watchlist, the engine reads the latest `qualityGate.json`
 
 | Signal | Action |
 |--------|--------|
-| `BUY` | Check capacity (not already in, open count < `max_positions`); compute quantity = `(capital_pot / max_positions) × kelly_fraction / price`; submit market BUY |
+| `BUY` | Check capacity (not already in); compute quantity = `available_cash × kelly_fraction / price`, 0 if even 1 share isn't affordable; submit market BUY |
 | `SELL` | If an open position exists, submit market SELL for the held quantity |
 | `HOLD` or stale | Skip |
 
 ### Position sizing example
 
-`capital_pot = £20,000`, `max_positions = 5`, `kelly_fraction = 0.15`, `price = £200`
+`available_cash = £20,000`, `kelly_fraction = 0.15`, `price = £200`
 
 ```
-slot_value = 20000 / 5 = £4,000
-quantity   = floor(4000 × 0.15 / 200) = floor(3.0) = 3 shares
+quantity = floor(20000 × 0.15 / 200) = floor(15.0) = 15 shares
 ```
 
 ### State

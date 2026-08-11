@@ -89,8 +89,7 @@ def execute_signals(
     portfolio: object,
     limit_tracker: object,
     broker: object,
-    daily_buy_limit: int | None = 2,
-    daily_sell_limit: int | None = None,
+    allow_new_entries: bool = True,
     market_name: str = "",
     market_currency: str = "",
     marker_path: Path | None = None,
@@ -101,6 +100,7 @@ def execute_signals(
 
     Returns (buys, sells, skipped) lists of strings for logging/display.
     Modifies portfolio and limit_tracker state in place.
+    allow_new_entries=False blocks all buys (reconciliation halt or user pause).
     """
     from ..broker.in_flight_marker import write_marker, clear_marker
     from ..broker.signal_reader import read_latest_signal
@@ -139,8 +139,8 @@ def execute_signals(
 
     for ticker, signal in buy_signals:
         try:
-            if not limit_tracker.can_buy(daily_buy_limit):
-                skipped.append(f"{ticker}(daily limit reached)")
+            if not allow_new_entries:
+                skipped.append(f"{ticker}(new entries blocked)")
                 resolved.add(ticker)
                 continue
             if not portfolio.can_open(ticker):
@@ -250,10 +250,6 @@ def execute_signals(
 
     for ticker, signal in sell_signals:
         try:
-            if not limit_tracker.can_sell(daily_sell_limit):
-                skipped.append(f"{ticker}(daily sell limit reached)")
-                resolved.add(ticker)
-                continue
             if ticker not in portfolio.positions:
                 skipped.append(f"{ticker}(no position)")
                 resolved.add(ticker)
@@ -383,19 +379,12 @@ def main(argv: list[str] | None = None) -> int:
     defaults = watchlist.get("defaults", {})
 
     capital_pot = float(defaults.get("capital_pot", 20_000))
-    max_positions = int(defaults.get("max_positions", 5))
-    daily_buy_limit = defaults.get("daily_buy_limit", 2)
-    if daily_buy_limit is not None:
-        daily_buy_limit = int(daily_buy_limit)
-    daily_sell_limit = defaults.get("daily_sell_limit", None)
-    if daily_sell_limit is not None:
-        daily_sell_limit = int(daily_sell_limit)
     tickers = [t["ticker"] for t in watchlist.get("tickers", [])]
 
     state_path = Path(args.state_dir) / "execution_state.json"
     # Infer currency from tickers (all FTSE if .L suffix, else USD)
     currency = "GBP" if any(t.endswith(".L") for t in tickers) else "USD"
-    portfolio = PortfolioManager(capital_pot, max_positions, state_path, currency=currency)
+    portfolio = PortfolioManager(capital_pot, state_path, currency=currency)
     limit_tracker = portfolio.get_limit_tracker()
 
     if args.dry_run:
@@ -414,7 +403,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         buys, sells, skipped = execute_signals(
             tickers, data_dir, portfolio, limit_tracker, broker,
-            daily_buy_limit, daily_sell_limit
         )
     finally:
         broker.disconnect()

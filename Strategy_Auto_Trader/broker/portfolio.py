@@ -35,12 +35,10 @@ class PortfolioManager:
     def __init__(
         self,
         capital_pot: float,
-        max_positions: int,
         state_path: Path,
         currency: str = "GBP",
     ) -> None:
         self._capital_pot = capital_pot
-        self._max_positions = max_positions
         self._path = state_path
         self._currency = currency
         self._interest = IbkrTieredInterest(currency)
@@ -111,18 +109,20 @@ class PortfolioManager:
     # -- Capacity and sizing ------------------------------------------------
 
     def can_open(self, ticker: str) -> bool:
-        """True if ticker has no open position and the portfolio has capacity."""
-        return (
-            ticker not in self.positions
-            and len(self.positions) < self._max_positions
-        )
+        """True if ticker has no open position (capacity is cash-gated only,
+        via compute_quantity returning 0 when unaffordable)."""
+        return ticker not in self.positions
 
     def compute_quantity(self, kelly_fraction: float, price: float) -> int:
-        """Shares to buy: slot_value × kelly / price, floored to whole shares."""
+        """Shares to buy: available_cash × kelly / price, floored to whole
+        shares. Returns 0 if even 1 share isn't affordable — sizing must
+        never round up to a purchase the pot can't cover."""
         if price <= 0 or kelly_fraction <= 0:
             return 0
-        slot_value = self._capital_pot / self._max_positions
-        return max(1, int(floor(slot_value * kelly_fraction / price)))
+        cash = self.available_cash
+        if cash < price:
+            return 0
+        return max(1, int(floor(cash * kelly_fraction / price)))
 
     # -- State mutations ----------------------------------------------------
 

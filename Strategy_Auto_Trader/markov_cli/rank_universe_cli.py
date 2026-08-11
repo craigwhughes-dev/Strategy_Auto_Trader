@@ -32,9 +32,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lookback-days", type=int, default=60)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--output", required=True, help="Path to write {ticker: score} JSON.")
+    parser.add_argument(
+        "--tickers",
+        help="Comma-separated pre-filtered ticker list. If omitted, loads the full S&P500+FTSE universe.",
+    )
     args = parser.parse_args(argv)
 
-    tickers = full_scan.load_sp_ftse_universe()
+    if args.tickers:
+        tickers = [t.strip() for t in args.tickers.split(",") if t.strip()]
+    else:
+        tickers = full_scan.load_sp_ftse_universe()
     scores = rank_universe(
         tickers,
         args.strategy,

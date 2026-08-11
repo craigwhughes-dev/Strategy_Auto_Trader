@@ -18,7 +18,6 @@
     "reference_date": "2026-06-19",
     "strategy": "default",
     "capital_pot": 20000,
-    "max_positions": 5,
     "daily_buy_limit": 2,
     "daily_sell_limit": null,
     "plugins": {

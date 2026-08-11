@@ -600,3 +600,100 @@ class TestCaptureRatio:
         empty = _empty_result(1000.0)
         for key in ("information_ratio", "up_capture", "down_capture"):
             assert key in empty
+
+
+class TestFetchDaily:
+
+    def test_fetch_daily_returns_dataframe(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import fetch_daily
+        idx = pd.date_range("2000-01-01", periods=5000, freq="B")
+        fake_df = pd.DataFrame({
+            "Open": 100.0, "High": 101.0, "Low": 99.0,
+            "Close": np.linspace(100, 200, 5000), "Volume": 1_000_000.0,
+        }, index=idx)
+        with mock.patch("yfinance.download", return_value=fake_df):
+            df = fetch_daily("SPY")
+        assert df is not None
+        assert len(df) == 5000
+        assert "Close" in df.columns
+
+    def test_fetch_daily_uses_max_period(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import fetch_daily
+        fake_df = pd.DataFrame({"Close": [100.0]}, index=pd.date_range("2000-01-01", periods=1))
+        with mock.patch("yfinance.download", return_value=fake_df) as mock_dl:
+            fetch_daily("SPY")
+        call_kwargs = mock_dl.call_args
+        assert call_kwargs.kwargs.get("period") == "max"
+        assert call_kwargs.kwargs.get("interval") == "1d"
+
+    def test_fetch_daily_empty_returns_none(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import fetch_daily
+        with mock.patch("yfinance.download", return_value=pd.DataFrame()):
+            assert fetch_daily("SPY") is None
+
+    def test_fetch_daily_exception_returns_none(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import fetch_daily
+        with mock.patch("yfinance.download", side_effect=Exception("network")):
+            assert fetch_daily("SPY") is None
+
+    def test_fetch_daily_flattens_multiindex_columns(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import fetch_daily
+        idx = pd.date_range("2000-01-01", periods=5, freq="B")
+        cols = pd.MultiIndex.from_product([["Close", "Open"], ["SPY"]])
+        fake_df = pd.DataFrame(np.ones((5, 2)), index=idx, columns=cols)
+        with mock.patch("yfinance.download", return_value=fake_df):
+            df = fetch_daily("SPY")
+        assert not isinstance(df.columns, pd.MultiIndex)
+
+
+class TestBarsPerYear:
+
+    def test_sharpe_scales_with_bars_per_year(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _sharpe
+        r = np.concatenate([np.full(100, 0.001), np.full(100, -0.0005)])
+        sharpe_hourly = _sharpe(r, bars_per_year=1700)
+        sharpe_daily = _sharpe(r, bars_per_year=252)
+        ratio = sharpe_hourly / sharpe_daily
+        assert abs(ratio - (1700 / 252) ** 0.5) < 1e-9
+
+    def test_sortino_scales_with_bars_per_year(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _sortino, _MIN_DOWNSIDE_BARS
+        r = np.concatenate([np.full(_MIN_DOWNSIDE_BARS, -0.01), np.full(80, 0.005)])
+        sortino_hourly = _sortino(r, bars_per_year=1700)
+        sortino_daily = _sortino(r, bars_per_year=252)
+        ratio = sortino_hourly / sortino_daily
+        assert abs(ratio - (1700 / 252) ** 0.5) < 1e-9
+
+    def test_calmar_uses_bars_per_year_for_annualisation(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _calmar
+        eq = np.array([1.0, 1.2, 0.9, 1.05, 1.1])
+        calmar_252 = _calmar(eq, bars_per_year=252)
+        calmar_1700 = _calmar(eq, bars_per_year=1700)
+        assert calmar_252 != calmar_1700
+        assert np.isfinite(calmar_252) and np.isfinite(calmar_1700)
+
+    def test_information_ratio_scales_with_bars_per_year(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _information_ratio
+        rng = np.random.default_rng(99)
+        bh = rng.normal(0.001, 0.01, 500)
+        strat = bh + rng.normal(0.0005, 0.003, 500)
+        ir_hourly = _information_ratio(strat, bh, bars_per_year=1700)
+        ir_daily = _information_ratio(strat, bh, bars_per_year=252)
+        ratio = ir_hourly / ir_daily
+        assert abs(ratio - (1700 / 252) ** 0.5) < 1e-9
+
+    def test_build_quant_backtest_stats_passes_bars_per_year(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _build_quant_backtest_stats
+        idx = pd.date_range("2024-01-01", periods=10, freq="h")
+        detail = pd.DataFrame({"trade_event": [""] * 10, "kelly_fraction": [0.1] * 10}, index=idx)
+        r = np.concatenate([np.full(5, -0.01), np.full(5, 0.02)])
+        eq = (1 + r).cumprod()
+        stats_1700 = _build_quant_backtest_stats(
+            detail, r, r, eq, eq, 1000.0, list(eq * 1000), [], 0.1,
+            bars_per_year=1700,
+        )
+        stats_252 = _build_quant_backtest_stats(
+            detail, r, r, eq, eq, 1000.0, list(eq * 1000), [], 0.1,
+            bars_per_year=252,
+        )
+        assert stats_1700["sharpe_strategy"] != stats_252["sharpe_strategy"]

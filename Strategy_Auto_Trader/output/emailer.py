@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import os
 import smtplib
+from datetime import date
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -104,7 +105,8 @@ def send_daily_roundup(results: list[dict], failed: list[dict]) -> None:
     buys = sum(1 for r in results if r.get("current_signal") == "BUY")
     sells = sum(1 for r in results if r.get("current_signal") == "SELL")
     holds = sum(1 for r in results if r.get("current_signal") == "HOLD")
-    trade_events = [r for r in results if r.get("trade_event")]
+    today_str = date.today().strftime("%Y%m%d")
+    trade_events = [r for r in results if r.get("trade_event") and r.get("run_date", "") == today_str]
     profitable = sum(1 for r in results if r.get("portfolio_value", 20000) > 20000)
     outperforming = sum(1 for r in results
                         if r.get("strategy_return", 0) > r.get("bh_return", 0))
@@ -157,7 +159,7 @@ def send_daily_roundup(results: list[dict], failed: list[dict]) -> None:
         trade_event_summary = (
             '<div style="background:#1a2a1a;border:1px solid #2a4a2a;border-radius:8px;'
             'padding:12px 16px;margin:16px 0">'
-            '<strong style="color:#69f0ae">Trade events today:</strong><br>'
+            '<strong style="color:#69f0ae">Signals today (pending execution):</strong><br>'
             + "<br>".join(lines) + '</div>'
         )
 
@@ -268,6 +270,31 @@ def send_top_k_screen_alert(status: str, state_date: str | None) -> None:
     subject = f"Top-K screen degraded: {status}"
     _send(subject, html)
     print(f"  Top-K screen alert sent: {subject}")
+
+
+def send_orphaned_position_alert(market_name: str, tickers: list[str]) -> None:
+    """Alert that one or more open positions' tickers are no longer in
+    market_name's watchlist file — force-kept in scope so they're still
+    monitored/exitable, but the watchlist has drifted out from under them."""
+    items = "".join(
+        f'<li style="color:#ffe0b2;padding:4px 0">{t}</li>' for t in tickers
+    )
+    html = f"""<html><body style="margin:0;padding:20px;background:#0f1117;font-family:system-ui,sans-serif;color:#e0e0e0">
+<div style="max-width:700px;margin:0 auto">
+  <h1 style="color:#ffb74d;margin:0 0 4px">Open position(s) missing from watchlist</h1>
+  <div style="color:#888;margin-bottom:16px">[{market_name}] {len(tickers)} open ticker(s) not in the watchlist file</div>
+  <div style="background:#2a2410;border:1px solid #4a3a1a;border-radius:8px;padding:12px 16px;margin:16px 0">
+    <ul style="margin:0;padding-left:20px">{items}</ul>
+  </div>
+  <p style="color:#ddd">These positions are still being monitored/traded normally — force-kept in scope
+  regardless of watchlist membership. This is not a halt. Check whether the watchlist edit that
+  dropped them was intentional; if so, no action needed beyond awareness.</p>
+</div></body></html>"""
+
+    n = len(tickers)
+    subject = f"[{market_name}] {n} open position(s) missing from watchlist"
+    _send(subject, html)
+    print(f"  Orphaned-position alert sent: {subject}")
 
 
 def send_execution_interrupted_alert(

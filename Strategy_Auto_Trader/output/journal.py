@@ -37,6 +37,7 @@ class TradeRecord:
     rsi_at_entry: float = 0.0
     volume_ratio: float = 0.0
     kelly_fraction: float = 0.0
+    position_size_gbp: float = 0.0
     date_closed: str = ""
     exit_reason: str = ""
     exit_price: float = 0.0
