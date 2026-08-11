@@ -135,7 +135,9 @@ def execute_signals(
         elif signal["flag"] == "SELL":
             sell_signals.append((ticker, signal))
 
-    buy_signals.sort(key=lambda x: x[1]["kelly_fraction"], reverse=True)
+    # Sort order must match live_sim.py's arbitrate() (entry_score descending) —
+    # that's the backtest-validated ordering the optimised_new switch was decided on.
+    buy_signals.sort(key=lambda x: x[1]["score"], reverse=True)
 
     for ticker, signal in buy_signals:
         try:

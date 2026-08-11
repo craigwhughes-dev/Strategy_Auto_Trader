@@ -30,7 +30,7 @@ class TestExecutionInterrupted:
         broker.place_order.side_effect = [fill, RuntimeError("Connection lost")]
 
         signal_reader = mock.Mock()
-        signal_reader.return_value = {"flag": "BUY", "close": 150.0, "kelly_fraction": 0.1, "stop_level": 140.0, "target_level": 160.0}
+        signal_reader.return_value = {"flag": "BUY", "close": 150.0, "kelly_fraction": 0.1, "score": 1.0, "stop_level": 140.0, "target_level": 160.0}
 
         monkeypatch.setattr(
             "Strategy_Auto_Trader.broker.signal_reader.read_latest_signal",
@@ -119,7 +119,7 @@ class TestExecutionInterrupted:
         broker.place_order.side_effect = original_error
 
         signal_reader = mock.Mock()
-        signal_reader.return_value = {"flag": "BUY", "close": 150.0, "kelly_fraction": 0.1, "stop_level": 140.0, "target_level": 160.0}
+        signal_reader.return_value = {"flag": "BUY", "close": 150.0, "kelly_fraction": 0.1, "score": 1.0, "stop_level": 140.0, "target_level": 160.0}
 
         monkeypatch.setattr(
             "Strategy_Auto_Trader.broker.signal_reader.read_latest_signal",
@@ -159,7 +159,7 @@ class TestExecutionInterrupted:
         broker.place_order.side_effect = [fill, RuntimeError("Connection lost")]
 
         signal_reader = mock.Mock()
-        signal_reader.return_value = {"flag": "BUY", "close": 350.0, "kelly_fraction": 0.1, "stop_level": 340.0, "target_level": 360.0}
+        signal_reader.return_value = {"flag": "BUY", "close": 350.0, "kelly_fraction": 0.1, "score": 1.0, "stop_level": 340.0, "target_level": 360.0}
 
         monkeypatch.setattr(
             "Strategy_Auto_Trader.broker.signal_reader.read_latest_signal",
@@ -199,7 +199,7 @@ class TestExecutionInterrupted:
 
         signals = {
             "MSFT": {"flag": "HOLD", "close": 100.0},
-            "AAPL": {"flag": "BUY", "close": 150.0, "kelly_fraction": 0.1,
+            "AAPL": {"flag": "BUY", "close": 150.0, "kelly_fraction": 0.1, "score": 1.0,
                      "stop_level": 140.0, "target_level": 160.0},
         }
         monkeypatch.setattr(
@@ -243,7 +243,7 @@ class TestExecuteSignalsNormal:
         broker.place_order.return_value = fill
 
         signal_reader = mock.Mock()
-        signal_reader.return_value = {"flag": "BUY", "close": 150.0, "kelly_fraction": 0.1, "stop_level": 140.0, "target_level": 160.0}
+        signal_reader.return_value = {"flag": "BUY", "close": 150.0, "kelly_fraction": 0.1, "score": 1.0, "stop_level": 140.0, "target_level": 160.0}
 
         monkeypatch.setattr(
             "Strategy_Auto_Trader.broker.signal_reader.read_latest_signal",
@@ -314,7 +314,7 @@ class TestInFlightMarkerIntegration:
         broker.place_order.return_value = fill
 
         signal_reader = mock.Mock()
-        signal_reader.return_value = {"flag": "BUY", "close": 150.0, "kelly_fraction": 0.1, "stop_level": 140.0, "target_level": 160.0}
+        signal_reader.return_value = {"flag": "BUY", "close": 150.0, "kelly_fraction": 0.1, "score": 1.0, "stop_level": 140.0, "target_level": 160.0}
 
         monkeypatch.setattr(
             "Strategy_Auto_Trader.broker.signal_reader.read_latest_signal",
@@ -383,7 +383,7 @@ class TestInFlightMarkerIntegration:
         broker.place_order.return_value = None  # Not filled
 
         signal_reader = mock.Mock()
-        signal_reader.return_value = {"flag": "BUY", "close": 150.0, "kelly_fraction": 0.1, "stop_level": 140.0, "target_level": 160.0}
+        signal_reader.return_value = {"flag": "BUY", "close": 150.0, "kelly_fraction": 0.1, "score": 1.0, "stop_level": 140.0, "target_level": 160.0}
 
         monkeypatch.setattr(
             "Strategy_Auto_Trader.broker.signal_reader.read_latest_signal",
@@ -417,7 +417,7 @@ class TestInFlightMarkerIntegration:
         broker.place_order.side_effect = RuntimeError("Socket error during place_order")
 
         signal_reader = mock.Mock()
-        signal_reader.return_value = {"flag": "BUY", "close": 150.0, "kelly_fraction": 0.1, "stop_level": 140.0, "target_level": 160.0}
+        signal_reader.return_value = {"flag": "BUY", "close": 150.0, "kelly_fraction": 0.1, "score": 1.0, "stop_level": 140.0, "target_level": 160.0}
 
         monkeypatch.setattr(
             "Strategy_Auto_Trader.broker.signal_reader.read_latest_signal",

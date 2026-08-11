@@ -459,11 +459,11 @@ class TestBroker:
 
     # -- execute.py integration -----------------------------------------------
 
-    def _make_signal_dir(self, data_dir, ticker, flag, close=200.0, kelly=0.15):
+    def _make_signal_dir(self, data_dir, ticker, flag, close=200.0, kelly=0.15, score=1.0):
         run_dir = data_dir / f"{ticker}_20260701T120000Z"
         run_dir.mkdir(parents=True, exist_ok=True)
         df = pd.DataFrame([{
-            "close": close, "kelly_fraction": kelly,
+            "close": close, "kelly_fraction": kelly, "score": score,
             "stop_level": close * 0.95, "target_level": close * 1.15,
             "trade_event": flag,
         }])
@@ -584,14 +584,18 @@ class TestBroker:
         state = json.loads((tmp_path / "execution_state.json").read_text())
         assert state["trades_today"]["buys"] == 0  # dry-run doesn't save
 
-    def test_ranks_by_kelly_fraction(self, tmp_path):
+    def test_ranks_by_entry_score(self, tmp_path):
+        """Buy ordering follows composite signal score, matching live_sim.py's
+        arbitrate() (entry_score descending) — not kelly_fraction. See
+        .claude/rules/cli.md: backtest/live_sim ordering is ground truth."""
         from Strategy_Auto_Trader.markov_cli.execute import main
         from unittest.mock import patch, MagicMock
         data_dir = tmp_path / "data"
         data_dir.mkdir()
-        self._make_signal_dir(data_dir, "WEAK", "BUY", kelly=0.08)
-        self._make_signal_dir(data_dir, "STRONG", "BUY", kelly=0.20)
-        self._make_signal_dir(data_dir, "MEDIUM", "BUY", kelly=0.15)
+        # kelly_fraction deliberately inverted vs score to prove score drives order
+        self._make_signal_dir(data_dir, "WEAK", "BUY", kelly=0.20, score=1.0)
+        self._make_signal_dir(data_dir, "STRONG", "BUY", kelly=0.08, score=3.0)
+        self._make_signal_dir(data_dir, "MEDIUM", "BUY", kelly=0.15, score=2.0)
         wl = tmp_path / "watchlist.json"
         self._make_watchlist(wl, ["WEAK", "STRONG", "MEDIUM"])
         state_file = tmp_path / "execution_state.json"
@@ -616,7 +620,7 @@ class TestBroker:
             assert rc == 0
             state = json.loads(state_file.read_text())
             buys = [t["ticker"] for t in state["trade_log"] if t["action"] == "BUY"]
-            # All three admitted; kelly_fraction ordering preserved
+            # All three admitted; entry_score ordering preserved (not kelly_fraction)
             assert buys == ["STRONG", "MEDIUM", "WEAK"]
 
     def test_unlimited_sells_by_default(self, tmp_path):
@@ -1213,7 +1217,7 @@ class TestBroker:
         from Strategy_Auto_Trader.markov_cli.execute import execute_signals
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.null_adapter import NullBroker
-        signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15,
+        signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15, "score": 1.0,
                   "stop_level": 95.0, "target_level": 115.0}
         self._patched_signal_reader(monkeypatch, signal)
         portfolio = PortfolioManager(20_000, tmp_path / "state.json")
@@ -1236,7 +1240,7 @@ class TestBroker:
         from Strategy_Auto_Trader.markov_cli.execute import execute_signals
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.null_adapter import NullBroker
-        signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15,
+        signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15, "score": 1.0,
                   "stop_level": 95.0, "target_level": 115.0}
         self._patched_signal_reader(monkeypatch, signal)
         portfolio = PortfolioManager(20_000, tmp_path / "state.json")
@@ -1258,7 +1262,7 @@ class TestBroker:
         from Strategy_Auto_Trader.markov_cli.execute import execute_signals
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.null_adapter import NullBroker
-        signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15,
+        signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15, "score": 1.0,
                   "stop_level": 95.0, "target_level": 115.0}
         self._patched_signal_reader(monkeypatch, signal)
         portfolio = PortfolioManager(20_000, tmp_path / "state.json")
@@ -1281,7 +1285,7 @@ class TestBroker:
         from Strategy_Auto_Trader.markov_cli.execute import execute_signals
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.null_adapter import NullBroker
-        signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15,
+        signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15, "score": 1.0,
                   "stop_level": 95.0, "target_level": 115.0}
         self._patched_signal_reader(monkeypatch, signal)
         portfolio = PortfolioManager(20_000, tmp_path / "state.json")
@@ -1298,7 +1302,7 @@ class TestBroker:
         from Strategy_Auto_Trader.markov_cli.execute import execute_signals
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from unittest.mock import MagicMock
-        signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15,
+        signal = {"flag": "BUY", "close": 100.0, "kelly_fraction": 0.15, "score": 1.0,
                   "stop_level": 95.0, "target_level": 115.0}
         self._patched_signal_reader(monkeypatch, signal)
         portfolio = PortfolioManager(20_000, tmp_path / "state.json")

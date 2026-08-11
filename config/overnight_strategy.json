@@ -44,7 +44,7 @@
     "poll_interval_seconds": 60
   },
   "execution": {
-    "capital_pot": 10000,
+    "capital_pot": 100000,
     "dry_run": false
   },
   "broker": {

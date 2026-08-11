@@ -27,6 +27,7 @@ def read_latest_signal(ticker: str, data_dir: Path) -> dict | None:
         flag           — "BUY" | "SELL" | "HOLD" (from qualityGate.json)
         close          — last bar close price
         kelly_fraction — last bar Kelly fraction (defaults to 0.10)
+        score          — last bar composite signal score (defaults to 0.0)
         stop_level     — last bar hard stop price
         target_level   — last bar take-profit price
     """
@@ -61,6 +62,7 @@ def read_latest_signal(ticker: str, data_dir: Path) -> dict | None:
             "flag": flag,
             "close": float(last.get("close", 0.0)),
             "kelly_fraction": float(last.get("kelly_fraction", 0.10)),
+            "score": float(last.get("score", 0.0)),
             "stop_level": float(last.get("stop_level", 0.0)),
             "target_level": float(last.get("target_level", 0.0)),
         }
