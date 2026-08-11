@@ -1,4 +1,9 @@
-"""Daily trade count tracking — records BUY/SELL execution counts per day."""
+"""Daily trade count tracking — records BUY/SELL execution counts per day.
+
+Counting only, not enforcement — nothing reads these counts to cap trading.
+The daily_buy_limit/daily_sell_limit config keys some watchlists carried were
+dead configuration and have been removed; trades_today still feeds the
+app_status.json monitoring snapshot (live_daemon.py's write_app_status_snapshot)."""
 
 from __future__ import annotations
 
@@ -39,11 +44,3 @@ class DailyLimitTracker:
         """Increment today's SELL count."""
         self._ensure_today()
         self._state["trades_today"]["sells"] += 1
-
-    def get_today_counts(self) -> tuple[int, int]:
-        """Return (buys_today, sells_today)."""
-        self._ensure_today()
-        return (
-            self._state["trades_today"]["buys"],
-            self._state["trades_today"]["sells"],
-        )

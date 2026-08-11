@@ -122,8 +122,6 @@ All settings in `config/overnight_strategy.json`:
 | `daytime.max_seconds_per_cycle` | 1500 | Time budget per hourly cycle (1500s = 25 min) |
 | `daytime.poll_interval_seconds` | 60 | How often to check for new cycles |
 | `execution.capital_pot` | 20000 | Total paper account capital |
-| `execution.daily_buy_limit` | 2 | Max BUY orders per day (both markets) |
-| `execution.daily_sell_limit` | null | Max SELL orders per day (null = unlimited) |
 | `execution.dry_run` | true | Safe default (no real orders until you flip to false) |
 
 ## How It Works

@@ -778,9 +778,8 @@ class TestBroker:
         for _ in range(5):
             tracker.record_buy()
             tracker.record_sell()
-        buys, sells = tracker.get_today_counts()
-        assert buys == 5
-        assert sells == 5
+        assert state["trades_today"]["buys"] == 5
+        assert state["trades_today"]["sells"] == 5
 
     # -- BVA: OrderRequest/FillResult -----
 

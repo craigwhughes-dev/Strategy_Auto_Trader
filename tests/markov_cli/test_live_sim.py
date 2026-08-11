@@ -58,8 +58,6 @@ class TestSimulateStrategy:
                 start_date="2026-01-12",
                 initial_cash=1000.0,
                 trade_cost=1.0,
-                kelly_fallback=100.0,
-                max_trades_per_day=1,
             )
         assert result == []
 
@@ -76,8 +74,6 @@ class TestSimulateStrategy:
                 start_date="2026-01-12",
                 initial_cash=0.0,
                 trade_cost=1.0,
-                kelly_fallback=100.0,
-                max_trades_per_day=5,
             )
         assert result == []
 
@@ -94,39 +90,8 @@ class TestSimulateStrategy:
                 start_date="2026-01-12",
                 initial_cash=1.0,  # exactly trade_cost
                 trade_cost=1.0,
-                kelly_fallback=100.0,
-                max_trades_per_day=5,
             )
         assert result == []
-
-    def test_cash_slightly_above_trade_cost_admits_with_minimal_alloc(self, base_record, ts_base):
-        """When cash > trade_cost but <= trade_cost + kelly_fallback, minimal alloc is used."""
-        from Strategy_Auto_Trader.markov_cli.live_sim import simulate_strategy
-
-        rec = TradeRecord(
-            date_opened="2026-01-12",
-            ticker="TEST",
-            strategy="test",
-            entry_score=1.0,
-            kelly_fraction=0.0,  # Will use kelly_fallback
-            return_pct=0.10,  # 10% return
-        )
-        cand = make_candidate("TEST", 0, 1.0, 0.0, 0.10, rec, ts_base)
-
-        # cash = 11.0: trade_cost=1.0, kelly_fallback=100.0
-        # alloc will be min(100, 11 - 1) = 10
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", return_value=[cand]):
-            result = simulate_strategy(
-                tickers=["TEST"],
-                strategy_name="test",
-                start_date="2026-01-12",
-                initial_cash=11.0,
-                trade_cost=1.0,
-                kelly_fallback=100.0,
-                max_trades_per_day=5,
-            )
-        assert len(result) == 1
-        assert result[0].ticker == "TEST"
 
     def test_kelly_fraction_positive_sizes_position(self, base_record, ts_base):
         """Kelly fraction > 0 sizes position as kelly_fraction * cash."""
@@ -149,42 +114,39 @@ class TestSimulateStrategy:
                 start_date="2026-01-12",
                 initial_cash=1000.0,
                 trade_cost=1.0,
-                kelly_fallback=100.0,
-                max_trades_per_day=5,
             )
         assert len(result) == 1
         # alloc = 0.25 * 1000 = 250
         # pnl_usd = alloc * return_pct - 2*trade_cost = 250 * 0.10 - 2 = 23
         assert result[0].pnl_usd == pytest.approx(23.0)
 
-    def test_kelly_zero_falls_back_to_kelly_fallback(self, base_record, ts_base):
-        """Kelly fraction == 0 falls back to min(kelly_fallback, available_cash)."""
+    def test_kelly_zero_or_negative_rejected_not_admitted(self, base_record, ts_base):
+        """kelly_fraction <= 0 is rejected outright, not sized via a flat
+        fallback — matches live's PortfolioManager.compute_quantity(), which
+        returns 0 for kelly_fraction <= 0 and never places the order."""
         from Strategy_Auto_Trader.markov_cli.live_sim import simulate_strategy
 
-        rec = TradeRecord(
-            date_opened="2026-01-12",
-            ticker="TEST",
-            strategy="test",
-            entry_score=1.0,
-            kelly_fraction=0.0,
-            return_pct=0.05,
+        rec_zero = TradeRecord(
+            date_opened="2026-01-12", ticker="ZERO", strategy="test",
+            entry_score=1.0, kelly_fraction=0.0, return_pct=0.05,
         )
-        cand = make_candidate("TEST", 0, 1.0, 0.0, 0.05, rec, ts_base)
+        cand_zero = make_candidate("ZERO", 0, 1.0, 0.0, 0.05, rec_zero, ts_base)
+        rec_neg = TradeRecord(
+            date_opened="2026-01-12", ticker="NEG", strategy="test",
+            entry_score=1.0, kelly_fraction=-0.1, return_pct=0.05,
+        )
+        cand_neg = make_candidate("NEG", 0, 1.0, -0.1, 0.05, rec_neg, ts_base)
 
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", return_value=[cand]):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract",
+                        side_effect=[[cand_zero], [cand_neg]]):
             result = simulate_strategy(
-                tickers=["TEST"],
+                tickers=["ZERO", "NEG"],
                 strategy_name="test",
                 start_date="2026-01-12",
                 initial_cash=500.0,
                 trade_cost=1.0,
-                kelly_fallback=100.0,  # would use this
-                max_trades_per_day=5,
             )
-        assert len(result) == 1
-        # alloc = min(100, 500 - 1) = 100
-        # pnl_usd = 100 * 0.05 - 2*1 = 5 - 2 = 3
-        assert result[0].pnl_usd == pytest.approx(3.0)
+        assert result == []
 
     def test_alloc_clamped_by_available_cash(self, base_record, ts_base):
         """Allocation is clamped by (cash - trade_cost)."""
@@ -208,42 +170,11 @@ class TestSimulateStrategy:
                 start_date="2026-01-12",
                 initial_cash=100.0,
                 trade_cost=1.0,
-                kelly_fallback=200.0,
-                max_trades_per_day=5,
             )
         assert len(result) == 1
         # alloc = min(50, 100 - 1) = 50
         # pnl_usd = 50 * 0.10 - 2*1 = 5 - 2 = 3
         assert result[0].pnl_usd == pytest.approx(3.0)
-
-    def test_alloc_negative_or_zero_candidate_skipped(self, base_record, ts_base):
-        """If calculated alloc <= 0, candidate is skipped."""
-        from Strategy_Auto_Trader.markov_cli.live_sim import simulate_strategy
-
-        rec = TradeRecord(
-            date_opened="2026-01-12",
-            ticker="TEST",
-            strategy="test",
-            entry_score=1.0,
-            kelly_fraction=0.0,
-            return_pct=0.05,
-        )
-        cand = make_candidate("TEST", 0, 1.0, 0.0, 0.05, rec, ts_base)
-
-        # cash=1.5, trade_cost=1.0: kelly_fallback would be min(100, 0.5) = 0.5
-        # But alloc = min(0.5, 1.5 - 1) = min(0.5, 0.5) = 0.5 > 0, so admitted
-        # Let's make it negative: cash=1.0 exactly, so 1.0 - 1.0 = 0
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", return_value=[cand]):
-            result = simulate_strategy(
-                tickers=["TEST"],
-                strategy_name="test",
-                start_date="2026-01-12",
-                initial_cash=1.0,  # == trade_cost
-                trade_cost=1.0,
-                kelly_fallback=100.0,
-                max_trades_per_day=5,
-            )
-        assert result == []
 
     def test_same_day_candidates_sorted_by_entry_score(self, base_record, ts_base):
         """Same-day candidates are sorted by entry_score (descending) and admitted in order."""
@@ -275,8 +206,6 @@ class TestSimulateStrategy:
                 start_date="2026-01-12",
                 initial_cash=500.0,
                 trade_cost=1.0,
-                kelly_fallback=100.0,
-                max_trades_per_day=2,
             )
         assert len(result) == 2
         # A admitted first (score 3.0), then B (score 1.0)
@@ -284,7 +213,7 @@ class TestSimulateStrategy:
         assert result[1].ticker == "B"
 
     def test_two_same_day_candidates_tied_score_deterministic_order(self, base_record, ts_base):
-        """Two candidates with same entry_score on same day are both admitted up to cap."""
+        """Two candidates with same entry_score on same day are both admitted (cash allows)."""
         from Strategy_Auto_Trader.markov_cli.live_sim import simulate_strategy
 
         rec1 = TradeRecord(
@@ -313,70 +242,8 @@ class TestSimulateStrategy:
                 start_date="2026-01-12",
                 initial_cash=1000.0,
                 trade_cost=1.0,
-                kelly_fallback=100.0,
-                max_trades_per_day=2,  # Cap of 2
             )
-        assert len(result) == 2  # Both admitted
-
-    def test_max_trades_per_day_cap_exact_match(self, base_record, ts_base):
-        """Exactly N candidates with cap N → all admitted."""
-        from Strategy_Auto_Trader.markov_cli.live_sim import simulate_strategy
-
-        records = []
-        candidates = []
-        for i in range(3):
-            rec = TradeRecord(
-                date_opened="2026-01-12",
-                ticker=f"T{i}",
-                strategy="test",
-                entry_score=float(i),
-                kelly_fraction=0.1,
-                return_pct=0.05,
-            )
-            records.append(rec)
-            candidates.append(make_candidate(f"T{i}", 0, float(i), 0.1, 0.05, rec, ts_base))
-
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", side_effect=[[c] for c in candidates]):
-            result = simulate_strategy(
-                tickers=[f"T{i}" for i in range(3)],
-                strategy_name="test",
-                start_date="2026-01-12",
-                initial_cash=1000.0,
-                trade_cost=1.0,
-                kelly_fallback=100.0,
-                max_trades_per_day=3,  # Cap of 3
-            )
-        assert len(result) == 3  # All admitted
-
-    def test_max_trades_per_day_exceeds_cap(self, base_record, ts_base):
-        """N+1 candidates with cap N → exactly N admitted."""
-        from Strategy_Auto_Trader.markov_cli.live_sim import simulate_strategy
-
-        records = []
-        candidates = []
-        for i in range(4):
-            rec = TradeRecord(
-                date_opened="2026-01-12",
-                ticker=f"T{i}",
-                strategy="test",
-                entry_score=float(4 - i),  # Higher scores first
-                kelly_fraction=0.1,
-                return_pct=0.05,
-            )
-            records.append(rec)
-            candidates.append(make_candidate(f"T{i}", 0, float(4 - i), 0.1, 0.05, rec, ts_base))
-
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", side_effect=[[c] for c in candidates]):
-            result = simulate_strategy(
-                tickers=[f"T{i}" for i in range(4)],
-                strategy_name="test",
-                start_date="2026-01-12",
-                initial_cash=2000.0,
-                trade_cost=1.0,
-                kelly_fallback=100.0,
-                max_trades_per_day=2,  # Cap of 2
-            )
-        assert len(result) == 2  # Only 2 admitted despite 4 candidates
+        assert len(result) == 2  # Both admitted, no daily cap
 
     def test_cash_release_on_position_close_same_day(self, base_record, ts_base):
         """A position closing on day D frees cash for a new entry on the same day."""
@@ -419,8 +286,6 @@ class TestSimulateStrategy:
                 start_date="2026-01-12",
                 initial_cash=300.0,
                 trade_cost=1.0,
-                kelly_fallback=100.0,
-                max_trades_per_day=2,
             )
         # Both should be admitted: first closes immediately, freeing cash for second
         assert len(result) == 2
@@ -466,8 +331,6 @@ class TestSimulateStrategy:
                 start_date="2026-01-12",
                 initial_cash=200.0,
                 trade_cost=1.0,
-                kelly_fallback=100.0,
-                max_trades_per_day=2,
             )
         # First candidate takes 50% = 100, leaves 99 cash (after trade cost)
         # Second candidate needs 50% of remaining, can't fit
@@ -482,10 +345,10 @@ class TestSimulateStrategy:
             ticker="TEST",
             strategy="test",
             entry_score=1.0,
-            kelly_fraction=0.0,
+            kelly_fraction=0.1,
             return_pct=0.20,  # 20% return
         )
-        cand = make_candidate("TEST", 0, 1.0, 0.0, 0.20, rec, ts_base)
+        cand = make_candidate("TEST", 0, 1.0, 0.1, 0.20, rec, ts_base)
 
         with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract", return_value=[cand]):
             result = simulate_strategy(
@@ -494,11 +357,9 @@ class TestSimulateStrategy:
                 start_date="2026-01-12",
                 initial_cash=1000.0,
                 trade_cost=10.0,
-                kelly_fallback=100.0,
-                max_trades_per_day=5,
             )
         assert len(result) == 1
-        # alloc = min(100, 1000 - 10) = 100
+        # alloc = 0.1 * 1000 = 100
         # exit_proceeds = 100 * 1.20 - 10 = 120 - 10 = 110
         # pnl_usd = 110 - 100 - 10 = 0
         assert result[0].pnl_usd == pytest.approx(0.0)
@@ -536,8 +397,6 @@ class TestSimulateStrategy:
                 start_date="2026-01-12",
                 initial_cash=1000.0,
                 trade_cost=1.0,
-                kelly_fallback=100.0,
-                max_trades_per_day=5,
             )
         assert len(result) == 2
 
@@ -582,8 +441,6 @@ class TestSimulateStrategy:
                 start_date="2026-01-12",
                 initial_cash=1000.0,
                 trade_cost=1.0,
-                kelly_fallback=100.0,
-                max_trades_per_day=5,
             )
         # Only AFTER should be admitted
         assert len(result) == 1
@@ -595,11 +452,11 @@ class TestSimulateStrategy:
 
         rec1 = TradeRecord(
             date_opened="2026-01-12", ticker="A", strategy="test",
-            entry_score=1.0, kelly_fraction=0.0, return_pct=0.0,
+            entry_score=1.0, kelly_fraction=0.2, return_pct=0.0,
         )
         cand1 = Candidate(
             ticker="A", date_opened=ts_base, date_closed=ts_base,  # opens and closes day 0
-            entry_score=1.0, kelly_fraction=0.0, return_pct=0.0, record=rec1,
+            entry_score=1.0, kelly_fraction=0.2, return_pct=0.0, record=rec1,
         )
 
         rec2 = TradeRecord(
@@ -622,8 +479,6 @@ class TestSimulateStrategy:
                 start_date="2026-01-12",
                 initial_cash=5000.0,
                 trade_cost=0.0,
-                kelly_fallback=1000.0,
-                max_trades_per_day=2,
             )
 
         assert len(result) == 2
@@ -745,7 +600,8 @@ class TestFilterCandidatesByDailyTrendQuality:
 
 _EMPTY_ARBITRATE_RESULT = {
     "executed": [], "equity_curve": [], "total_interest": 0.0,
-    "final_cash": 0.0, "n_candidates": 0, "n_admitted": 0, "n_rejected_cash": 0,
+    "final_cash": 0.0, "n_candidates": 0, "n_admitted": 0,
+    "n_rejected_cash": 0, "n_rejected_kelly": 0,
 }
 
 
@@ -834,8 +690,8 @@ class TestMainCLI:
         arb_kwargs = mock_arb.call_args_list[0][1]
         assert arb_kwargs["initial_cash"] == 10_000.0
         assert arb_kwargs["trade_cost"] == 1.0
-        assert arb_kwargs["kelly_fallback"] == 100.0
-        assert arb_kwargs["max_trades_per_day"] == 1
+        assert "kelly_fallback" not in arb_kwargs
+        assert "max_trades_per_day" not in arb_kwargs
 
     def test_main_pot_sizes_sweep_calls_arbitrate_once_per_pot_size(self):
         from Strategy_Auto_Trader.markov_cli.live_sim import main
@@ -854,19 +710,6 @@ class TestMainCLI:
         assert mock_arb.call_count == 3
         pot_sizes_used = [c[1]["initial_cash"] for c in mock_arb.call_args_list]
         assert pot_sizes_used == [25000.0, 50000.0, 100000.0]
-
-    def test_main_max_trades_per_day_zero_passed_through_as_unlimited(self):
-        from Strategy_Auto_Trader.markov_cli.live_sim import main
-
-        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {}, {})):
-            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.arbitrate", return_value=dict(_EMPTY_ARBITRATE_RESULT)) as mock_arb:
-                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
-                    main([
-                        "--tickers", "TEST", "--strategies", "default",
-                        "--max-trades-per-day", "0",
-                    ])
-
-        assert mock_arb.call_args_list[0][1]["max_trades_per_day"] == 0
 
     def test_dump_ticker_scores_writes_json(self, base_record, ts_base, tmp_path):
         from Strategy_Auto_Trader.markov_cli.live_sim import main
@@ -910,10 +753,10 @@ class TestMainCLI:
 
 class TestArbitrate:
 
-    def test_max_trades_per_day_zero_is_unlimited(self, ts_base):
-        """max_trades_per_day <= 0 admits every same-day candidate cash allows,
-        not just one — the convention this run needs so cash, not an arbitrary
-        daily count, is the binding constraint under test."""
+    def test_no_daily_admission_cap_all_admitted_when_cash_allows(self, ts_base):
+        """No daily-admission cap and no position-count cap — every same-day
+        candidate cash allows is admitted, matching the live daemon (cash-gated
+        only, see .claude/rules/cli.md)."""
         from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate, Candidate
 
         candidates = []
@@ -925,23 +768,10 @@ class TestArbitrate:
                 entry_score=float(i), kelly_fraction=0.1, return_pct=0.05, record=rec,
             ))
 
-        result = arbitrate(candidates, initial_cash=10_000.0, trade_cost=1.0,
-                            kelly_fallback=100.0, max_trades_per_day=0)
+        result = arbitrate(candidates, initial_cash=10_000.0, trade_cost=1.0)
 
         assert len(result["executed"]) == 5
         assert result["n_admitted"] == 5
-
-    def test_negative_max_trades_per_day_is_also_unlimited(self, ts_base):
-        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate, Candidate
-
-        rec = TradeRecord(date_opened="2026-01-12", ticker="A", strategy="test",
-                           entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
-        cand = Candidate(ticker="A", date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=1),
-                           entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec)
-
-        result = arbitrate([cand], initial_cash=1_000.0, trade_cost=1.0,
-                            kelly_fallback=100.0, max_trades_per_day=-1)
-        assert len(result["executed"]) == 1
 
     def test_admission_diagnostics_count_candidates_and_rejections(self, ts_base):
         """n_candidates/n_admitted/n_rejected_cash support a 'capital wasn't the
@@ -961,8 +791,7 @@ class TestArbitrate:
         # second takes 50% of remaining (~24.5); third's 50% ask still fits
         # (cash > trade_cost), so all three are admitted with shrinking size —
         # use a tiny pot to force an actual rejection instead.
-        result = arbitrate(candidates, initial_cash=1.5, trade_cost=1.0,
-                            kelly_fallback=100.0, max_trades_per_day=0)
+        result = arbitrate(candidates, initial_cash=1.5, trade_cost=1.0)
 
         assert result["n_candidates"] == 3
         assert result["n_admitted"] + result["n_rejected_cash"] >= result["n_candidates"] - 1
@@ -971,8 +800,7 @@ class TestArbitrate:
     def test_empty_candidates_returns_zeroed_result(self):
         from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate
 
-        result = arbitrate([], initial_cash=5000.0, trade_cost=1.0,
-                            kelly_fallback=100.0, max_trades_per_day=1)
+        result = arbitrate([], initial_cash=5000.0, trade_cost=1.0)
         assert result["executed"] == []
         assert result["equity_curve"] == []
         assert result["final_cash"] == 5000.0
@@ -1006,8 +834,8 @@ class TestMarkToMarket:
         )
 
         result = arbitrate(
-            [cand], initial_cash=1000.0, trade_cost=0.0, kelly_fallback=100.0,
-            max_trades_per_day=1, price_by_ticker={"RISER": price_series},
+            [cand], initial_cash=1000.0, trade_cost=0.0,
+            price_by_ticker={"RISER": price_series},
         )
 
         # cost basis alloc = 0.5 * 1000 = 500
@@ -1037,8 +865,7 @@ class TestMarkToMarket:
             entry_score=1.0, kelly_fraction=0.5, return_pct=0.10, record=rec,
         )
 
-        result = arbitrate([cand], initial_cash=1000.0, trade_cost=0.0, kelly_fallback=100.0,
-                            max_trades_per_day=1, price_by_ticker=None)
+        result = arbitrate([cand], initial_cash=1000.0, trade_cost=0.0, price_by_ticker=None)
 
         opening_row = result["equity_curve"][0]
         assert opening_row["deployed"] == pytest.approx(500.0)  # cost basis, no crash

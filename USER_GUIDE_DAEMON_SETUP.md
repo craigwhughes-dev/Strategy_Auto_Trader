@@ -110,8 +110,6 @@ Should complete with 0 errors.
   },
   "execution": {
     "capital_pot": 10000,
-    "daily_buy_limit": 2,
-    "daily_sell_limit": null,
     "dry_run": false
   }
 }

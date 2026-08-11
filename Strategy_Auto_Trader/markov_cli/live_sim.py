@@ -4,9 +4,11 @@ Simulates running a strategy "live" across a basket of tickers sharing a
 single capital pool, starting from a given date. Unlike batch.py (which runs
 each ticker's backtest independently with its own capital), this walks a
 strategy's BUY/SELL signal stream per ticker but arbitrates entries across
-tickers against one shared cash pot: a daily cap on new positions, priority
-by signal strength when multiple tickers want to enter the same day, and
-position sizing from the strategy's own Kelly fraction (or a fixed fallback).
+tickers against one shared cash pot: priority by signal strength when
+multiple tickers want to enter the same day, and position sizing from the
+strategy's own Kelly fraction against currently available cash — a candidate
+with kelly_fraction <= 0 is rejected outright. No daily-admission cap and no
+position-count cap, matching the live daemon (see .claude/rules/cli.md).
 
 Exit timing is NOT re-simulated — each candidate trade's exit date/price is
 taken as-is from the strategy's own (single-ticker, unconstrained) backtest,
@@ -22,14 +24,12 @@ Usage:
         --tickers SHEL.L BP.L HSBA.L ULVR.L GSK.L RIO.L DGE.L LSEG.L BATS.L VOD.L \\
         --strategies default conservative trend \\
         --start-date 2026-01-12 \\
-        --initial-cash 10000 --trade-cost 1 --kelly-fallback 100 \\
-        --max-trades-per-day 1
+        --initial-cash 10000 --trade-cost 1
 
-    # Full S&P500+FTSE100 universe, capital-sweep, unlimited daily admissions:
+    # Full S&P500+FTSE100 universe, capital-sweep:
     uv run python -m Strategy_Auto_Trader.markov_cli.live_sim \\
         --universe --strategies conservative default trend optimised \\
-        --pot-sizes 25000 50000 100000 200000 \\
-        --max-trades-per-day 0 --workers 4
+        --pot-sizes 25000 50000 100000 200000 --workers 4
 """
 
 from __future__ import annotations
@@ -99,23 +99,27 @@ def arbitrate(
     candidates: list[Candidate],
     initial_cash: float,
     trade_cost: float,
-    kelly_fallback: float,
-    max_trades_per_day: int,
     cost_model_name: str = "flat",
     currency: str = "GBP",
     price_by_ticker: dict[str, pd.Series] | None = None,
 ) -> dict:
     """Walk candidates day-by-day (event days only: opens/closes), arbitrating
-    entries against one shared, mutating cash pot. max_trades_per_day <= 0
-    means unlimited (cash alone gates admission).
+    entries against one shared, mutating cash pot. No daily admission cap and
+    no position-count cap — cash alone gates admission, matching the live
+    daemon (broker/portfolio.py has no max_positions or daily-trade-count
+    check either; see .claude/rules/cli.md capital-arbitration section).
+
+    A candidate with kelly_fraction <= 0 is rejected outright, not sized via
+    a flat fallback — this matches live's PortfolioManager.compute_quantity(),
+    which returns 0 for kelly_fraction <= 0 and never places the order.
 
     Returns a dict: executed (list[TradeRecord]), equity_curve (list[dict],
     one row per event day — cash, deployed capital mark-to-market if
     price_by_ticker is given else cost-basis, portfolio_value, cumulative
     realized P&L, cumulative interest), total_interest, final_cash,
     n_candidates, n_admitted, n_rejected_cash (candidates that couldn't be
-    sized due to insufficient cash — the diagnostic that actually supports a
-    "capital wasn't the constraint" conclusion, not peak-vs-pot alone).
+    sized due to insufficient cash), n_rejected_kelly (candidates with
+    kelly_fraction <= 0).
 
     Note: equity_curve is sampled at trade-event days only, not every calendar
     day — for strategies with infrequent trades this is a sparse series. Do
@@ -130,7 +134,7 @@ def arbitrate(
         return {
             "executed": [], "equity_curve": [], "total_interest": 0.0,
             "final_cash": initial_cash, "n_candidates": 0, "n_admitted": 0,
-            "n_rejected_cash": 0,
+            "n_rejected_cash": 0, "n_rejected_kelly": 0,
         }
 
     by_day: dict[pd.Timestamp, list[Candidate]] = {}
@@ -151,6 +155,7 @@ def arbitrate(
     total_interest = 0.0
     n_admitted = 0
     n_rejected_cash = 0
+    n_rejected_kelly = 0
     prev_day = None
 
     for day in all_days:
@@ -171,20 +176,18 @@ def arbitrate(
                 still_open.append(pos)
         open_positions = still_open
 
-        # 2. admit new entries for this day, highest score first, up to the cap
+        # 2. admit new entries for this day, highest score first
         day_candidates = sorted(by_day.get(day, []), key=lambda c: -c.entry_score)
         taken = 0
         for cand in day_candidates:
-            if max_trades_per_day > 0 and taken >= max_trades_per_day:
-                break
+            if not cand.kelly_fraction or cand.kelly_fraction <= 0:
+                n_rejected_kelly += 1
+                continue
             if cash <= trade_cost:
                 n_rejected_cash += 1
                 continue
 
-            if cand.kelly_fraction and cand.kelly_fraction > 0:
-                alloc = cand.kelly_fraction * cash
-            else:
-                alloc = min(kelly_fallback, cash)
+            alloc = cand.kelly_fraction * cash
 
             if cost_model_name == "flat":
                 entry_fee = exit_fee = trade_cost
@@ -239,6 +242,7 @@ def arbitrate(
         "n_candidates": n_candidates,
         "n_admitted": n_admitted,
         "n_rejected_cash": n_rejected_cash,
+        "n_rejected_kelly": n_rejected_kelly,
     }
 
 
@@ -248,8 +252,6 @@ def simulate_strategy(
     start_date: str,
     initial_cash: float,
     trade_cost: float,
-    kelly_fallback: float,
-    max_trades_per_day: int,
     vol_filter_tag: str = "suitable",
     vol_filter_ok: bool = True,
     cost_model_name: str = "flat",
@@ -278,8 +280,6 @@ def simulate_strategy(
         all_candidates,
         initial_cash=initial_cash,
         trade_cost=trade_cost,
-        kelly_fallback=kelly_fallback,
-        max_trades_per_day=max_trades_per_day,
         cost_model_name=cost_model_name,
         currency=currency,
         price_by_ticker=None,
@@ -352,10 +352,6 @@ def main(argv: list[str] | None = None) -> int:
                              "'ibkr_tiered' = IBKR UK tiered commission "
                              "+ SDRT on .L buys; 'ibkr_tiered_spread' adds a half-spread "
                              "estimate per side. Default: ibkr_tiered_spread.")
-    parser.add_argument("--kelly-fallback", type=float, default=100.0)
-    parser.add_argument("--max-trades-per-day", type=int, default=1,
-                        help="Daily cap on new position admissions. 0 (or negative) = unlimited "
-                             "(cash alone gates admission).")
     parser.add_argument("--workers", type=int, default=2,
                         help="Worker processes for parallel per-ticker candidate generation "
                              "(default: 2). 1 = sequential.")
@@ -397,9 +393,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Live simulation: {len(args.tickers)} tickers x {len(args.strategies)} strategies "
           f"x {len(pot_sizes)} pot size(s)")
     print(f"  start={args.start_date}  pot_sizes={pot_sizes}  "
-          f"trade_cost=£{args.trade_cost:.2f}  kelly_fallback=£{args.kelly_fallback:.0f}  "
-          f"max_trades/day={'unlimited' if args.max_trades_per_day <= 0 else args.max_trades_per_day}  "
-          f"workers={args.workers}")
+          f"trade_cost=£{args.trade_cost:.2f}  workers={args.workers}")
     if args.vol_filter_exempt:
         print(f"  vol-filter-exempt strategies: {', '.join(args.vol_filter_exempt)}")
 
@@ -472,8 +466,6 @@ def main(argv: list[str] | None = None) -> int:
                 candidates,
                 initial_cash=pot_size,
                 trade_cost=args.trade_cost,
-                kelly_fallback=args.kelly_fallback,
-                max_trades_per_day=args.max_trades_per_day,
                 cost_model_name=args.cost_model,
                 currency="GBP",
                 price_by_ticker=price_by_ticker,
@@ -484,7 +476,8 @@ def main(argv: list[str] | None = None) -> int:
             peak_deployed = max((row["deployed"] for row in result["equity_curve"]), default=0.0)
             max_dd = _max_drawdown([row["portfolio_value"] for row in result["equity_curve"]])
             print(f"  pot £{pot_size:,.0f}: {len(result['executed'])}/{result['n_candidates']} admitted "
-                  f"({result['n_rejected_cash']} rejected for cash), "
+                  f"({result['n_rejected_cash']} rejected for cash, "
+                  f"{result['n_rejected_kelly']} rejected for kelly<=0), "
                   f"final £{result['final_cash']:,.2f} (P&L £{total_pnl:+,.2f}, "
                   f"peak deployed £{peak_deployed:,.2f}, max drawdown {max_dd*100:.1f}%)")
 
@@ -496,7 +489,8 @@ def main(argv: list[str] | None = None) -> int:
                 "portfolio_value": result["final_cash"], "realized_pnl_cum": total_pnl,
                 "interest_cum": result["total_interest"],
                 "n_candidates": result["n_candidates"], "n_admitted": result["n_admitted"],
-                "n_rejected_cash": result["n_rejected_cash"], "max_drawdown": max_dd,
+                "n_rejected_cash": result["n_rejected_cash"],
+                "n_rejected_kelly": result["n_rejected_kelly"], "max_drawdown": max_dd,
             })
 
     journal_path = Path(args.journal) if args.journal else LIVE_JOURNAL
