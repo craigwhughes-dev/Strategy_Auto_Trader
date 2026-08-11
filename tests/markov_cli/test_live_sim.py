@@ -19,6 +19,7 @@ def base_record():
         entry_score=1.0,
         kelly_fraction=0.1,
         return_pct=0.05,
+        entry_price=1.0,
     )
 
 
@@ -104,6 +105,7 @@ class TestSimulateStrategy:
             entry_score=1.0,
             kelly_fraction=0.25,  # 25% of cash
             return_pct=0.10,
+            entry_price=1.0,
         )
         cand = make_candidate("TEST", 0, 1.0, 0.25, 0.10, rec, ts_base)
 
@@ -128,12 +130,12 @@ class TestSimulateStrategy:
 
         rec_zero = TradeRecord(
             date_opened="2026-01-12", ticker="ZERO", strategy="test",
-            entry_score=1.0, kelly_fraction=0.0, return_pct=0.05,
+            entry_score=1.0, kelly_fraction=0.0, return_pct=0.05, entry_price=1.0,
         )
         cand_zero = make_candidate("ZERO", 0, 1.0, 0.0, 0.05, rec_zero, ts_base)
         rec_neg = TradeRecord(
             date_opened="2026-01-12", ticker="NEG", strategy="test",
-            entry_score=1.0, kelly_fraction=-0.1, return_pct=0.05,
+            entry_score=1.0, kelly_fraction=-0.1, return_pct=0.05, entry_price=1.0,
         )
         cand_neg = make_candidate("NEG", 0, 1.0, -0.1, 0.05, rec_neg, ts_base)
 
@@ -159,6 +161,7 @@ class TestSimulateStrategy:
             entry_score=1.0,
             kelly_fraction=0.5,  # Would want 50% of cash
             return_pct=0.10,
+            entry_price=1.0,
         )
         cand = make_candidate("TEST", 0, 1.0, 0.5, 0.10, rec, ts_base)
 
@@ -187,6 +190,7 @@ class TestSimulateStrategy:
             entry_score=3.0,  # Higher score
             kelly_fraction=0.1,
             return_pct=0.05,
+            entry_price=1.0,
         )
         rec2 = TradeRecord(
             date_opened="2026-01-12",
@@ -195,6 +199,7 @@ class TestSimulateStrategy:
             entry_score=1.0,  # Lower score
             kelly_fraction=0.1,
             return_pct=0.05,
+            entry_price=1.0,
         )
         cand1 = make_candidate("A", 0, 3.0, 0.1, 0.05, rec1, ts_base)
         cand2 = make_candidate("B", 0, 1.0, 0.1, 0.05, rec2, ts_base)
@@ -223,6 +228,7 @@ class TestSimulateStrategy:
             entry_score=2.0,
             kelly_fraction=0.1,
             return_pct=0.05,
+            entry_price=1.0,
         )
         rec2 = TradeRecord(
             date_opened="2026-01-12",
@@ -231,6 +237,7 @@ class TestSimulateStrategy:
             entry_score=2.0,  # Tied
             kelly_fraction=0.1,
             return_pct=0.05,
+            entry_price=1.0,
         )
         cand1 = make_candidate("A", 0, 2.0, 0.1, 0.05, rec1, ts_base)
         cand2 = make_candidate("B", 0, 2.0, 0.1, 0.05, rec2, ts_base)
@@ -257,6 +264,7 @@ class TestSimulateStrategy:
             entry_score=1.0,
             kelly_fraction=0.1,
             return_pct=0.10,
+            entry_price=1.0,
         )
         cand_close_day0 = Candidate(
             ticker="CLOSE",
@@ -276,6 +284,7 @@ class TestSimulateStrategy:
             entry_score=2.0,  # Higher score to be admitted second
             kelly_fraction=0.1,
             return_pct=0.05,
+            entry_price=1.0,
         )
         cand_entry = make_candidate("ENTRY", 0, 2.0, 0.1, 0.05, rec_entry, ts_base)
 
@@ -302,6 +311,7 @@ class TestSimulateStrategy:
             entry_score=1.0,
             kelly_fraction=0.5,  # 50% of cash
             return_pct=0.10,
+            entry_price=1.0,
         )
         cand = Candidate(
             ticker="TEST",
@@ -321,6 +331,7 @@ class TestSimulateStrategy:
             entry_score=0.5,
             kelly_fraction=0.5,
             return_pct=0.05,
+            entry_price=1.0,
         )
         cand2 = make_candidate("TEST2", 0, 0.5, 0.5, 0.05, rec2, ts_base)
 
@@ -347,6 +358,7 @@ class TestSimulateStrategy:
             entry_score=1.0,
             kelly_fraction=0.1,
             return_pct=0.20,  # 20% return
+            entry_price=1.0,
         )
         cand = make_candidate("TEST", 0, 1.0, 0.1, 0.20, rec, ts_base)
 
@@ -376,6 +388,7 @@ class TestSimulateStrategy:
             entry_score=1.0,
             kelly_fraction=0.2,
             return_pct=0.10,
+            entry_price=1.0,
         )
         cand0 = make_candidate("TEST0", 0, 1.0, 0.2, 0.10, rec0, ts_base)
 
@@ -387,6 +400,7 @@ class TestSimulateStrategy:
             entry_score=1.0,
             kelly_fraction=0.2,
             return_pct=0.10,
+            entry_price=1.0,
         )
         cand1 = make_candidate("TEST1", 1, 1.0, 0.2, 0.10, rec1, ts_base)
 
@@ -412,6 +426,7 @@ class TestSimulateStrategy:
             entry_score=1.0,
             kelly_fraction=0.1,
             return_pct=0.05,
+            entry_price=1.0,
         )
         cand_before = Candidate(
             ticker="BEFORE",
@@ -431,6 +446,7 @@ class TestSimulateStrategy:
             entry_score=1.0,
             kelly_fraction=0.1,
             return_pct=0.05,
+            entry_price=1.0,
         )
         cand_after = make_candidate("AFTER", 0, 1.0, 0.1, 0.05, rec_after, ts_base)
 
@@ -452,7 +468,7 @@ class TestSimulateStrategy:
 
         rec1 = TradeRecord(
             date_opened="2026-01-12", ticker="A", strategy="test",
-            entry_score=1.0, kelly_fraction=0.2, return_pct=0.0,
+            entry_score=1.0, kelly_fraction=0.2, return_pct=0.0, entry_price=1.0,
         )
         cand1 = Candidate(
             ticker="A", date_opened=ts_base, date_closed=ts_base,  # opens and closes day 0
@@ -461,7 +477,7 @@ class TestSimulateStrategy:
 
         rec2 = TradeRecord(
             date_opened="2026-07-31", ticker="B", strategy="test",
-            entry_score=1.0, kelly_fraction=0.1, return_pct=0.10,
+            entry_score=1.0, kelly_fraction=0.1, return_pct=0.10, entry_price=1.0,
         )
         cand2 = Candidate(
             ticker="B", date_opened=ts_base + pd.Timedelta(days=200),
@@ -484,9 +500,11 @@ class TestSimulateStrategy:
         assert len(result) == 2
         # Idle cash after trade A (4000) earns ~200 days of GBP tier-1 interest (4%/yr)
         # before trade B is sized: cash = 4000 + 4000*0.04/365*200 + 1000(A's release) = 5087.67
-        # alloc_B = 0.1 * 5087.67 = 508.77; pnl_B = 0.10 * alloc_B = 50.88
+        # kelly-implied alloc = 0.1 * 5087.67 = 508.77 shares at $1/share, floored to
+        # 508 whole shares (entry_price=1.0 here, so 1 share == $1, isolating the
+        # floor's rounding effect cleanly); pnl_B = 508 * 0.10 = 50.80
         pnl_b = result[1].pnl_usd
-        assert pnl_b == pytest.approx(50.8767, abs=0.01)
+        assert pnl_b == pytest.approx(50.8, abs=0.01)
         # Without interest, alloc_B would be 0.1 * 5000 = 500, pnl_B = 50.00
         assert pnl_b > 50.0
 
@@ -762,7 +780,8 @@ class TestArbitrate:
         candidates = []
         for i in range(5):
             rec = TradeRecord(date_opened="2026-01-12", ticker=f"T{i}", strategy="test",
-                               entry_score=float(i), kelly_fraction=0.1, return_pct=0.05)
+                               entry_score=float(i), kelly_fraction=0.1, return_pct=0.05,
+                               entry_price=10.0)
             candidates.append(Candidate(
                 ticker=f"T{i}", date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=1),
                 entry_score=float(i), kelly_fraction=0.1, return_pct=0.05, record=rec,
@@ -781,16 +800,16 @@ class TestArbitrate:
         candidates = []
         for i in range(3):
             rec = TradeRecord(date_opened="2026-01-12", ticker=f"T{i}", strategy="test",
-                               entry_score=float(3 - i), kelly_fraction=0.5, return_pct=0.05)
+                               entry_score=float(3 - i), kelly_fraction=0.5, return_pct=0.05,
+                               entry_price=0.4)
             candidates.append(Candidate(
                 ticker=f"T{i}", date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=5),
                 entry_score=float(3 - i), kelly_fraction=0.5, return_pct=0.05, record=rec,
             ))
 
-        # cash=100: first candidate takes 50% (50), leaving ~49 after fee;
-        # second takes 50% of remaining (~24.5); third's 50% ask still fits
-        # (cash > trade_cost), so all three are admitted with shrinking size —
-        # use a tiny pot to force an actual rejection instead.
+        # cash=1.5, price=0.4: first candidate affords 1 share (0.4) + $1 fee =
+        # 1.4, leaving 0.1 — too little to clear the next $0.4 share price, so
+        # candidates 2 and 3 are rejected on cash, not fee.
         result = arbitrate(candidates, initial_cash=1.5, trade_cost=1.0)
 
         assert result["n_candidates"] == 3

@@ -42,6 +42,7 @@ import numpy as np
 import pandas as pd
 
 from . import full_scan
+from ..broker.symbols import sizing_price
 from ..output.journal import LIVE_JOURNAL, TradeRecord, append_trades
 from ..plugins.costs import COST_MODEL_CHOICES, make_cost_model
 from ..plugins.interest import IbkrTieredInterest
@@ -113,6 +114,14 @@ def arbitrate(
     a flat fallback — this matches live's PortfolioManager.compute_quantity(),
     which returns 0 for kelly_fraction <= 0 and never places the order.
 
+    Position sizing floors to whole shares (IBKR does not reliably support
+    fractional-share orders via the API), mirroring compute_quantity()
+    exactly: qty = max(1, floor(cash * kelly_fraction / price)) once at least
+    1 share is affordable, else the candidate is rejected. A high per-share
+    price can reject a candidate outright even with cash available and a
+    positive Kelly fraction — this is a real admission gate, not backtest
+    noise.
+
     Returns a dict: executed (list[TradeRecord]), equity_curve (list[dict],
     one row per event day — cash, deployed capital mark-to-market if
     price_by_ticker is given else cost-basis, portfolio_value, cumulative
@@ -183,11 +192,13 @@ def arbitrate(
             if not cand.kelly_fraction or cand.kelly_fraction <= 0:
                 n_rejected_kelly += 1
                 continue
-            if cash <= trade_cost:
+            price = sizing_price(cand.ticker, cand.record.entry_price)
+            if price <= 0 or cash < price or cash <= trade_cost:
                 n_rejected_cash += 1
                 continue
 
-            alloc = cand.kelly_fraction * cash
+            qty = max(1, int(cash * cand.kelly_fraction / price))
+            alloc = qty * price
 
             if cost_model_name == "flat":
                 entry_fee = exit_fee = trade_cost
@@ -195,8 +206,16 @@ def arbitrate(
                 model = make_cost_model(cost_model_name, cand.record.ticker, trade_cost)
                 entry_fee = model.cost(alloc, True)
                 exit_fee = model.cost(alloc * (1 + cand.return_pct), False)
-            alloc = min(alloc, cash - entry_fee)
-            if alloc <= 0:
+
+            # Whole shares can't be trimmed to fit like continuous alloc could —
+            # drop a share at a time until the fee-inclusive cost fits cash.
+            while qty > 0 and alloc + entry_fee > cash:
+                qty -= 1
+                alloc = qty * price
+                if cost_model_name != "flat":
+                    entry_fee = model.cost(alloc, True)
+                    exit_fee = model.cost(alloc * (1 + cand.return_pct), False)
+            if qty <= 0:
                 n_rejected_cash += 1
                 continue
 
