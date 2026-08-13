@@ -288,8 +288,17 @@ def validate_startup_environment(logger: logging.Logger) -> bool:
     return True
 
 
-def cleanup_incomplete_runs(data_dir: Path, logger: logging.Logger) -> int:
+def cleanup_incomplete_runs(data_dir: Path, logger: logging.Logger,
+                             min_age_seconds: float = 600) -> int:
     """Remove run directories that only have inputData.csv (incomplete backtests).
+
+    Skips directories younger than min_age_seconds — an orphaned run_single
+    child from a crashed prior daemon can still be actively writing to its
+    run_dir (inputData.csv written, compositeBacktest.csv not yet); it isn't
+    caught by kill_stray_daemons (that only matches live_daemon cmdlines, not
+    worker children), so without an age gate a fresh-looking in-progress run
+    gets rmtree'd out from under it, and the worker's later to_csv() call
+    fails with "non-existent directory".
 
     Returns count of directories cleaned up.
     """
@@ -297,6 +306,7 @@ def cleanup_incomplete_runs(data_dir: Path, logger: logging.Logger) -> int:
         return 0
 
     cleaned = 0
+    now = time.time()
     for run_dir in data_dir.glob("*_*"):
         if not run_dir.is_dir():
             continue
@@ -305,6 +315,9 @@ def cleanup_incomplete_runs(data_dir: Path, logger: logging.Logger) -> int:
         has_output = "compositeBacktest.csv" in files or "qualityGate.json" in files
 
         if "inputData.csv" in files and not has_output:
+            age = now - (run_dir / "inputData.csv").stat().st_mtime
+            if age < min_age_seconds:
+                continue
             try:
                 import shutil
                 shutil.rmtree(run_dir)
@@ -678,7 +691,7 @@ def execute_signals_with_retry(
             is_socket_error = (
                 "socket" in error_msg or
                 "disconnect" in error_msg or
-                "ib_insync" in error_msg
+                "ib_async" in error_msg
             )
 
             if is_socket_error:
@@ -741,7 +754,28 @@ def _evaluate_ticker(
     result = process_ticker(ticker_cfg, defaults, send_email=False)
     if not str(result.get("status", "")).startswith("OK"):
         logger.warning(f"[{market_name}] {ticker} processing failed: {result.get('status')}")
+    else:
+        _log_ticker_snapshot(logger, ticker, result.get("result"))
     return result
+
+
+def _log_ticker_snapshot(logger: logging.Logger, ticker: str, r: dict | None) -> None:
+    """One DEBUG line per ticker with every component that fed the decision."""
+    if not r:
+        return
+    sma_flags = (
+        f"sma20={'Y' if r.get('above_sma20') else 'N'}"
+        f" sma50={'Y' if r.get('above_sma50') else 'N'}"
+        f" sma200={'?' if r.get('above_sma200') is None else ('Y' if r.get('above_sma200') else 'N')}"
+    )
+    logger.debug(
+        f"    {ticker}: flag={r.get('quality_gate') or r.get('current_signal', '?')}"
+        f" (raw={r.get('signal_flag', '?')}) score={r.get('score', 0.0):.1f}"
+        f" p_bull={r.get('p_bull', 0.0):.2f} p_bull_smooth={r.get('p_bull_smooth', 0.0):.2f}"
+        f" hmm_vote={r.get('hmm_vote')} rsi={r.get('rsi', 0.0):.1f} {sma_flags}"
+        f" vol_ratio={r.get('volume_ratio', 0.0):.2f} kelly={r.get('kelly_fraction', 0.0):.3f}"
+        f" gate_reason={r.get('quality_gate_reason') or '-'}"
+    )
 
 
 def _execute_processed_tickers(
@@ -795,7 +829,12 @@ def _execute_processed_tickers(
             protective_stops=protective_stops,
             stop_buffer_pct=stop_buffer_pct,
         )
-        logger.info(f"  BUY:  {len(buys)}, SELL: {len(sells)}, Skipped: {len(skipped)}")
+        # HOLD entries are bare tickers; rejected-signal entries carry a "(reason)"
+        # suffix (see execute.py) — split on that to report HOLD separately from
+        # real BUY/SELL signals blocked downstream (capacity, qty, entries-halted).
+        hold_count = sum(1 for s in skipped if "(" not in s)
+        rejected_count = len(skipped) - hold_count
+        logger.info(f"  BUY:  {len(buys)}, SELL: {len(sells)}, HOLD: {hold_count}, REJECTED: {rejected_count}")
         for b in buys:
             logger.info(f"    BUY: {b}")
         for s in sells:
@@ -842,7 +881,10 @@ def retry_pending_tickers(
         tickers = daemon_state.get("pending_retry_tickers", {}).pop(market_name, [])
         in_scope = load_in_scope_tickers(market_name, logger)
         overrides = load_ticker_overrides(market_name, logger)
-        defaults = {"signal_reports_only": True, **market_cfg.get("defaults", {})}
+        # source temporarily back to yfinance — flip to "ibkr" once
+        # scripts/ibkr_backfill_universe.py has run (see HANDOFF.md); until
+        # then every ticker would bootstrap live against IBKR's pacing cap.
+        defaults = {"signal_reports_only": True, "source": "yfinance", **market_cfg.get("defaults", {})}
         retry_tickers = [t for t in tickers if t in in_scope]
         if not retry_tickers:
             save_daemon_state(daemon_state)
@@ -898,7 +940,10 @@ def process_cycle(
 
     # Daemon cycles skip chart/HTML rendering unless a signal fires; a market
     # config can override by setting defaults.signal_reports_only = false.
-    defaults = {"signal_reports_only": True, **market_cfg.get("defaults", {})}
+    # source temporarily back to yfinance — flip to "ibkr" once
+    # scripts/ibkr_backfill_universe.py has run (see HANDOFF.md); until then
+    # every ticker would bootstrap live against IBKR's pacing cap.
+    defaults = {"signal_reports_only": True, "source": "yfinance", **market_cfg.get("defaults", {})}
     processed = []
     skipped_budget = []
 

@@ -144,7 +144,7 @@ def filter_candidates_by_top_tickers(
 
 def run_ticker_backtest(
     ticker: str, strategy_name: str, vol_filter_ok: bool = True,
-    use_seasonal_volume: bool = False,
+    use_seasonal_volume: bool = False, source: str = "yfinance",
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """Fetch data and run one ticker's full-history backtest.
 
@@ -153,11 +153,17 @@ def run_ticker_backtest(
     valuation and daily vol-filter rescreening) so the fetch + consolidated_backtest
     call isn't duplicated between the two.
 
+    source="ibkr" opts into the local incremental IBKR-backed cache instead of
+    yfinance — default stays yfinance for day-to-day research sweeps (see
+    quant_engine.fetch_hourly's docstring); full-universe live_sim runs can
+    pass source="ibkr" to revalidate against the same data the live daemon
+    actually trades on.
+
     Returns (detail_df, hourly_ohlc_df), or (None, None) on missing/insufficient
     data. The full OHLC frame (not just Close) is returned so callers needing
     High/Low (e.g. for rolling_trend_quality) don't have to re-fetch.
     """
-    df = fetch_hourly_cached(ticker, period="730d")
+    df = fetch_hourly_cached(ticker, period="730d", source=source)
     if df is None or df.empty:
         return None, None
     if isinstance(df.columns, pd.MultiIndex):
@@ -223,7 +229,7 @@ def candidates_from_detail(
 
 def fetch_and_extract(
     ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True,
-    use_seasonal_volume: bool = False,
+    use_seasonal_volume: bool = False, source: str = "yfinance",
 ) -> list[Candidate]:
     """Run one ticker's full-history backtest and extract its round-trip trades.
 
@@ -232,7 +238,7 @@ def fetch_and_extract(
     the caller has usually already screened the ticker once (efficiency).
     """
     detail, _df = run_ticker_backtest(ticker, strategy_name, vol_filter_ok,
-                                      use_seasonal_volume=use_seasonal_volume)
+                                      use_seasonal_volume=use_seasonal_volume, source=source)
     if detail is None:
         print(f"  {ticker}: no data or insufficient data, skipping")
         return []
@@ -241,7 +247,7 @@ def fetch_and_extract(
 
 def fetch_extract_and_prices(
     ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True,
-    use_seasonal_volume: bool = False,
+    use_seasonal_volume: bool = False, source: str = "yfinance",
 ) -> tuple[list[Candidate], pd.Series | None, pd.Series | None]:
     """Like fetch_and_extract, but also returns the ticker's close-price series
     (for mark-to-market valuation) and its rolling trend_quality series (for
@@ -249,7 +255,7 @@ def fetch_extract_and_prices(
     why a single "as of today" snapshot can't be used across a historical
     backtest). Top-level function so it's picklable for ProcessPoolExecutor."""
     detail, df = run_ticker_backtest(ticker, strategy_name, vol_filter_ok,
-                                     use_seasonal_volume=use_seasonal_volume)
+                                     use_seasonal_volume=use_seasonal_volume, source=source)
     if detail is None:
         return [], None, None
     candidates = candidates_from_detail(ticker, detail, strategy_name, vol_filter_tag)
@@ -264,13 +270,19 @@ def generate_candidates(
     vol_filter_ok: bool = True,
     workers: int = 1,
     use_seasonal_volume: bool = False,
+    source: str = "yfinance",
 ) -> tuple[list[Candidate], dict[str, pd.Series], dict[str, pd.Series]]:
     """Generate one strategy's candidate trades across a ticker list, optionally
     in parallel, retaining each ticker's close-price series (mark-to-market)
     and rolling trend_quality series (daily vol-filter rescreening — see
     rolling_trend_quality()). Does not arbitrate against any capital pot, nor
     apply the vol filter itself — see live_sim.py's arbitrate() for capital
-    arbitration and main()'s per-candidate filtering step for the vol gate."""
+    arbitration and main()'s per-candidate filtering step for the vol gate.
+
+    source="ibkr" opts every ticker in this run onto the local incremental
+    IBKR-backed cache instead of yfinance — day-to-day research sweeps stay
+    on the yfinance default; pass source="ibkr" for a full-universe live_sim
+    revalidation against the data the live daemon actually trades on."""
     all_candidates: list[Candidate] = []
     price_by_ticker: dict[str, pd.Series] = {}
     trend_quality_by_ticker: dict[str, pd.Series] = {}
@@ -279,7 +291,7 @@ def generate_candidates(
         with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = {
                 executor.submit(fetch_extract_and_prices, t, strategy_name, vol_filter_tag,
-                                vol_filter_ok, use_seasonal_volume): t
+                                vol_filter_ok, use_seasonal_volume, source): t
                 for t in tickers
             }
             for future in as_completed(futures):
@@ -293,7 +305,7 @@ def generate_candidates(
     else:
         for ticker in tickers:
             cands, close, trend_quality = fetch_extract_and_prices(
-                ticker, strategy_name, vol_filter_tag, vol_filter_ok, use_seasonal_volume)
+                ticker, strategy_name, vol_filter_tag, vol_filter_ok, use_seasonal_volume, source)
             all_candidates.extend(cands)
             if close is not None:
                 price_by_ticker[ticker] = close

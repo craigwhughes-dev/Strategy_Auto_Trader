@@ -460,6 +460,21 @@ def test_process_cycle_market_config_can_override_reports_default(monkeypatch):
     assert captured["defaults"]["signal_reports_only"] is False
 
 
+def test_process_cycle_defaults_source_yfinance(monkeypatch):
+    """Temporarily back to yfinance until scripts/ibkr_backfill_universe.py
+    has run (see HANDOFF.md) — bouncing the daemon before then would bootstrap
+    every touched ticker live against IBKR's pacing cap. Flip to "ibkr" once
+    the backfill completes."""
+    captured = _run_process_cycle_capture_defaults(monkeypatch, market_cfg={})
+    assert captured["defaults"]["source"] == "yfinance"
+
+
+def test_process_cycle_market_config_can_override_source_default(monkeypatch):
+    captured = _run_process_cycle_capture_defaults(
+        monkeypatch, market_cfg={"defaults": {"source": "ibkr"}})
+    assert captured["defaults"]["source"] == "ibkr"
+
+
 # -- item 8: interleaved manual-command polling -----------------------------
 
 def test_process_cycle_checks_manual_commands_between_must_run_tickers(monkeypatch):
@@ -1305,6 +1320,58 @@ def test_main_self_check_skips_broker_even_when_live(monkeypatch, config):
     monkeypatch.setattr(self_check, "run_startup_checks", fake_checks)
     assert live_daemon.main([]) == 1
     assert captured["require_broker"] is False
+
+
+def test_cleanup_incomplete_runs_skips_young_dirs(tmp_path):
+    """A run_dir with only inputData.csv but written moments ago must survive —
+    it may be an orphaned run_single child still mid-backtest (crashed parent
+    daemon, not yet caught by kill_stray_daemons), and deleting it out from
+    under that live writer is exactly the race that caused the ABBV OSError.
+    """
+    run_dir = tmp_path / "ABBV_20260811T160129Z"
+    run_dir.mkdir()
+    (run_dir / "inputData.csv").write_text("data")
+
+    cleaned = live_daemon.cleanup_incomplete_runs(tmp_path, mock.Mock(), min_age_seconds=600)
+
+    assert cleaned == 0
+    assert run_dir.exists()
+
+
+def test_cleanup_incomplete_runs_removes_stale_dirs(tmp_path):
+    """A genuinely abandoned incomplete run (old enough that no live writer
+    could still be producing it) is removed."""
+    import os
+
+    run_dir = tmp_path / "ABBV_20260811T160129Z"
+    run_dir.mkdir()
+    input_csv = run_dir / "inputData.csv"
+    input_csv.write_text("data")
+    old_time = live_daemon.time.time() - 700
+    os.utime(input_csv, (old_time, old_time))
+
+    cleaned = live_daemon.cleanup_incomplete_runs(tmp_path, mock.Mock(), min_age_seconds=600)
+
+    assert cleaned == 1
+    assert not run_dir.exists()
+
+
+def test_cleanup_incomplete_runs_keeps_completed_runs(tmp_path):
+    """A run_dir with output files present is never removed, regardless of age."""
+    import os
+
+    run_dir = tmp_path / "ABBV_20260811T160129Z"
+    run_dir.mkdir()
+    input_csv = run_dir / "inputData.csv"
+    input_csv.write_text("data")
+    (run_dir / "compositeBacktest.csv").write_text("data")
+    old_time = live_daemon.time.time() - 700
+    os.utime(input_csv, (old_time, old_time))
+
+    cleaned = live_daemon.cleanup_incomplete_runs(tmp_path, mock.Mock(), min_age_seconds=600)
+
+    assert cleaned == 0
+    assert run_dir.exists()
 
 
 def test_main_keyboard_interrupt_skips_sleep(monkeypatch, config, tmp_path):
@@ -2575,6 +2642,31 @@ class TestRetryPendingTickers:
         assert process_ticker_calls == ["MNG.L"]
         assert len(exec_calls) == 1
         assert exec_calls[0][0][1] == ["MNG.L"]  # ticker_list positional arg
+
+    def test_defaults_source_matches_main_cycle(self, monkeypatch):
+        """The retry path shares the same data source default as the main
+        cycle (currently yfinance, temporarily, until the IBKR backfill has
+        run — see HANDOFF.md) — a retried ticker must not silently diverge."""
+        from Strategy_Auto_Trader.markov_cli import batch
+
+        daemon_state = {"pending_retry_tickers": {"ftse": ["MNG.L"]}}
+        captured = {}
+
+        def fake_process_ticker(ticker_cfg, defaults, send_email):
+            captured["defaults"] = defaults
+            return {"ticker": ticker_cfg["ticker"], "status": "FAIL: stub"}
+
+        monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
+        monkeypatch.setattr(live_daemon, "is_trading_hours", lambda *a, **k: True)
+        monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["MNG.L"])
+        monkeypatch.setattr(live_daemon, "load_ticker_overrides", lambda m, l: {})
+        monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
+
+        live_daemon.retry_pending_tickers(
+            self._config(), daemon_state, portfolio=mock.Mock(), broker=mock.Mock(), logger=mock.Mock(),
+        )
+
+        assert captured["defaults"]["source"] == "yfinance"
 
     def test_skips_market_closed(self, monkeypatch):
         """Market closed by the time reconciliation clears — don't fire, and

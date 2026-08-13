@@ -61,7 +61,7 @@ Added automatic reconnection and retry logic to handle temporary socket disconne
 09:01:45 [WARNING] Reconnecting in 1s...
 09:01:46 [INFO] Broker reconnected successfully
 09:01:46 [INFO] Executing signals for 23 processed tickers...
-09:01:47 [INFO] BUY: 2, SELL: 1, Skipped: 20
+09:01:47 [INFO] BUY: 2, SELL: 1, HOLD: 18, REJECTED: 2
 [trades executed successfully]
 ```
 

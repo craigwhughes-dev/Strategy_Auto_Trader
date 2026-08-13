@@ -44,8 +44,16 @@ def _trend_quality_score(
     )
 
 
-def volatility_profile(ticker: str, period: str = "2y") -> dict | None:
+def volatility_profile(ticker: str, period: str = "2y", source: str = "yfinance") -> dict | None:
     """Compute volatility-character metrics for a ticker from daily data.
+
+    source="ibkr" derives daily OHLC by resampling quant_engine.fetch_hourly's
+    IBKR-backed cache instead of a second, separate IBKR daily fetch/cache —
+    the 2y default period is well within the hourly cache's retention window,
+    so there's no need for a parallel daily paging path. Resampling by UTC
+    calendar day is safe here: both NYSE and LSE trading hours fall entirely
+    within one UTC day (neither session crosses UTC midnight), so no bar
+    ever gets split across two resampled days.
 
     Returns dict with:
       - ann_vol: annualised total volatility (both up and down moves)
@@ -56,16 +64,27 @@ def volatility_profile(ticker: str, period: str = "2y") -> dict | None:
       - sign_change_freq: fraction of days where return sign flips vs prior day
       - trend_quality: composite score (higher = better fit for the HMM quant engine)
     """
-    import yfinance as yf
+    if source == "ibkr":
+        from .quant_engine import fetch_hourly
 
-    try:
-        df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=True)
-    except Exception:
-        return None
-    if df is None or df.empty:
-        return None
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+        hourly = fetch_hourly(ticker, period=period, source="ibkr")
+        if hourly is None or hourly.empty:
+            return None
+        df = hourly.resample("1D").agg({
+            "Open": "first", "High": "max", "Low": "min",
+            "Close": "last", "Volume": "sum",
+        }).dropna(subset=["Close"])
+    else:
+        import yfinance as yf
+        from ..core.net_retry import call_with_timeout_retry
+
+        df = call_with_timeout_retry(
+            lambda: yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=True)
+        )
+        if df is None or df.empty:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
 
     close = df["Close"].dropna()
     high = df["High"].dropna()

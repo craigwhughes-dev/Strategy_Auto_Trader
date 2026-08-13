@@ -40,18 +40,22 @@ def _make_run_dir(ticker: str) -> Path:
 
 def _fetch_company_info(ticker: str) -> tuple[str, str]:
     import yfinance as yf
-    try:
-        info = yf.Ticker(ticker).info
-        name = info.get("longName") or info.get("shortName") or ticker
-        sector = info.get("sector") or info.get("industry") or ""
-        return name, sector
-    except Exception:
+    from ..core.net_retry import call_with_timeout_retry
+
+    info = call_with_timeout_retry(lambda: yf.Ticker(ticker).info)
+    if not info:
         return ticker, ""
+    name = info.get("longName") or info.get("shortName") or ticker
+    sector = info.get("sector") or info.get("industry") or ""
+    return name, sector
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="strategy-auto-trader")
     parser.add_argument("--ticker", default="SPY")
+    parser.add_argument("--source", choices=["yfinance", "ibkr"], default="yfinance",
+                        help="Hourly data source: yfinance (default) or the local "
+                             "incremental IBKR-backed cache (default: yfinance)")
 
     # HMM + composite-signal thresholds
     parser.add_argument("--entry-prob", type=float, default=0.65,
@@ -362,8 +366,8 @@ def main(argv: list[str] | None = None) -> int:
             _write_quality_gate(run_dir, "HOLD", "no data")
             return 1
     else:
-        print(f"  fetching {args.ticker} hourly data from Yahoo Finance...")
-        df = fetch_hourly(args.ticker, period="730d")
+        print(f"  fetching {args.ticker} hourly data (source={args.source})...")
+        df = fetch_hourly(args.ticker, period="730d", source=args.source)
         if df is None or df.empty:
             print(f"  ERROR: could not fetch hourly data for {args.ticker}")
             _write_quality_gate(run_dir, "HOLD", "no data")
@@ -397,6 +401,7 @@ def main(argv: list[str] | None = None) -> int:
         args.strategy, ticker=args.ticker,
         vol_filter_ok=vol_filter_ok,
         entry_overrides=entry_overrides, exit_overrides=exit_overrides,
+        source=args.source,
     )
 
     regime_model = None

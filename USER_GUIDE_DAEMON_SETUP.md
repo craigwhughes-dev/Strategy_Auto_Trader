@@ -230,7 +230,7 @@ tail -f logs/daemon_2026-07-11.log
 2026-07-14 09:31:42 [DEBUG]   Processing MSFT
 ...
 2026-07-14 09:45:00 [INFO] [us] Executing signals for 50 processed tickers...
-2026-07-14 09:45:01 [INFO]   BUY:  2, SELL: 1, Skipped: 47
+2026-07-14 09:45:01 [INFO]   BUY:  2, SELL: 1, HOLD: 44, REJECTED: 3
 2026-07-14 09:45:01 [INFO]     BUY: AAPL (score=0.75, kelly=0.10)
 2026-07-14 09:45:01 [INFO]     SELL: MSFT (reason: quality_gate: adverse exit context)
 ```
@@ -420,7 +420,7 @@ sudo journalctl -u strategy-trader-daemon -f
 [INFO] [<market>] Starting cycle
 [DEBUG]   Processing <TICKER>
 [INFO] [<market>] Executing signals for X processed tickers...
-[INFO]   BUY:  X, SELL: Y, Skipped: Z
+[INFO]   BUY:  X, SELL: Y, HOLD: H, REJECTED: R
 ```
 
 **Error conditions:**

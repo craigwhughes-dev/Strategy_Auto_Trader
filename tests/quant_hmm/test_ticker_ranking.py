@@ -13,9 +13,29 @@ from Strategy_Auto_Trader.quant_hmm.ticker_ranking import (
     generate_candidates,
     rank_universe,
     recent_win_rate,
+    run_ticker_backtest,
     ticker_ranking_score,
     trend_quality_asof,
 )
+
+
+class TestRunTickerBacktestSource:
+    def test_source_reaches_fetch_hourly_cached(self):
+        """source="ibkr" must reach fetch_hourly_cached, not just be accepted
+        and dropped — this is what lets a full-universe live_sim revalidation
+        run against the same local IBKR-backed cache the live daemon uses."""
+        with mock.patch("Strategy_Auto_Trader.quant_hmm.ticker_ranking.fetch_hourly_cached",
+                        return_value=None) as mock_fetch:
+            run_ticker_backtest("AAPL", "default", source="ibkr")
+
+        mock_fetch.assert_called_once_with("AAPL", period="730d", source="ibkr")
+
+    def test_default_source_is_yfinance(self):
+        with mock.patch("Strategy_Auto_Trader.quant_hmm.ticker_ranking.fetch_hourly_cached",
+                        return_value=None) as mock_fetch:
+            run_ticker_backtest("AAPL", "default")
+
+        mock_fetch.assert_called_once_with("AAPL", period="730d", source="yfinance")
 
 
 class _ImmediateExecutor:
@@ -84,7 +104,8 @@ class TestGenerateCandidates:
         candidates from the same underlying per-ticker function — regression
         guard for the parallel dispatch/collection wiring."""
 
-        def fake_fetch(ticker, strategy_name, vol_filter_tag, vol_filter_ok=True, use_seasonal_volume=False):
+        def fake_fetch(ticker, strategy_name, vol_filter_tag, vol_filter_ok=True,
+                      use_seasonal_volume=False, source="yfinance"):
             rec = TradeRecord(date_opened="2026-01-12", ticker=ticker, strategy=strategy_name,
                                entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
             cand = Candidate(

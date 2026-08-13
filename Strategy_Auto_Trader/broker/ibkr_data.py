@@ -1,4 +1,4 @@
-"""IBKR historical-bar client via ib_insync — an opt-in alternative to
+"""IBKR historical-bar client via ib_async — an opt-in alternative to
 yfinance for `quant_engine.fetch_hourly` (see quant_engine.py's `source`
 param). Kept separate from ibkr_adapter.py: that module is for live order
 execution, this one is read-only historical data and is safe to exercise
@@ -8,9 +8,18 @@ Uses client_id=2 by default, reserved for data-fetch, so it never collides
 with the live daemon's execution connection (client_id=1) on the same TWS
 instance — both can run concurrently against one TWS/Gateway.
 
+The on-disk cache (data/cache/ibkr_hourly/) is a growing, incrementally
+updated store, not a point-in-time snapshot: fetch_hourly() only ever pages
+for the *gap* between the last cached bar and now, merges, and re-saves. A
+brand-new ticker with no cache yet still does the old-style bootstrap page
+(walking back until either the requested period is covered or IBKR returns
+an empty page, i.e. the start of available history) — but a multi-day
+daemon outage is just a bigger gap through that same incremental path, no
+separate "backfill after downtime" logic needed.
+
 IBKR's reqHistoricalData is duration- and pacing-limited per request, so
 years of hourly history requires paging backwards in chunks with throttling
-between requests, concatenating until either the requested period is
+between requests, concatenating until either the requested period/gap is
 covered or a page returns no further/older bars.
 """
 
@@ -20,13 +29,25 @@ from pathlib import Path
 
 import pandas as pd
 
+from ..core.atomic_io import atomic_write_csv
 from .symbols import ibkr_contract_params
 
 CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "cache" / "ibkr_hourly"
 
-_PAGE_DURATION = "30 D"
+# 862-1123 bars/request measured live for SPY/HSBA.L at "6 M" — comfortably
+# under IBKR's ~2000-bar/request cap, cuts request count ~6x vs the old 30 D
+# chunking (see broker/ibkr_data.py migration notes / project memory).
+_PAGE_DURATION = "6 M"
 _MAX_PAGES = 200          # safety valve against runaway paging
 _PAGE_SLEEP_S = 2.0       # throttle between reqHistoricalData calls
+
+_DURATION_UNIT_DAYS = {"D": 1, "W": 7, "M": 30, "Y": 365}
+
+
+def _duration_str_to_days(duration: str) -> int:
+    """Parse an IBKR durationStr ("6 M", "30 D") into an approximate day count."""
+    n, unit = duration.strip().split()
+    return int(n) * _DURATION_UNIT_DAYS[unit.upper()[0]]
 
 
 def _period_to_days(period: str) -> int:
@@ -41,31 +62,37 @@ def _period_to_days(period: str) -> int:
     raise ValueError(f"Unrecognized period format: {period!r}")
 
 
+def _cache_path(ticker: str) -> Path:
+    return CACHE_DIR / f"{ticker.replace('/', '-')}.csv"
+
+
 def _load_cache(ticker: str) -> pd.DataFrame | None:
-    path = CACHE_DIR / f"{ticker.replace('/', '-')}.csv"
+    path = _cache_path(ticker)
     if not path.exists():
         return None
     df = pd.read_csv(path, index_col=0, parse_dates=True)
-    return df if not df.empty else None
+    if df.empty:
+        return None
+    if df.index.tz is None:
+        df.index = df.index.tz_localize("UTC")
+    return df
 
 
 def _save_cache(ticker: str, df: pd.DataFrame) -> None:
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    path = CACHE_DIR / f"{ticker.replace('/', '-')}.csv"
-    df.to_csv(path)
+    atomic_write_csv(_cache_path(ticker), df)
 
 
 class IBKRDataClient:
-    """Wraps ib_insync for historical-bar requests.
+    """Wraps ib_async for historical-bar requests.
 
-    ib_insync is imported lazily so the rest of the package works even if
+    ib_async is imported lazily so the rest of the package works even if
     it is not installed (mirrors IBKRAdapter's lazy-import convention).
     """
 
     def __init__(
         self,
         host: str = "127.0.0.1",
-        port: int = 7497,
+        port: int = 4002,
         client_id: int = 2,
         connect_timeout: float = 30.0,
     ) -> None:
@@ -80,7 +107,7 @@ class IBKRDataClient:
         failure — TWS not running, wrong port, handshake timeout, etc. —
         so callers can fall back the same way a yfinance failure would."""
         try:
-            from ib_insync import IB
+            from ib_async import IB
         except ImportError:
             return False
         try:
@@ -97,24 +124,44 @@ class IBKRDataClient:
             self._ib.disconnect()
             self._ib = None
 
-    def _fetch_pages(self, contract, days_needed: int) -> pd.DataFrame:
-        from ib_insync import util
+    def _fetch_pages(self, contract, what_to_show: str = "TRADES",
+                      stop_at: pd.Timestamp | None = None,
+                      min_days: int | None = None) -> pd.DataFrame:
+        """Page backward from now through reqHistoricalData.
+
+        stop_at (incremental gap-fill): page only until a page's oldest bar
+        reaches stop_at, then return just the bars strictly newer than it —
+        a multi-day gap (e.g. daemon downtime) is simply more pages through
+        this same loop, no special-casing.
+
+        min_days (bootstrap, stop_at=None): page until at least min_days is
+        covered, or a page comes back empty — IBKR has reached the start of
+        its available history for this contract.
+        """
+        from ib_async import util
 
         frames: list[pd.DataFrame] = []
         end_dt = ""
         days_covered = 0
+        page_days = _duration_str_to_days(_PAGE_DURATION)
         for _ in range(_MAX_PAGES):
             bars = self._ib.reqHistoricalData(
                 contract, endDateTime=end_dt, durationStr=_PAGE_DURATION,
-                barSizeSetting="1 hour", whatToShow="TRADES", useRTH=True,
+                barSizeSetting="1 hour", whatToShow=what_to_show, useRTH=True,
             )
             if not bars:
                 break
             page = util.df(bars)
             frames.append(page)
-            days_covered += 30
+            days_covered += page_days
             end_dt = bars[0].date
-            if days_covered >= days_needed:
+
+            oldest = pd.Timestamp(bars[0].date)
+            oldest = oldest.tz_localize("UTC") if oldest.tzinfo is None else oldest.tz_convert("UTC")
+
+            if stop_at is not None and oldest <= stop_at:
+                break
+            if stop_at is None and min_days is not None and days_covered >= min_days:
                 break
             self._ib.sleep(_PAGE_SLEEP_S)
 
@@ -125,42 +172,59 @@ class IBKRDataClient:
         out = out.set_index("date")
         out.index = pd.to_datetime(out.index, utc=True)
         out.index.name = None
-        return out.rename(columns={
+        out = out.rename(columns={
             "open": "Open", "high": "High", "low": "Low",
             "close": "Close", "volume": "Volume",
         })[["Open", "High", "Low", "Close", "Volume"]]
+        if stop_at is not None:
+            out = out[out.index > stop_at]
+        return out
 
-    def fetch_hourly(self, ticker: str, period: str = "730d", use_cache: bool = True) -> pd.DataFrame | None:
+    def fetch_hourly(self, ticker: str, period: str = "730d", use_cache: bool = True,
+                      what_to_show: str = "TRADES") -> pd.DataFrame | None:
         """Fetch hourly OHLCV, same return contract as quant_engine's
         yfinance path: pd.DataFrame | None, tz-aware index, OHLCV columns.
-        Pages through IBKR's pacing-limited reqHistoricalData and caches
-        results under data/cache/ibkr_hourly/ so repeat backtests don't
-        re-page every run."""
-        days_needed = _period_to_days(period)
 
+        Incremental: an existing cache is extended by paging only the gap
+        since its last bar (see _fetch_pages), not re-pulled from scratch.
+        A brand-new ticker gets a one-time bootstrap pull covering `period`.
+        Results are merged into data/cache/ibkr_hourly/ so the cache only
+        ever grows.
+
+        what_to_show="ADJUSTED_LAST" is exposed for scripts/ibkr_data_pilot.py's
+        split/dividend-adjustment validation against yfinance; the incremental
+        cache itself always uses the default "TRADES" — see the migration
+        plan's validation notes for why ADJUSTED_LAST was not adopted."""
         cached = _load_cache(ticker) if use_cache else None
-        if cached is not None:
-            span = (cached.index[-1] - cached.index[0]).days
-            if span >= days_needed:
-                return cached
 
         owns_connection = self._ib is None
         if owns_connection and not self.connect():
             return cached
 
         try:
-            from ib_insync import Stock
+            from ib_async import Stock
             contract = Stock(*ibkr_contract_params(ticker))
             self._ib.qualifyContracts(contract)
-            df = self._fetch_pages(contract, days_needed)
+            if cached is not None:
+                new_df = self._fetch_pages(contract, what_to_show=what_to_show,
+                                            stop_at=cached.index[-1])
+            else:
+                new_df = self._fetch_pages(contract, what_to_show=what_to_show,
+                                            min_days=_period_to_days(period))
         except Exception:
             return cached
         finally:
             if owns_connection:
                 self.disconnect()
 
-        if df.empty:
+        if cached is not None:
+            merged = pd.concat([cached, new_df]) if not new_df.empty else cached
+            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+        else:
+            merged = new_df
+
+        if merged.empty:
             return cached
-        if use_cache:
-            _save_cache(ticker, df)
-        return df
+        if use_cache and not new_df.empty:
+            _save_cache(ticker, merged)
+        return merged

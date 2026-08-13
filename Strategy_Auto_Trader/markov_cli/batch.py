@@ -158,6 +158,10 @@ def _build_argv(ticker_cfg: dict, defaults: dict) -> list[str]:
     if strategy:
         argv.extend(["--strategy", str(strategy)])
 
+    source = merged.pop("source", None)
+    if source:
+        argv.extend(["--source", str(source)])
+
     plugins = merged.pop("plugins", {})
     if isinstance(plugins, dict):
         for key, flag in (("sizer", "--plugin-sizer"), ("gate", "--plugin-gate"), ("adjuster", "--plugin-adjuster")):
@@ -211,8 +215,15 @@ def _collect_results(ticker: str) -> dict | None:
         "quality_gate_reason": quality_gate.get("reason", ""),
         "score": float(last_row.get("signal_score", 0) or 0),
         "signal_score": float(last_row.get("signal_score", 0) or 0),
+        "signal_flag": str(last_row.get("signal_flag", "") or ""),
         "regime_signal": float(last_row.get("regime_signal", 0) or 0),
+        "p_bull": float(last_row.get("p_bull", 0) or 0),
+        "p_bull_smooth": float(last_row.get("p_bull_smooth", 0) or 0),
+        "hmm_vote": int(last_row["hmm_vote"]) if pd.notna(last_row.get("hmm_vote")) else None,
         "rsi": float(last_row.get("rsi", 0) or 0),
+        "above_sma20": bool(last_row.get("above_sma20", False)),
+        "above_sma50": bool(last_row.get("above_sma50", False)),
+        "above_sma200": (bool(last_row["above_sma200"]) if pd.notna(last_row.get("above_sma200")) else None),
         "volume_ratio": float(last_row.get("volume_ratio", 0) or 0),
         "kelly_fraction": float(last_row.get("kelly_fraction", 0) or 0),
         "stop_level": float(last_row.get("stop_level", 0) or 0),

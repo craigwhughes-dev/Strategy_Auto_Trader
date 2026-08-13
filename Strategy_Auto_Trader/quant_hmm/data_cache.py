@@ -30,32 +30,34 @@ def clear_cache() -> None:
     _cache.clear()
 
 
-def fetch_hourly_cached(ticker: str, period: str = "730d"):
-    """fetch_hourly(), memoized per (ticker, period) for this process's lifetime.
+def fetch_hourly_cached(ticker: str, period: str = "730d", source: str = "yfinance"):
+    """fetch_hourly(), memoized per (ticker, period, source) for this process's
+    lifetime.
 
     A None/empty result (fetch failure) is never cached — a transient network
     error must not permanently poison every later strategy's fetch for this
     ticker, so those calls retry instead of reading a stale failure.
     """
-    key = ("hourly", ticker, period)
+    key = ("hourly", ticker, period, source)
     cached = _cache.get(key)
     if cached is None:
-        cached = fetch_hourly(ticker, period=period)
+        cached = fetch_hourly(ticker, period=period, source=source)
         if cached is not None and not cached.empty:
             _cache[key] = cached
     return cached
 
 
-def volatility_profile_cached(ticker: str, period: str = "2y"):
-    """volatility_profile(), memoized per (ticker, period) for this process's lifetime.
+def volatility_profile_cached(ticker: str, period: str = "2y", source: str = "yfinance"):
+    """volatility_profile(), memoized per (ticker, period, source) for this
+    process's lifetime.
 
     A None result (fetch/compute failure) is never cached — see
     fetch_hourly_cached's docstring for why.
     """
-    key = ("daily", ticker, period)
+    key = ("daily", ticker, period, source)
     cached = _cache.get(key)
     if cached is None:
-        cached = volatility_profile(ticker, period=period)
+        cached = volatility_profile(ticker, period=period, source=source)
         if cached is not None:
             _cache[key] = cached
     return cached

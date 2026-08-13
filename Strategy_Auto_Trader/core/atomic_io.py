@@ -7,9 +7,28 @@ import os
 import tempfile
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 _REPLACE_RETRIES = 3
 _REPLACE_RETRY_DELAY_SECONDS = 0.05
+
+
+def _atomic_replace(temp_path: str, path: Path) -> None:
+    # os.replace is atomic on Windows (unlike os.rename which can fail),
+    # but can still raise a transient PermissionError if another process
+    # (AV scanner, a reader without FILE_SHARE_DELETE) briefly holds the
+    # target file open — retry a few times before giving up.
+    for attempt in range(_REPLACE_RETRIES):
+        try:
+            os.replace(temp_path, path)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_RETRIES - 1:
+                raise
+            time.sleep(_REPLACE_RETRY_DELAY_SECONDS * (attempt + 1))
 
 
 def atomic_write_json(path: Path, obj: dict) -> None:
@@ -33,20 +52,38 @@ def atomic_write_json(path: Path, obj: dict) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(obj, f, indent=2)
-        # os.replace is atomic on Windows (unlike os.rename which can fail),
-        # but can still raise a transient PermissionError if another process
-        # (AV scanner, a reader without FILE_SHARE_DELETE) briefly holds the
-        # target file open — retry a few times before giving up.
-        for attempt in range(_REPLACE_RETRIES):
-            try:
-                os.replace(temp_path, path)
-                break
-            except PermissionError:
-                if attempt == _REPLACE_RETRIES - 1:
-                    raise
-                time.sleep(_REPLACE_RETRY_DELAY_SECONDS * (attempt + 1))
+        _atomic_replace(temp_path, path)
     except Exception:
         # Clean up temp file on failure
+        try:
+            Path(temp_path).unlink()
+        except Exception:
+            pass
+        raise
+
+
+def atomic_write_csv(path: Path, df: "pd.DataFrame") -> None:
+    """Write a DataFrame to CSV atomically (write-temp-then-rename on Windows).
+
+    Same crash-safety as atomic_write_json — a partially-written CSV must
+    never be observable. Callers like the IBKR hourly cache trust the last
+    row's timestamp to compute how much history is still missing; a torn
+    write would corrupt that into either a full re-fetch or a permanent gap.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, temp_path = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=".tmp_",
+        suffix=".csv",
+        text=False,
+    )
+
+    try:
+        os.close(fd)
+        df.to_csv(temp_path)
+        _atomic_replace(temp_path, path)
+    except Exception:
         try:
             Path(temp_path).unlink()
         except Exception:

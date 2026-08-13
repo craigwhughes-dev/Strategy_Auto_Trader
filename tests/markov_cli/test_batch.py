@@ -56,6 +56,17 @@ class TestBatch:
         argv = _build_argv({"ticker": "AAPL"}, {})
         assert "--signal-reports-only" not in argv
 
+    def test_build_argv_source_flag(self):
+        from Strategy_Auto_Trader.markov_cli.batch import _build_argv
+        argv = _build_argv({"ticker": "AAPL"}, {"source": "ibkr"})
+        idx = argv.index("--source")
+        assert argv[idx + 1] == "ibkr"
+
+    def test_build_argv_source_absent_by_default(self):
+        from Strategy_Auto_Trader.markov_cli.batch import _build_argv
+        argv = _build_argv({"ticker": "AAPL"}, {})
+        assert "--source" not in argv
+
     def test_build_argv_long_only_flag(self):
         from Strategy_Auto_Trader.markov_cli.batch import _build_argv
         cfg = {"ticker": "AAPL"}

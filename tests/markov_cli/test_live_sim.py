@@ -704,12 +704,26 @@ class TestMainCLI:
 
         gen_kwargs = mock_gen.call_args_list[0][1]
         assert gen_kwargs["workers"] == 2
+        assert gen_kwargs["source"] == "yfinance"
 
         arb_kwargs = mock_arb.call_args_list[0][1]
         assert arb_kwargs["initial_cash"] == 10_000.0
         assert arb_kwargs["trade_cost"] == 1.0
         assert "kelly_fallback" not in arb_kwargs
         assert "max_trades_per_day" not in arb_kwargs
+
+    def test_main_source_ibkr_flag_reaches_generate_candidates(self):
+        """--source ibkr must reach generate_candidates so a full-universe
+        revalidation run uses the same data the live daemon trades on."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import main
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {}, {})) as mock_gen:
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.arbitrate", return_value=dict(_EMPTY_ARBITRATE_RESULT)):
+                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
+                    main(["--tickers", "TEST", "--source", "ibkr"])
+
+        gen_kwargs = mock_gen.call_args_list[0][1]
+        assert gen_kwargs["source"] == "ibkr"
 
     def test_main_pot_sizes_sweep_calls_arbitrate_once_per_pot_size(self):
         from Strategy_Auto_Trader.markov_cli.live_sim import main

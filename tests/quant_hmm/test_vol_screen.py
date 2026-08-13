@@ -65,6 +65,32 @@ class TestVolScreen:
         with mock.patch("yfinance.download", side_effect=Exception("network error")):
             assert volatility_profile("TEST") is None
 
+    def test_volatility_profile_source_ibkr_resamples_hourly_cache(self):
+        """source="ibkr" derives daily OHLC from quant_engine.fetch_hourly's
+        cache via resample, instead of a second separate daily fetch."""
+        from Strategy_Auto_Trader.quant_hmm.vol_screen import volatility_profile
+        n = 300
+        close = np.linspace(100.0, 200.0, n)
+        idx = pd.date_range("2022-01-01", periods=n, freq="D", tz="UTC")
+        hourly_like = pd.DataFrame({
+            "Open": close, "High": close + 1.0, "Low": close - 1.0,
+            "Close": close, "Volume": np.full(n, 1_000_000.0),
+        }, index=idx)
+        with mock.patch("Strategy_Auto_Trader.quant_hmm.quant_engine.fetch_hourly",
+                        return_value=hourly_like) as mock_fetch, \
+             mock.patch("yfinance.download") as mock_yf:
+            profile = volatility_profile("TEST", source="ibkr")
+        mock_fetch.assert_called_once_with("TEST", period="2y", source="ibkr")
+        mock_yf.assert_not_called()
+        assert profile is not None
+        assert profile["efficiency_ratio"] > 0.95
+
+    def test_volatility_profile_source_ibkr_no_data_returns_none(self):
+        from Strategy_Auto_Trader.quant_hmm.vol_screen import volatility_profile
+        with mock.patch("Strategy_Auto_Trader.quant_hmm.quant_engine.fetch_hourly",
+                        return_value=None):
+            assert volatility_profile("TEST", source="ibkr") is None
+
     def test_screen_tickers_filters_by_trend_quality(self):
         from Strategy_Auto_Trader.quant_hmm import vol_screen as vs
 

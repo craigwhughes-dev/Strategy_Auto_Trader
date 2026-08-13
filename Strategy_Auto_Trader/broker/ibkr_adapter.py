@@ -1,4 +1,4 @@
-"""IBKR execution adapter via ib_insync.
+"""IBKR execution adapter via ib_async.
 
 Connects to Interactive Brokers TWS or IB Gateway.
 Default port 7497 = paper trading account in TWS.
@@ -20,9 +20,9 @@ logger = logging.getLogger(__name__)
 
 
 class IBKRAdapter:
-    """Wraps ib_insync for order placement and position queries.
+    """Wraps ib_async for order placement and position queries.
 
-    ib_insync is imported lazily so the rest of the package works even if
+    ib_async is imported lazily so the rest of the package works even if
     it is not installed (NullBroker / --dry-run does not need it).
     """
 
@@ -38,18 +38,18 @@ class IBKRAdapter:
         self._port = port
         self._client_id = client_id
         self._timeout = timeout
-        # ib_insync's default connect timeout (4s) is too tight for a busy
+        # ib_async's default connect timeout (4s) is too tight for a busy
         # TWS; its handshake is also known to time out transiently.
         self._connect_timeout = connect_timeout
         self._ib = None
 
     def connect(self) -> None:
-        """Connect to TWS / IB Gateway. Raises RuntimeError if ib_insync is missing."""
+        """Connect to TWS / IB Gateway. Raises RuntimeError if ib_async is missing."""
         try:
-            from ib_insync import IB
+            from ib_async import IB
         except ImportError as exc:
             raise RuntimeError(
-                "ib_insync is not installed. Run: uv add ib_insync"
+                "ib_async is not installed. Run: uv add ib_async"
             ) from exc
         self._ib = IB()
         self._ib.connect(self._host, self._port, clientId=self._client_id,
@@ -79,7 +79,7 @@ class IBKRAdapter:
 
     def get_last_price(self, ticker: str) -> float:
         """Return last traded / midpoint price (pence for LSE tickers)."""
-        from ib_insync import Stock
+        from ib_async import Stock
         contract = Stock(*ibkr_contract_params(ticker))
         self._ib.qualifyContracts(contract)
         tdata = self._ib.reqMktData(contract, "", True, False)
@@ -103,7 +103,7 @@ class IBKRAdapter:
             )
 
         try:
-            from ib_insync import Stock, MarketOrder
+            from ib_async import Stock, MarketOrder
             contract = Stock(*ibkr_contract_params(req.ticker))
             self._ib.qualifyContracts(contract)
             order = MarketOrder(req.action, req.quantity)
@@ -164,7 +164,7 @@ class IBKRAdapter:
             )
 
         try:
-            from ib_insync import Stock, StopOrder
+            from ib_async import Stock, StopOrder
             contract = Stock(*ibkr_contract_params(req.ticker))
             self._ib.qualifyContracts(contract)
             # req.stop_price is pot currency (pounds); LSE orders quote in pence.

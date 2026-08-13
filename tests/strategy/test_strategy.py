@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest import mock
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -47,6 +49,16 @@ class TestStrategy:
         entry, exit_ = resolve_strategy("default")
         assert isinstance(entry, EntryStrategyProtocol)
         assert isinstance(exit_, ExitStrategyProtocol)
+
+    def test_resolve_strategy_forwards_source_to_volatility_profile(self):
+        """When vol_filter_ok is computed (ticker given, not overridden), the
+        source param must reach volatility_profile's own fetch — otherwise
+        --source ibkr would still leave a hidden yfinance call in place."""
+        from Strategy_Auto_Trader.strategy.base.registry import resolve_strategy
+        with mock.patch("Strategy_Auto_Trader.quant_hmm.vol_screen.volatility_profile",
+                        return_value={"trend_quality": 1.0}) as mock_vp:
+            resolve_strategy("default", ticker="AAPL", source="ibkr")
+        mock_vp.assert_called_once_with("AAPL", source="ibkr")
 
     def test_resolve_strategy_conservative(self):
         from Strategy_Auto_Trader.strategy.base.registry import resolve_strategy

@@ -118,6 +118,7 @@ def execute_signals(
     buy_signals: list[tuple[str, dict]] = []
     sell_signals: list[tuple[str, dict]] = []
     hold_details: dict[str, list[str]] = {}
+    rejected_details: dict[str, list[str]] = {}
 
     for ticker in tickers:
         signal = read_latest_signal(ticker, data_dir)
@@ -155,7 +156,7 @@ def execute_signals(
         elif signal["flag"] == "SELL":
             sell_signals.append((ticker, signal))
 
-    if hold_details and not buy_signals and not sell_signals:
+    if hold_details:
         parts = []
         for bucket, details in sorted(hold_details.items(), key=lambda x: -len(x[1])):
             parts.append(f"{bucket}({', '.join(details)})={len(details)}")
@@ -169,10 +170,12 @@ def execute_signals(
         try:
             if not allow_new_entries:
                 skipped.append(f"{ticker}(new entries blocked)")
+                rejected_details.setdefault("new entries blocked", []).append(ticker)
                 resolved.add(ticker)
                 continue
             if not portfolio.can_open(ticker):
                 skipped.append(f"{ticker}(at capacity)")
+                rejected_details.setdefault("at capacity", []).append(ticker)
                 resolved.add(ticker)
                 continue
             qty = portfolio.compute_quantity(
@@ -180,6 +183,7 @@ def execute_signals(
             )
             if qty < 1:
                 skipped.append(f"{ticker}(qty=0)")
+                rejected_details.setdefault("qty=0", []).append(ticker)
                 resolved.add(ticker)
                 continue
             logger.info(f"About to place order: BUY {qty}x {ticker} — marker written")
@@ -202,6 +206,7 @@ def execute_signals(
             # Order not filled (cancelled, partially filled, etc.)
             if fill is None:
                 skipped.append(f"{ticker}(order not filled)")
+                rejected_details.setdefault("order not filled", []).append(ticker)
                 resolved.add(ticker)
                 continue
 
@@ -280,6 +285,7 @@ def execute_signals(
         try:
             if ticker not in portfolio.positions:
                 skipped.append(f"{ticker}(no position)")
+                rejected_details.setdefault("no position", []).append(ticker)
                 resolved.add(ticker)
                 continue
             qty = portfolio.positions[ticker]["quantity"]
@@ -320,6 +326,7 @@ def execute_signals(
                     elif outcome == "Error":
                         # Cancel failed; do not attempt market sell
                         skipped.append(f"{ticker}(stop cancel error)")
+                        rejected_details.setdefault("stop cancel error", []).append(ticker)
                         resolved.add(ticker)
                         continue
                     portfolio.clear_stop_order(ticker)
@@ -344,6 +351,7 @@ def execute_signals(
             # Order not filled (cancelled, partially filled, etc.)
             if fill is None:
                 skipped.append(f"{ticker}(order not filled)")
+                rejected_details.setdefault("order not filled", []).append(ticker)
                 resolved.add(ticker)
                 continue
 
@@ -363,6 +371,12 @@ def execute_signals(
                 e, buys, sells, skipped,
                 [t for t in tickers if t not in resolved]
             )
+
+    if rejected_details:
+        parts = []
+        for reason, details in sorted(rejected_details.items(), key=lambda x: -len(x[1])):
+            parts.append(f"{reason}({', '.join(details)})={len(details)}")
+        logger.info(f"  REJECTED breakdown: {', '.join(parts)}")
 
     return buys, sells, skipped
 

@@ -20,15 +20,30 @@ from ..plugins.interest import IbkrTieredInterest
 _log = logging.getLogger(__name__)
 
 
-def fetch_hourly(ticker: str, period: str = "730d") -> pd.DataFrame | None:
-    """Fetch hourly OHLCV data from yfinance."""
+def fetch_hourly(ticker: str, period: str = "730d", source: str = "yfinance") -> pd.DataFrame | None:
+    """Fetch hourly OHLCV data.
+
+    source="ibkr" tries the incremental IBKR-backed local cache first
+    (broker.ibkr_data.IBKRDataClient — pages only the gap since the last
+    cached bar, connects lazily, disconnects after). On connect failure
+    with no usable cache yet, falls through to the plain yfinance path
+    below — same resilience shape as batch.py's timeout-and-continue
+    handling. Default stays "yfinance" everywhere except the live daemon's
+    batch.py argv builder."""
+    if source == "ibkr":
+        from ..broker.ibkr_data import IBKRDataClient
+        df = IBKRDataClient().fetch_hourly(ticker, period=period)
+        if df is not None and not df.empty:
+            return df
+
     import yfinance as yf
-    try:
-        df = yf.download(ticker, period=period, interval="1h",
-                         progress=False, auto_adjust=True)
-    except Exception:
-        return None
-    if df.empty:
+    from ..core.net_retry import call_with_timeout_retry
+
+    df = call_with_timeout_retry(
+        lambda: yf.download(ticker, period=period, interval="1h",
+                            progress=False, auto_adjust=True)
+    )
+    if df is None or df.empty:
         return None
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -38,12 +53,13 @@ def fetch_hourly(ticker: str, period: str = "730d") -> pd.DataFrame | None:
 def fetch_daily(ticker: str) -> pd.DataFrame | None:
     """Fetch daily OHLCV data from yfinance (max history, ~20–30 years)."""
     import yfinance as yf
-    try:
-        df = yf.download(ticker, period="max", interval="1d",
-                         progress=False, auto_adjust=True)
-    except Exception:
-        return None
-    if df.empty:
+    from ..core.net_retry import call_with_timeout_retry
+
+    df = call_with_timeout_retry(
+        lambda: yf.download(ticker, period="max", interval="1d",
+                            progress=False, auto_adjust=True)
+    )
+    if df is None or df.empty:
         return None
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)

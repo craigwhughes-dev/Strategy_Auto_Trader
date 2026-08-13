@@ -552,6 +552,7 @@ def scan_ticker(
     vix_data: dict | None = None, data_cutoff: date | None = None,
     initial_cash: float = 20_000.0,
     fetch_fn=None, vol_profile_fn=None, backtest_fn=None,
+    source: str = "yfinance",
 ) -> dict:
     """Run one ticker end-to-end; returns its summary row. Never skips on vol.
 
@@ -563,9 +564,13 @@ def scan_ticker(
     while a market is open — cross-strategy diffs stay data-drift-free.
 
     fetch_fn/vol_profile_fn/backtest_fn are DI seams (default: the module-level
-    fetch_hourly_cached / volatility_profile_cached / consolidated_backtest)."""
-    fetch = fetch_fn if fetch_fn is not None else fetch_hourly_cached
-    vol_profile = vol_profile_fn if vol_profile_fn is not None else volatility_profile_cached
+    fetch_hourly_cached / volatility_profile_cached / consolidated_backtest).
+    source is only threaded into those module-level defaults — a caller-supplied
+    fetch_fn/vol_profile_fn (e.g. tests) is used as-is and never receives it."""
+    fetch = fetch_fn if fetch_fn is not None else (
+        lambda t, period="730d": fetch_hourly_cached(t, period=period, source=source))
+    vol_profile = vol_profile_fn if vol_profile_fn is not None else (
+        lambda t: volatility_profile_cached(t, source=source))
     backtest = backtest_fn if backtest_fn is not None else consolidated_backtest
     started = time.time()
     row: dict = {
@@ -675,7 +680,7 @@ def scan_ticker(
 def _scan_ticker_worker(
     ticker: str, strategy_name: str, trade_cost: float, sentiment: bool,
     data_cutoff: date | None = None, cost_model_name: str = "flat",
-    initial_cash: float = 20_000.0,
+    initial_cash: float = 20_000.0, source: str = "yfinance",
 ) -> dict:
     """Top-level module worker function for ProcessPoolExecutor.
 
@@ -690,6 +695,7 @@ def _scan_ticker_worker(
             trade_cost=trade_cost, cost_model_name=cost_model_name,
             sentiment=sentiment, vix_data=vix_data,
             data_cutoff=data_cutoff, initial_cash=initial_cash,
+            source=source,
         )
         return {"row": row, "traceback": None}
     except Exception as exc:
@@ -785,6 +791,9 @@ def main(argv: list[str] | None = None) -> int:
                              "'today' excludes the current (possibly still-forming) session "
                              "so comparison/reconciliation runs are immune to data drift. "
                              "Default: no cutoff.")
+    parser.add_argument("--source", choices=["yfinance", "ibkr"], default="yfinance",
+                        help="Hourly data source: yfinance (default, day-to-day research) or "
+                             "the local incremental IBKR-backed cache. Default: yfinance.")
     args = parser.parse_args(argv)
 
     if args.workers < 1:
@@ -841,7 +850,7 @@ def main(argv: list[str] | None = None) -> int:
                     trade_cost=args.trade_cost, cost_model_name=args.cost_model,
                     sentiment=not args.no_sentiment,
                     vix_data=vix_data, data_cutoff=data_cutoff,
-                    initial_cash=args.initial_cash,
+                    initial_cash=args.initial_cash, source=args.source,
                 )
             except Exception as exc:
                 row = {
@@ -868,7 +877,7 @@ def main(argv: list[str] | None = None) -> int:
                     _scan_ticker_worker,
                     ticker, args.strategy,
                     args.trade_cost, not args.no_sentiment, data_cutoff,
-                    args.cost_model, args.initial_cash,
+                    args.cost_model, args.initial_cash, args.source,
                 ): ticker
                 for ticker in tasks_to_run
             }

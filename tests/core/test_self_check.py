@@ -45,12 +45,12 @@ class TestIndividualChecks:
                 check_hmm_fit()
 
     def test_broker_module_passes(self):
-        pytest.importorskip("ib_insync")
+        pytest.importorskip("ib_async")
         msg = check_broker_module()
-        assert "ib_insync" in msg
+        assert "ib_async" in msg
 
     def test_broker_module_raises_when_missing(self):
-        with mock.patch.dict("sys.modules", {"ib_insync": None}):
+        with mock.patch.dict("sys.modules", {"ib_async": None}):
             with pytest.raises(ImportError):
                 check_broker_module()
 
@@ -103,7 +103,7 @@ class TestRunStartupChecks:
 
     def test_all_pass_returns_messages(self):
         pytest.importorskip("hmmlearn")
-        pytest.importorskip("ib_insync")
+        pytest.importorskip("ib_async")
         with mock.patch.object(self_check, "check_broker_connectivity",
                                return_value="connected (stub)"):
             passed = run_startup_checks(require_broker=True)
@@ -115,7 +115,7 @@ class TestRunStartupChecks:
 
     def test_broker_connectivity_failure_fails_startup(self):
         pytest.importorskip("hmmlearn")
-        pytest.importorskip("ib_insync")
+        pytest.importorskip("ib_async")
         with mock.patch.object(
                 self_check, "check_broker_connectivity",
                 side_effect=SelfCheckError("cannot connect to TWS")):
@@ -130,8 +130,8 @@ class TestRunStartupChecks:
 
     def test_broker_not_required_by_default(self):
         pytest.importorskip("hmmlearn")
-        with mock.patch.dict("sys.modules", {"ib_insync": None}):
-            passed = run_startup_checks()   # must not touch ib_insync
+        with mock.patch.dict("sys.modules", {"ib_async": None}):
+            passed = run_startup_checks()   # must not touch ib_async
         assert len(passed) == 2
 
     def test_failure_raises_selfcheckerror_naming_the_check(self):

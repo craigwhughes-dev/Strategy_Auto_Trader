@@ -152,11 +152,11 @@ class TestBroker:
     # -- IBKRAdapter ------------------------------------------------------------
 
     def test_ibkr_adapter_connect_passes_timeout(self):
-        pytest.importorskip("ib_insync")
+        pytest.importorskip("ib_async")
         from unittest.mock import patch, MagicMock
         from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
         adapter = IBKRAdapter(port=4002, client_id=7, connect_timeout=12.0)
-        with patch("ib_insync.IB") as MockIB:
+        with patch("ib_async.IB") as MockIB:
             adapter.connect()
         MockIB.return_value.connect.assert_called_once_with(
             "127.0.0.1", 4002, clientId=7, timeout=12.0)
@@ -170,7 +170,7 @@ class TestBroker:
         assert adapter.managed_accounts() == ["DU123456"]
 
     def test_ibkr_adapter_place_order_returns_fill_when_filled(self):
-        pytest.importorskip("ib_insync")
+        pytest.importorskip("ib_async")
         from unittest.mock import MagicMock
         from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
         from Strategy_Auto_Trader.broker.types import OrderRequest
@@ -194,7 +194,7 @@ class TestBroker:
         assert fill.ticker == "AAPL"
 
     def test_ibkr_adapter_place_order_returns_none_when_cancelled(self):
-        pytest.importorskip("ib_insync")
+        pytest.importorskip("ib_async")
         from unittest.mock import MagicMock
         from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
         from Strategy_Auto_Trader.broker.types import OrderRequest
@@ -214,7 +214,7 @@ class TestBroker:
         assert fill is None
 
     def test_ibkr_adapter_place_order_returns_none_when_partially_filled(self):
-        pytest.importorskip("ib_insync")
+        pytest.importorskip("ib_async")
         from unittest.mock import MagicMock
         from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
         from Strategy_Auto_Trader.broker.types import OrderRequest
@@ -234,7 +234,7 @@ class TestBroker:
         assert fill is None
 
     def test_ibkr_adapter_place_order_avgfillprice_populated_skips_retry_loop(self):
-        pytest.importorskip("ib_insync")
+        pytest.importorskip("ib_async")
         from unittest.mock import MagicMock
         from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
         from Strategy_Auto_Trader.broker.types import OrderRequest
@@ -255,7 +255,7 @@ class TestBroker:
         assert adapter._ib.waitOnUpdate.call_count == 1
 
     def test_ibkr_adapter_place_order_falls_back_to_fills_execution_price(self):
-        pytest.importorskip("ib_insync")
+        pytest.importorskip("ib_async")
         from unittest.mock import MagicMock
         from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
         from Strategy_Auto_Trader.broker.types import OrderRequest
@@ -280,7 +280,7 @@ class TestBroker:
         assert adapter._ib.waitOnUpdate.call_count == 1
 
     def test_ibkr_adapter_place_order_recovers_price_after_late_fill_event(self):
-        pytest.importorskip("ib_insync")
+        pytest.importorskip("ib_async")
         from unittest.mock import MagicMock
         from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
         from Strategy_Auto_Trader.broker.types import OrderRequest
@@ -312,7 +312,7 @@ class TestBroker:
         assert adapter._ib.waitOnUpdate.call_count == 2
 
     def test_ibkr_adapter_place_order_gives_up_after_bounded_retries(self):
-        pytest.importorskip("ib_insync")
+        pytest.importorskip("ib_async")
         from unittest.mock import MagicMock
         from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
         from Strategy_Auto_Trader.broker.types import OrderRequest
@@ -335,7 +335,7 @@ class TestBroker:
         assert adapter._ib.waitOnUpdate.call_count == 6
 
     def test_ibkr_adapter_get_open_positions_single_us_position(self):
-        pytest.importorskip("ib_insync")
+        pytest.importorskip("ib_async")
         from unittest.mock import MagicMock
         from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
         adapter = IBKRAdapter()
@@ -351,7 +351,7 @@ class TestBroker:
         assert positions == {"AAPL": 10}
 
     def test_ibkr_adapter_get_open_positions_single_lse_position(self):
-        pytest.importorskip("ib_insync")
+        pytest.importorskip("ib_async")
         from unittest.mock import MagicMock
         from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
         adapter = IBKRAdapter()
@@ -367,7 +367,7 @@ class TestBroker:
         assert positions == {"HSBA.L": 200}
 
     def test_ibkr_adapter_get_open_positions_cross_listed_collision_prevention(self):
-        pytest.importorskip("ib_insync")
+        pytest.importorskip("ib_async")
         from unittest.mock import MagicMock
         from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
         adapter = IBKRAdapter()
@@ -392,7 +392,7 @@ class TestBroker:
         assert positions["BP"] != positions["BP.L"]
 
     def test_ibkr_adapter_get_open_positions_lse_share_class(self):
-        pytest.importorskip("ib_insync")
+        pytest.importorskip("ib_async")
         from unittest.mock import MagicMock
         from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
         adapter = IBKRAdapter()
@@ -408,7 +408,7 @@ class TestBroker:
         assert positions == {"BT-A.L": 500}
 
     def test_ibkr_adapter_get_open_positions_excludes_zero_quantity(self):
-        pytest.importorskip("ib_insync")
+        pytest.importorskip("ib_async")
         from unittest.mock import MagicMock
         from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
         adapter = IBKRAdapter()
@@ -431,7 +431,7 @@ class TestBroker:
         assert "MSFT" not in positions
 
     def test_ibkr_adapter_get_open_positions_multiple_positions(self):
-        pytest.importorskip("ib_insync")
+        pytest.importorskip("ib_async")
         from unittest.mock import MagicMock
         from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
         adapter = IBKRAdapter()
@@ -673,7 +673,7 @@ class TestBroker:
         wl = tmp_path / "watchlist.json"
         self._make_watchlist(wl, ["AAPL"])
         with patch("Strategy_Auto_Trader.core.self_check.run_startup_checks",
-                   side_effect=SelfCheckError("ib_insync broken")):
+                   side_effect=SelfCheckError("ib_async broken")):
             rc = main([
                 "--data-dir", str(tmp_path),
                 "--watchlist", str(wl),

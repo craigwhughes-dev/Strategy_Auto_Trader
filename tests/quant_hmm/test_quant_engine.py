@@ -105,6 +105,35 @@ class TestQuantEngine:
             df = fetch_hourly("TEST")
         assert not isinstance(df.columns, pd.MultiIndex)
 
+    def test_fetch_hourly_source_ibkr_uses_client(self):
+        """source="ibkr" must go through IBKRDataClient, not yfinance."""
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import fetch_hourly
+        idx = pd.date_range("2024-01-01", periods=5, freq="h", tz="UTC")
+        fake_df = pd.DataFrame({"Open": 1.0, "High": 1.0, "Low": 1.0,
+                                 "Close": 1.0, "Volume": 1000.0}, index=idx)
+        with mock.patch("Strategy_Auto_Trader.broker.ibkr_data.IBKRDataClient.fetch_hourly",
+                        return_value=fake_df) as mock_fetch, \
+             mock.patch("yfinance.download") as mock_yf:
+            df = fetch_hourly("TEST", source="ibkr")
+        mock_fetch.assert_called_once()
+        mock_yf.assert_not_called()
+        assert len(df) == 5
+
+    def test_fetch_hourly_source_ibkr_falls_back_to_yfinance(self):
+        """source="ibkr" with no connection and no cache (IBKRDataClient
+        returns None) must fall through to the plain yfinance path, not
+        propagate the failure — same resilience shape as a TWS outage."""
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import fetch_hourly
+        idx = pd.date_range("2024-01-01", periods=3, freq="h")
+        fake_df = pd.DataFrame({"Open": 1.0, "High": 1.0, "Low": 1.0,
+                                 "Close": 1.0, "Volume": 1000.0}, index=idx)
+        with mock.patch("Strategy_Auto_Trader.broker.ibkr_data.IBKRDataClient.fetch_hourly",
+                        return_value=None), \
+             mock.patch("yfinance.download", return_value=fake_df) as mock_yf:
+            df = fetch_hourly("TEST", source="ibkr")
+        mock_yf.assert_called_once()
+        assert len(df) == 3
+
     # -- hmm_regime_probabilities / _forward_step_incremental ---------------
 
     def test_hmm_regime_probabilities_shape_and_bounds(self):

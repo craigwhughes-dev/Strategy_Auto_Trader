@@ -65,6 +65,7 @@ def resolve_strategy(
     min_trend_quality: float = 0.0,
     entry_overrides: dict | None = None,
     exit_overrides: dict | None = None,
+    source: str = "yfinance",
 ) -> tuple[object, object]:
     """Instantiate the entry and exit classes for a named strategy.
 
@@ -91,6 +92,11 @@ def resolve_strategy(
     degrade, since nothing in this codebase applies one override set across
     varying --strategy values today.
 
+    source is forwarded to volatility_profile's own fetch when computing the
+    vol-filter check — must match whatever source the caller's own hourly
+    fetch used, or the filter would silently evaluate a different data source
+    than the one the strategy is actually trading on.
+
     Returns (entry_instance, exit_instance).
     Raises KeyError for unknown names.
     """
@@ -104,7 +110,7 @@ def resolve_strategy(
         vol_filter_ok = True
         if ticker is not None:
             from ...quant_hmm.vol_screen import volatility_profile
-            prof = volatility_profile(ticker)
+            prof = volatility_profile(ticker, source=source)
             if prof is not None:
                 vol_filter_ok = prof["trend_quality"] >= min_trend_quality
 

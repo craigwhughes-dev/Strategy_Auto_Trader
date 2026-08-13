@@ -514,6 +514,52 @@ class TestDataCutoff:
             full_scan.main(["--tickers", "AAA", "--data-cutoff", "not-a-date"])
 
 
+class TestScanTickerSource:
+    """scan_ticker's source param must reach the default fetch/vol_profile
+    functions, but a caller-supplied fetch_fn/vol_profile_fn (DI seam, used
+    by TestDataCutoff above) must be used as-is and never receive it."""
+
+    def test_source_reaches_default_fetch_and_vol_profile(self, monkeypatch):
+        df = _price_df(72)
+        fetch_calls = []
+        vol_calls = []
+        monkeypatch.setattr(full_scan, "fetch_hourly_cached",
+                            lambda t, period="730d", source="yfinance":
+                                fetch_calls.append(source) or df)
+        monkeypatch.setattr(full_scan, "volatility_profile_cached",
+                            lambda t, source="yfinance":
+                                vol_calls.append(source) or {"trend_quality": 0.5})
+
+        full_scan.scan_ticker("TEST", "default", sentiment=False, source="ibkr")
+
+        assert fetch_calls == ["ibkr"]
+        assert vol_calls == ["ibkr"]
+
+    def test_default_source_is_yfinance(self, monkeypatch):
+        df = _price_df(72)
+        fetch_calls = []
+        monkeypatch.setattr(full_scan, "fetch_hourly_cached",
+                            lambda t, period="730d", source="yfinance":
+                                fetch_calls.append(source) or df)
+        monkeypatch.setattr(full_scan, "volatility_profile_cached",
+                            lambda t, source="yfinance": {"trend_quality": 0.5})
+
+        full_scan.scan_ticker("TEST", "default", sentiment=False)
+
+        assert fetch_calls == ["yfinance"]
+
+    def test_di_seam_fetch_fn_bypasses_source(self):
+        """A caller-supplied fetch_fn is called as-is — source is only baked
+        into the module-level defaults, never forced onto an override."""
+        df = _price_df(72)
+        row = full_scan.scan_ticker(
+            "TEST", "default", sentiment=False, source="ibkr",
+            fetch_fn=lambda t, period="730d": df,
+            vol_profile_fn=lambda t: None,
+        )
+        assert row["bars_fetched"] == 72
+
+
 class TestScanTickerWorkerError:
     """Tests for _scan_ticker_worker error handling and payload structure."""
 
@@ -521,8 +567,8 @@ class TestScanTickerWorkerError:
         """Test that _scan_ticker_worker returns error payload with expected keys."""
         # Mock fetch to return valid data so resolve_strategy is reached.
         df = _price_df(100)
-        monkeypatch.setattr(full_scan, "fetch_hourly_cached", lambda t, period: df)
-        monkeypatch.setattr(full_scan, "volatility_profile_cached", lambda t: {"trend_quality": 0.5})
+        monkeypatch.setattr(full_scan, "fetch_hourly_cached", lambda t, period="730d", source="yfinance": df)
+        monkeypatch.setattr(full_scan, "volatility_profile_cached", lambda t, source="yfinance": {"trend_quality": 0.5})
         # Mock resolve_strategy to raise for nonexistent strategy.
         monkeypatch.setattr(
             full_scan, "resolve_strategy",
@@ -539,8 +585,8 @@ class TestScanTickerWorkerError:
     def test_error_row_aligns_with_summary_columns(self, monkeypatch):
         """Test that error row can be safely reindexed to _SUMMARY_COLUMNS."""
         df = _price_df(100)
-        monkeypatch.setattr(full_scan, "fetch_hourly_cached", lambda t, period: df)
-        monkeypatch.setattr(full_scan, "volatility_profile_cached", lambda t: {"trend_quality": 0.5})
+        monkeypatch.setattr(full_scan, "fetch_hourly_cached", lambda t, period="730d", source="yfinance": df)
+        monkeypatch.setattr(full_scan, "volatility_profile_cached", lambda t, source="yfinance": {"trend_quality": 0.5})
         monkeypatch.setattr(
             full_scan, "resolve_strategy",
             lambda name, vol_filter_ok: (_ for _ in ()).throw(RuntimeError("test error"))

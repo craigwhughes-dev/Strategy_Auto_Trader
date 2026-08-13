@@ -404,6 +404,11 @@ def main(argv: list[str] | None = None) -> int:
                         default=False,
                         help="Normalise volume ratio by same-hour-of-day trailing mean instead of "
                              "flat rolling-20 mean. Off by default; not enabled in live daemon.")
+    parser.add_argument("--source", choices=["yfinance", "ibkr"], default="yfinance",
+                        help="Hourly data source for every ticker in this run: yfinance (default, "
+                             "day-to-day research) or the local incremental IBKR-backed cache "
+                             "(use for a full-universe revalidation against the data the live "
+                             "daemon actually trades on — see the IBKR migration plan).")
     args = parser.parse_args(argv)
 
     if bool(args.tickers) == bool(args.universe):
@@ -416,7 +421,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Live simulation: {len(args.tickers)} tickers x {len(args.strategies)} strategies "
           f"x {len(pot_sizes)} pot size(s)")
     print(f"  start={args.start_date}  pot_sizes={pot_sizes}  "
-          f"trade_cost=£{args.trade_cost:.2f}  workers={args.workers}")
+          f"trade_cost=£{args.trade_cost:.2f}  workers={args.workers}  source={args.source}")
     if args.vol_filter_exempt:
         print(f"  vol-filter-exempt strategies: {', '.join(args.vol_filter_exempt)}")
 
@@ -443,6 +448,7 @@ def main(argv: list[str] | None = None) -> int:
             vol_filter_ok=True,
             workers=args.workers,
             use_seasonal_volume=args.seasonal_volume,
+            source=args.source,
         )
 
         cutoff = pd.Timestamp(args.start_date)

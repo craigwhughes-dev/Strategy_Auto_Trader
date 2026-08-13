@@ -70,8 +70,8 @@ def check_hmm_fit() -> str:
 def check_broker_module() -> str:
     """Verify the IBKR client library is importable (connection is checked
     separately at connect time, since TWS may legitimately start later)."""
-    import ib_insync
-    return f"ib_insync {ib_insync.__version__} importable"
+    import ib_async
+    return f"ib_async {ib_async.__version__} importable"
 
 
 def check_broker_connectivity(
@@ -84,7 +84,7 @@ def check_broker_connectivity(
     """Connect to TWS / IB Gateway and query the session's accounts.
 
     Uses its own client id so it never collides with the trading
-    connection. Retries once because the ib_insync handshake is known to
+    connection. Retries once because the ib_async handshake is known to
     time out transiently even when TWS is healthy.
     Times out after 20 seconds to prevent daemon from hanging at startup.
     """
@@ -162,7 +162,7 @@ def run_startup_checks(
 ) -> list[str]:
     """Run applicable checks; raise SelfCheckError listing every failure.
 
-    require_broker adds both the ib_insync import check and a real
+    require_broker adds both the ib_async import check and a real
     connect-and-query against TWS/Gateway — a process configured to place
     real orders must not start unless the broker is actually reachable.
 

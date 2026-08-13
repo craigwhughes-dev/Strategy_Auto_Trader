@@ -1,4 +1,4 @@
-"""Tests for atomic_io.py — atomic JSON writes."""
+"""Tests for atomic_io.py — atomic JSON and CSV writes."""
 
 from __future__ import annotations
 
@@ -6,9 +6,10 @@ import json
 from pathlib import Path
 from unittest import mock
 
+import pandas as pd
 import pytest
 
-from Strategy_Auto_Trader.core.atomic_io import atomic_write_json
+from Strategy_Auto_Trader.core.atomic_io import atomic_write_csv, atomic_write_json
 
 
 def test_atomic_write_json_creates_file(tmp_path):
@@ -160,3 +161,64 @@ def test_atomic_write_json_encoding_utf8(tmp_path):
     loaded = json.loads(text)
     assert loaded["unicode"] == "café"
     assert loaded["emoji"] == "🚀"
+
+
+def _sample_df() -> pd.DataFrame:
+    idx = pd.date_range("2026-01-01", periods=3, freq="h", tz="UTC")
+    return pd.DataFrame(
+        {"Open": [1.0, 2.0, 3.0], "Close": [1.5, 2.5, 3.5]}, index=idx)
+
+
+def test_atomic_write_csv_creates_file(tmp_path):
+    path = tmp_path / "test.csv"
+    df = _sample_df()
+
+    atomic_write_csv(path, df)
+
+    assert path.exists()
+    loaded = pd.read_csv(path, index_col=0, parse_dates=True)
+    assert list(loaded["Close"]) == [1.5, 2.5, 3.5]
+
+
+def test_atomic_write_csv_replaces_existing(tmp_path):
+    path = tmp_path / "test.csv"
+    path.write_text("garbage,not,a,real,csv\n", encoding="utf-8")
+
+    atomic_write_csv(path, _sample_df())
+
+    loaded = pd.read_csv(path, index_col=0, parse_dates=True)
+    assert list(loaded["Close"]) == [1.5, 2.5, 3.5]
+
+
+def test_atomic_write_csv_creates_parent_dirs(tmp_path):
+    path = tmp_path / "deep" / "nested" / "dir" / "test.csv"
+
+    atomic_write_csv(path, _sample_df())
+
+    assert path.exists()
+
+
+def test_atomic_write_csv_target_untouched_on_replace_failure(tmp_path, monkeypatch):
+    """A crash/failure during the atomic replace must never leave a torn or
+    corrupted target file — callers like the IBKR hourly cache trust the
+    last row's timestamp to compute the next gap-fill, so a partial write
+    would either force a full re-fetch or leave a permanent hole."""
+    path = tmp_path / "test.csv"
+    original_df = _sample_df()
+    atomic_write_csv(path, original_df)
+    original_bytes = path.read_bytes()
+
+    def always_fails(src, dst):
+        raise OSError("Simulated replace failure")
+
+    monkeypatch.setattr("os.replace", always_fails)
+
+    new_df = pd.DataFrame(
+        {"Open": [99.0], "Close": [99.0]},
+        index=pd.date_range("2026-06-01", periods=1, tz="UTC"))
+    with pytest.raises(OSError, match="Simulated replace failure"):
+        atomic_write_csv(path, new_df)
+
+    assert path.read_bytes() == original_bytes
+    temp_files = list(tmp_path.glob(".tmp_*"))
+    assert len(temp_files) == 0

@@ -15,7 +15,9 @@ dependencies = [
 
 [project.optional-dependencies]
 hmm = ["hmmlearn>=0.3"]
-ibkr = ["ib_insync>=0.9"]
+ibkr = [
+    "ib-async>=1.0",
+]
 
 [dependency-groups]
 dev = ["pytest>=8"]
