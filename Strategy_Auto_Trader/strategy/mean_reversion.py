@@ -66,6 +66,8 @@ class MeanReversionEntry:
     #: overnight_scope.py's stage-1 screen inverts to keep those tickers
     #: instead of excluding them when the market's strategy sets this.
     wants_low_trend_quality: bool = True
+    require_flip_entry: bool = True
+    volume_min_ratio: float = 1.0
 
     def __init__(
         self,
@@ -171,6 +173,7 @@ class MeanReversionExit:
     _target: float = 0.08
     use_kelly: bool = True
     kelly_lookback: int = 20
+    min_hold_bars: int = 48
 
     def __init__(
         self,

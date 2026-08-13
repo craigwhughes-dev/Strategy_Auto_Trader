@@ -394,6 +394,71 @@ class TestQuantEngine:
         assert abs(ratio[-1] - expected) < 1e-9
         assert ratio[-1] > 1.5  # clearly above-average volume
 
+    # -- _compute_seasonal_volume_ratio -----------------------------------------
+
+    def test_seasonal_ratio_flat_volume_returns_ones(self):
+        """Constant volume at every hour → seasonal ratio ≈ 1.0 everywhere."""
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _compute_seasonal_volume_ratio
+        idx = pd.date_range("2024-01-02 09:00", periods=480, freq="1h", tz="UTC")
+        vol = pd.Series(np.ones(480) * 1000.0, index=idx)
+        ratio = _compute_seasonal_volume_ratio(vol, lookback_periods=20)
+        np.testing.assert_allclose(ratio, 1.0, atol=1e-9)
+
+    def test_seasonal_ratio_flattens_intraday_spike(self):
+        """Morning bars 3× volume, midday bars 0.5×; seasonal ratio should be
+        near 1.0 for all hours (not the 3.0/0.5 the flat ratio would give)."""
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _compute_seasonal_volume_ratio
+        # 20 days × 8 hours: hours 9-13 each with distinct volume levels
+        n_days = 25
+        hours = [9, 10, 11, 12, 13, 14, 15, 16]
+        hour_vol = {9: 3000.0, 10: 2000.0, 11: 500.0, 12: 500.0,
+                    13: 500.0, 14: 2000.0, 15: 3000.0, 16: 2500.0}
+        timestamps, volumes = [], []
+        for d in range(n_days):
+            date = pd.Timestamp("2024-01-02", tz="UTC") + pd.Timedelta(days=d)
+            for h in hours:
+                timestamps.append(date.replace(hour=h))
+                volumes.append(hour_vol[h])
+        vol = pd.Series(volumes, index=pd.DatetimeIndex(timestamps))
+        ratio = _compute_seasonal_volume_ratio(vol, lookback_periods=20)
+        # After enough same-hour history, each bar's ratio should be ≈ 1.0
+        # (last day = last 8 bars, indices -8..-1)
+        last_day_ratios = ratio[-8:]
+        np.testing.assert_allclose(last_day_ratios, 1.0, atol=0.05)
+
+    def test_seasonal_ratio_len_matches_input(self):
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _compute_seasonal_volume_ratio
+        idx = pd.date_range("2024-01-02 09:00", periods=200, freq="1h", tz="UTC")
+        vol = pd.Series(np.random.default_rng(42).uniform(500, 2000, 200), index=idx)
+        ratio = _compute_seasonal_volume_ratio(vol, lookback_periods=20)
+        assert len(ratio) == 200
+
+    def test_seasonal_ratio_all_finite(self):
+        """No NaN or Inf in the output."""
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _compute_seasonal_volume_ratio
+        idx = pd.date_range("2024-01-02 09:00", periods=300, freq="1h", tz="UTC")
+        vol = pd.Series(np.random.default_rng(7).uniform(100, 5000, 300), index=idx)
+        ratio = _compute_seasonal_volume_ratio(vol, lookback_periods=20)
+        assert np.all(np.isfinite(ratio))
+
+    def test_seasonal_ratio_first_occurrence_uses_fallback(self):
+        """Very first bar of each hour has no prior same-hour history.
+        Should still return a finite, positive ratio (not NaN/0/crash)."""
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import _compute_seasonal_volume_ratio
+        # Only 5 hours total — every bar is first of its hour
+        idx = pd.DatetimeIndex([
+            pd.Timestamp("2024-01-02 09:00", tz="UTC"),
+            pd.Timestamp("2024-01-02 10:00", tz="UTC"),
+            pd.Timestamp("2024-01-02 11:00", tz="UTC"),
+            pd.Timestamp("2024-01-02 12:00", tz="UTC"),
+            pd.Timestamp("2024-01-02 13:00", tz="UTC"),
+        ])
+        vol = pd.Series([1000.0, 2000.0, 500.0, 500.0, 1500.0], index=idx)
+        ratio = _compute_seasonal_volume_ratio(vol, lookback_periods=20)
+        assert len(ratio) == 5
+        assert np.all(np.isfinite(ratio))
+        assert np.all(ratio > 0)
+
     # -- _sharpe / _max_dd -------------------------------------------------------
 
     def test_sharpe_zero_std_returns_nan(self):

@@ -119,6 +119,9 @@ class ChoppyVolEntry:
     #: overnight_scope.py's stage-1 screen inverts to keep those tickers
     #: instead of excluding them when the market's strategy sets this.
     wants_low_trend_quality: bool = True
+    require_flip_entry: bool = True
+    require_vol_filter_ok: bool = True
+    volume_min_ratio: float = 1.0
 
     def __init__(self, vol_filter_ok: bool = True) -> None:
         """vol_filter_ok is accepted only for registry constructor-signature

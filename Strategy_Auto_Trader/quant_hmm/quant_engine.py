@@ -246,6 +246,46 @@ def _compute_volume_ratio(volume: np.ndarray | None, n: int, lookback: int = 100
         return np.where(vol_avg > 0, volume / vol_avg, 1.0)
 
 
+def _compute_seasonal_volume_ratio(
+    volume: pd.Series,
+    lookback_periods: int = 20,
+    flat_lookback: int = 20,
+) -> np.ndarray:
+    """Volume ratio normalised by same-hour-of-day trailing mean.
+
+    For each bar, divides current volume by the trailing mean of volume at the
+    same hour across `lookback_periods` prior occurrences (~20 trading days for
+    a given hour, matching the existing flat rolling-20 baseline). Falls back to
+    the flat `flat_lookback`-bar rolling mean for bars where the same-hour
+    history is shallow (first few days of data per hour slot).
+
+    Requires a DatetimeIndex on `volume` to extract hour-of-day.
+    """
+    result = np.ones(len(volume), dtype=float)
+    hours = volume.index.hour
+    flat_avg = volume.rolling(flat_lookback, min_periods=1).mean()
+
+    for h in range(24):
+        mask = np.where(hours == h)[0]
+        if len(mask) == 0:
+            continue
+        h_vol = volume.iloc[mask].values.astype(float)
+        h_avg = pd.Series(h_vol).rolling(lookback_periods, min_periods=1).mean().values
+        with np.errstate(divide="ignore", invalid="ignore"):
+            h_ratio = np.where(h_avg > 0, h_vol / h_avg, 1.0)
+        # Fall back to flat rolling where same-hour avg is zero/missing
+        flat_at_mask = flat_avg.iloc[mask].values
+        with np.errstate(divide="ignore", invalid="ignore"):
+            flat_ratio = np.where(
+                np.isfinite(flat_at_mask) & (flat_at_mask > 0),
+                h_vol / flat_at_mask,
+                1.0,
+            )
+        result[mask] = np.where(h_avg > 0, h_ratio, flat_ratio)
+
+    return result
+
+
 # Annualise: assume ~1700 trading hours/year
 _HOURS_PER_YEAR = 1700
 # Sortino needs enough negative-return bars for a stable downside-deviation

@@ -357,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="Use the full S&P 500 + FTSE 100 universe (config/universe_sp_ftse.json) "
                              "instead of --tickers.")
     parser.add_argument("--strategies", nargs="+", default=["default", "conservative", "trend"])
-    parser.add_argument("--start-date", default="2026-01-12")
+    parser.add_argument("--start-date", default="2000-01-01")
     parser.add_argument("--initial-cash", type=float, default=10_000.0,
                         help="Pot size per strategy. Ignored if --pot-sizes is given.")
     parser.add_argument("--pot-sizes", type=float, nargs="+", default=None,
@@ -400,6 +400,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="Path to write the per-(strategy,pot_size,date) equity-curve CSV "
                              "(default: data/journals/live_sim_position_summary_<timestamp>.csv). "
                              "Additive output — does not change --journal's default path/format.")
+    parser.add_argument("--seasonal-volume", dest="seasonal_volume", action="store_true",
+                        default=False,
+                        help="Normalise volume ratio by same-hour-of-day trailing mean instead of "
+                             "flat rolling-20 mean. Off by default; not enabled in live daemon.")
     args = parser.parse_args(argv)
 
     if bool(args.tickers) == bool(args.universe):
@@ -438,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
             # rescreen below.
             vol_filter_ok=True,
             workers=args.workers,
+            use_seasonal_volume=args.seasonal_volume,
         )
 
         cutoff = pd.Timestamp(args.start_date)

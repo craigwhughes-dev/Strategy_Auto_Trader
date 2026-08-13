@@ -36,6 +36,9 @@ def main(argv: list[str] | None = None) -> int:
         "--tickers",
         help="Comma-separated pre-filtered ticker list. If omitted, loads the full S&P500+FTSE universe.",
     )
+    parser.add_argument("--seasonal-volume", dest="seasonal_volume", action="store_true",
+                        default=False,
+                        help="Normalise volume ratio by same-hour-of-day trailing mean.")
     args = parser.parse_args(argv)
 
     if args.tickers:
@@ -49,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
         win_rate_weight=args.win_rate_weight,
         lookback_days=args.lookback_days,
         workers=args.workers,
+        use_seasonal_volume=args.seasonal_volume,
     )
 
     output_path = Path(args.output)

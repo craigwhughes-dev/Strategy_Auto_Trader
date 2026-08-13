@@ -508,6 +508,58 @@ def test_screen_market_top_k_filter_open_position_exempt():
         assert "NOT_TOP_K" in result["kept"]
 
 
+def test_screen_market_strategy_opt_out_skips_vol_screen_stage1():
+    """A strategy with skip_overnight_vol_screen=True bypasses stage-1 even
+    when vol_screen.enabled=True in config — strategy opt-out always wins."""
+    market_cfg = {
+        "watchlist": "config/watchlist.json",
+        "defaults": {"strategy": "optimised_new"},
+        "vol_screen": {"enabled": True, "min_trend_quality": 0.5, "period": "2y"},
+        "exempt_if_open_position": True,
+    }
+
+    with mock.patch("Strategy_Auto_Trader.quant_hmm.vol_screen.screen_tickers") as mock_vol:
+        with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_watchlist") as mock_wl:
+            mock_wl.return_value = {
+                "tickers": [{"ticker": "TICKER_A"}, {"ticker": "TICKER_B"}]
+            }
+
+            result = overnight_scope.screen_market("test", market_cfg, {})
+
+            mock_vol.assert_not_called()
+            assert "TICKER_A" in result["kept"]
+            assert "TICKER_B" in result["kept"]
+            assert result["excluded"] == []
+
+
+def test_screen_market_strategy_opt_out_still_applies_top_k_filter():
+    """Stage-2 top-K filter still applies even when stage-1 is opted out."""
+    market_cfg = {
+        "watchlist": "config/watchlist.json",
+        "defaults": {"strategy": "optimised_new"},
+        "vol_screen": {"enabled": True, "min_trend_quality": 0.5, "period": "2y"},
+        "exempt_if_open_position": True,
+    }
+
+    with mock.patch("Strategy_Auto_Trader.quant_hmm.vol_screen.screen_tickers") as mock_vol:
+        with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_watchlist") as mock_wl:
+            mock_wl.return_value = {
+                "tickers": [{"ticker": "IN_TOP_K"}, {"ticker": "NOT_TOP_K"}]
+            }
+
+            result = overnight_scope.screen_market(
+                "test", market_cfg, {}, global_top_k={"IN_TOP_K"}
+            )
+
+            mock_vol.assert_not_called()
+            assert "IN_TOP_K" in result["kept"]
+            assert "NOT_TOP_K" not in result["kept"]
+            assert any(
+                e["ticker"] == "NOT_TOP_K" and e["reason"] == "top_k_screen"
+                for e in result["excluded"]
+            )
+
+
 def test_screen_market_top_k_none_is_noop():
     """global_top_k=None (disabled) must produce identical kept list to
     calling without the parameter at all — regression guard, since this is

@@ -144,6 +144,7 @@ def filter_candidates_by_top_tickers(
 
 def run_ticker_backtest(
     ticker: str, strategy_name: str, vol_filter_ok: bool = True,
+    use_seasonal_volume: bool = False,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """Fetch data and run one ticker's full-history backtest.
 
@@ -177,6 +178,7 @@ def run_ticker_backtest(
         context_adjuster=SentimentAdjuster(),
         entry_strategy=entry_s,
         exit_strategy=exit_s,
+        use_seasonal_volume=use_seasonal_volume,
     )
     regime_model.save()
     detail = bt.get("detail", pd.DataFrame())
@@ -221,6 +223,7 @@ def candidates_from_detail(
 
 def fetch_and_extract(
     ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True,
+    use_seasonal_volume: bool = False,
 ) -> list[Candidate]:
     """Run one ticker's full-history backtest and extract its round-trip trades.
 
@@ -228,7 +231,8 @@ def fetch_and_extract(
     (baked into every Entry class) — this is a bool, not a re-lookup, since
     the caller has usually already screened the ticker once (efficiency).
     """
-    detail, _df = run_ticker_backtest(ticker, strategy_name, vol_filter_ok)
+    detail, _df = run_ticker_backtest(ticker, strategy_name, vol_filter_ok,
+                                      use_seasonal_volume=use_seasonal_volume)
     if detail is None:
         print(f"  {ticker}: no data or insufficient data, skipping")
         return []
@@ -237,13 +241,15 @@ def fetch_and_extract(
 
 def fetch_extract_and_prices(
     ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True,
+    use_seasonal_volume: bool = False,
 ) -> tuple[list[Candidate], pd.Series | None, pd.Series | None]:
     """Like fetch_and_extract, but also returns the ticker's close-price series
     (for mark-to-market valuation) and its rolling trend_quality series (for
     daily vol-filter rescreening — see rolling_trend_quality()'s docstring for
     why a single "as of today" snapshot can't be used across a historical
     backtest). Top-level function so it's picklable for ProcessPoolExecutor."""
-    detail, df = run_ticker_backtest(ticker, strategy_name, vol_filter_ok)
+    detail, df = run_ticker_backtest(ticker, strategy_name, vol_filter_ok,
+                                     use_seasonal_volume=use_seasonal_volume)
     if detail is None:
         return [], None, None
     candidates = candidates_from_detail(ticker, detail, strategy_name, vol_filter_tag)
@@ -257,6 +263,7 @@ def generate_candidates(
     vol_filter_tag: str = "suitable",
     vol_filter_ok: bool = True,
     workers: int = 1,
+    use_seasonal_volume: bool = False,
 ) -> tuple[list[Candidate], dict[str, pd.Series], dict[str, pd.Series]]:
     """Generate one strategy's candidate trades across a ticker list, optionally
     in parallel, retaining each ticker's close-price series (mark-to-market)
@@ -271,7 +278,8 @@ def generate_candidates(
     if workers > 1 and len(tickers) > 1:
         with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(fetch_extract_and_prices, t, strategy_name, vol_filter_tag, vol_filter_ok): t
+                executor.submit(fetch_extract_and_prices, t, strategy_name, vol_filter_tag,
+                                vol_filter_ok, use_seasonal_volume): t
                 for t in tickers
             }
             for future in as_completed(futures):
@@ -284,7 +292,8 @@ def generate_candidates(
                     trend_quality_by_ticker[ticker] = trend_quality
     else:
         for ticker in tickers:
-            cands, close, trend_quality = fetch_extract_and_prices(ticker, strategy_name, vol_filter_tag, vol_filter_ok)
+            cands, close, trend_quality = fetch_extract_and_prices(
+                ticker, strategy_name, vol_filter_tag, vol_filter_ok, use_seasonal_volume)
             all_candidates.extend(cands)
             if close is not None:
                 price_by_ticker[ticker] = close
@@ -302,6 +311,7 @@ def rank_universe(
     win_rate_weight: float = 0.3,
     lookback_days: int = 60,
     workers: int = 4,
+    use_seasonal_volume: bool = False,
 ) -> dict[str, float]:
     """Backtest every ticker in `tickers` and return {ticker: hybrid_score} "as
     of today" (the median-of-candidate-day score across each ticker's own full
@@ -317,6 +327,7 @@ def rank_universe(
     """
     candidates, _price_by_ticker, trend_quality_by_ticker = generate_candidates(
         tickers, strategy_name, vol_filter_ok=True, workers=workers,
+        use_seasonal_volume=use_seasonal_volume,
     )
     _, ticker_scores = filter_candidates_by_top_tickers(
         candidates, trend_quality_by_ticker, top_k=len(tickers),

@@ -37,7 +37,7 @@ from ..core.exits import _effective_stop_for_bar, _check_exit_conditions
 from .quant_engine import (
     fit_hmm_expanding, _forward_step_incremental,
     kelly_fraction, discretize_p_bull,
-    _compute_effective_thresholds, _compute_volume_ratio,
+    _compute_effective_thresholds, _compute_volume_ratio, _compute_seasonal_volume_ratio,
     _sharpe, _max_dd, _simulate_portfolio_value, _build_quant_backtest_stats,
     _empty_result,
 )
@@ -80,6 +80,7 @@ def _precompute_hourly_vote_series(
     sar_af_step: float = 0.02,
     sar_af_max: float = 0.20,
     rsi_enabled: bool = True,
+    use_seasonal_volume: bool = False,
 ) -> dict:
     """Precompute all causal indicator series needed by the consolidated per-bar loop."""
     close_s = pd.Series(close) if not isinstance(close, pd.Series) else close
@@ -100,8 +101,13 @@ def _precompute_hourly_vote_series(
     vol_ratio_full = None
     if volume is not None and len(volume) > 20:
         vol_s = pd.Series(volume)
-        vol_avg = vol_s.rolling(20).mean()
-        vol_ratio_full = (vol_s / vol_avg).values
+        if use_seasonal_volume and isinstance(close.index, pd.DatetimeIndex):
+            vol_ratio_full = _compute_seasonal_volume_ratio(
+                pd.Series(volume, index=close.index), lookback_periods=20
+            )
+        else:
+            vol_avg = vol_s.rolling(20).mean()
+            vol_ratio_full = (vol_s / vol_avg).values
 
     need_exit = exit_on_macd_cross or exit_on_rsi_reversal or exit_on_consolidation
     macd_bear_x = rsi_ob_exit = rsi_mom_loss = None
@@ -265,7 +271,7 @@ def consolidated_backtest(
     exit_prob: float = 0.40,
     stop_loss_pct: float = 0.05,
     take_profit_pct: float = 0.15,
-    volume_min_ratio: float = 1.0,
+    volume_min_ratio: float | None = None,
     min_train_bars: int = 500,
     hmm_refit_bars: int = 500,
     initial_cash: float = 20_000.0,
@@ -276,7 +282,7 @@ def consolidated_backtest(
     sentiment_score: float = 0.0,
     vix_signal: int = 0,
     regime_smooth: int = 24,
-    min_hold_bars: int = 48,
+    min_hold_bars: int | None = None,
     # vote + quality-gate parameters
     rsi_period: int = 14,
     ma_fast: int = 20,
@@ -313,6 +319,7 @@ def consolidated_backtest(
     skip_unused_indicators: bool = True,
     currency: str = "GBP",
     bars_per_year: int = 1700,
+    use_seasonal_volume: bool = False,
 ) -> dict:
     """Walk-forward consolidated backtest on hourly data.
 
@@ -436,8 +443,23 @@ def consolidated_backtest(
     # Extract optional require_flip_entry knob (defaults to True for backward compatibility)
     _require_flip_entry = getattr(_entry, "require_flip_entry", True)
 
-    # Extract optional min_hold_bars knob (defaults to CLI param for backward compatibility)
-    _min_hold_bars = getattr(_exit, "min_hold_bars", min_hold_bars)
+    # Resolve volume_min_ratio: explicit kwarg wins (allows CLI/test overrides); strategy
+    # class attribute is the fallback when kwarg is None. Fail loudly if neither supplies a value.
+    _volume_min_ratio = volume_min_ratio if volume_min_ratio is not None else getattr(_entry, "volume_min_ratio", None)
+    if _volume_min_ratio is None:
+        raise ValueError(
+            "volume_min_ratio must be declared on the entry strategy class "
+            "or passed explicitly to consolidated_backtest()"
+        )
+
+    # Extract optional min_hold_bars knob: explicit kwarg wins; strategy class attribute is fallback.
+    # Fail loudly if neither supplies a value.
+    _min_hold_bars = min_hold_bars if min_hold_bars is not None else getattr(_exit, "min_hold_bars", None)
+    if _min_hold_bars is None:
+        raise ValueError(
+            "min_hold_bars must be declared on the exit strategy class "
+            "or passed explicitly to consolidated_backtest()"
+        )
 
     # ------------------------------------------------------------------
     # Data preparation
@@ -448,7 +470,12 @@ def consolidated_backtest(
     returns = np.diff(np.log(close))
     n = len(close)
 
-    vol_ratio_arr = _compute_volume_ratio(volume, n)
+    if use_seasonal_volume and volume is not None and isinstance(dates, pd.DatetimeIndex):
+        vol_ratio_arr = _compute_seasonal_volume_ratio(
+            pd.Series(volume, index=dates), lookback_periods=20
+        )
+    else:
+        vol_ratio_arr = _compute_volume_ratio(volume, n)
 
     # A strategy's own hardcoded exit-indicator default (e.g. BreakoutMomentumExit's
     # exit_on_macd_cross=True) must activate the indicator series here even when the
@@ -471,6 +498,7 @@ def consolidated_backtest(
         use_sar_stop=use_sar_stop, sar_af_start=sar_af_start,
         sar_af_step=sar_af_step, sar_af_max=sar_af_max,
         rsi_enabled=rsi_enabled,
+        use_seasonal_volume=use_seasonal_volume,
     )
 
     # ------------------------------------------------------------------
@@ -577,7 +605,7 @@ def consolidated_backtest(
 
         if position == 0 and not exit_hit:
             # Entry: BUY requires entry_strategy BUY + volume check
-            vol_ok = cur_vol_ratio >= volume_min_ratio
+            vol_ok = cur_vol_ratio >= _volume_min_ratio
             if vol_ok:
                 decision = _entry.evaluate(regime_state, mom_snap, cur_vol_ratio, currently_in=False)
 

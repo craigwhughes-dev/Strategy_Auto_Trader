@@ -57,6 +57,7 @@ def main() -> int:
         initial_cash=20_000.0, trade_cost=10.0,
         use_kelly=True, regime_smooth=24, min_hold_bars=48,
         buy_threshold=3.0, sell_threshold=-3.0,
+        volume_min_ratio=1.0,
     )
 
     all_results = []

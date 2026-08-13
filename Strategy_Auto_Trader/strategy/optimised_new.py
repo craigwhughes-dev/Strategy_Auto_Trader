@@ -92,6 +92,14 @@ class OptimisedNewEntry:
     #: below no chance to ever bind.
     quality_gate_enabled: bool = False
     gate_sensitivity: int = 2
+    require_flip_entry: bool = True
+    require_vol_filter_ok: bool = True
+    volume_min_ratio: float = 1.0
+    # overnight_scope.py stage-1 (per-market vol_screen) is redundant for this
+    # strategy: vol_filter_ok is enforced per-bar at signal time, and
+    # top_k_screen's hybrid score weights trend_quality at 0.7 — a third
+    # independent enforcement of the same signal. Opts out of stage-1.
+    skip_overnight_vol_screen: bool = True
 
     def __init__(
         self,
@@ -105,7 +113,7 @@ class OptimisedNewEntry:
         self._weights = {**self.weights, **(weights or {})}
         self._buy_t = buy_threshold if buy_threshold is not None else self.buy_threshold
         self._sell_t = sell_threshold if sell_threshold is not None else self.sell_threshold
-        self._vol_filter_ok = vol_filter_ok
+        self._vol_filter_ok = vol_filter_ok if self.require_vol_filter_ok else True
         self._quality_gate_enabled = (
             quality_gate_enabled if quality_gate_enabled is not None else self.quality_gate_enabled
         )
@@ -174,6 +182,7 @@ class OptimisedNewExit:
     _target: float = 999.0  # effectively disabled — see module docstring
     use_kelly: bool = True
     kelly_lookback: int = 20
+    min_hold_bars: int = 48
 
     def __init__(
         self,

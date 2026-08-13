@@ -248,14 +248,32 @@ def test_check_overnight_screening_skips_if_already_run():
             assert not mock_overnight.called
 
 
-def test_top_k_screen_health_no_state_file_is_noop(monkeypatch, tmp_path):
+def test_top_k_screen_health_no_state_file_disabled_is_noop(monkeypatch, tmp_path):
+    """Missing file is a noop when top_k_screen is disabled — no halt, no alert."""
     monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    state = {}
+    cfg = {}  # top_k_screen.enabled defaults to False
     logger = mock.Mock()
 
     with mock.patch("Strategy_Auto_Trader.output.emailer.send_top_k_screen_alert") as mock_alert:
-        live_daemon._check_top_k_screen_health(logger)
+        live_daemon._check_top_k_screen_health(state, cfg, logger)
 
     mock_alert.assert_not_called()
+    assert not state.get("halt_top_k_stale")
+
+
+def test_top_k_screen_health_no_state_file_enabled_halts(monkeypatch, tmp_path):
+    """Missing file when top_k_screen is enabled triggers halt + alert."""
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    state = {}
+    cfg = {"top_k_screen": {"enabled": True}}
+    logger = mock.Mock()
+
+    with mock.patch("Strategy_Auto_Trader.output.emailer.send_top_k_screen_alert") as mock_alert:
+        live_daemon._check_top_k_screen_health(state, cfg, logger)
+
+    mock_alert.assert_called_once_with("missing", None)
+    assert state["halt_top_k_stale"] is True
 
 
 def test_top_k_screen_health_status_ok_no_alert(monkeypatch, tmp_path):
@@ -264,12 +282,14 @@ def test_top_k_screen_health_status_ok_no_alert(monkeypatch, tmp_path):
         json.dumps({"date": datetime.now(timezone.utc).date().isoformat(), "status": "ok"}),
         encoding="utf-8",
     )
+    state = {}
     logger = mock.Mock()
 
     with mock.patch("Strategy_Auto_Trader.output.emailer.send_top_k_screen_alert") as mock_alert:
-        live_daemon._check_top_k_screen_health(logger)
+        live_daemon._check_top_k_screen_health(state, {}, logger)
 
     mock_alert.assert_not_called()
+    assert state["halt_top_k_stale"] is False
 
 
 def test_top_k_screen_health_fallback_status_sends_alert(monkeypatch, tmp_path):
@@ -278,12 +298,14 @@ def test_top_k_screen_health_fallback_status_sends_alert(monkeypatch, tmp_path):
     (tmp_path / "top_k_universe.json").write_text(
         json.dumps({"date": today, "status": "fallback"}), encoding="utf-8",
     )
+    state = {}
     logger = mock.Mock()
 
     with mock.patch("Strategy_Auto_Trader.output.emailer.send_top_k_screen_alert") as mock_alert:
-        live_daemon._check_top_k_screen_health(logger)
+        live_daemon._check_top_k_screen_health(state, {}, logger)
 
     mock_alert.assert_called_once_with("fallback", today)
+    assert state["halt_top_k_stale"] is True
 
 
 def test_top_k_screen_health_stale_state_sends_alert_even_if_status_ok(monkeypatch, tmp_path):
@@ -295,12 +317,31 @@ def test_top_k_screen_health_stale_state_sends_alert_even_if_status_ok(monkeypat
     (tmp_path / "top_k_universe.json").write_text(
         json.dumps({"date": old_date, "status": "ok"}), encoding="utf-8",
     )
+    state = {}
     logger = mock.Mock()
 
     with mock.patch("Strategy_Auto_Trader.output.emailer.send_top_k_screen_alert") as mock_alert:
-        live_daemon._check_top_k_screen_health(logger)
+        live_daemon._check_top_k_screen_health(state, {}, logger)
 
     mock_alert.assert_called_once_with("stale", old_date)
+    assert state["halt_top_k_stale"] is True
+
+
+def test_top_k_screen_health_recovery_clears_halt(monkeypatch, tmp_path):
+    """When ranking recovers to ok after a stale/fail, halt_top_k_stale is cleared."""
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    (tmp_path / "top_k_universe.json").write_text(
+        json.dumps({"date": datetime.now(timezone.utc).date().isoformat(), "status": "ok"}),
+        encoding="utf-8",
+    )
+    state = {"halt_top_k_stale": True}  # previously halted
+    logger = mock.Mock()
+
+    with mock.patch("Strategy_Auto_Trader.output.emailer.send_top_k_screen_alert") as mock_alert:
+        live_daemon._check_top_k_screen_health(state, {}, logger)
+
+    mock_alert.assert_not_called()
+    assert state["halt_top_k_stale"] is False
 
 
 def test_orphaned_positions_no_scope_file_is_noop(monkeypatch, tmp_path):
@@ -1184,6 +1225,38 @@ def test_process_cycle_halt_flag_blocks_new_entries(monkeypatch):
         "execution": {},
     }
     daemon_state = {"cursors": {}, "halt_new_entries": True}
+    live_daemon.process_cycle(
+        "test_market", {}, config, daemon_state,
+        portfolio=mock.Mock(), broker=mock.Mock(spec=[]), logger=mock.Mock(),
+    )
+    assert captured["allow_new_entries"] is False
+
+
+def test_process_cycle_halt_top_k_stale_blocks_new_entries(monkeypatch):
+    """halt_top_k_stale passes allow_new_entries=False into execute_signals."""
+    from Strategy_Auto_Trader.markov_cli import batch, execute
+
+    def fake_process_ticker(ticker_cfg, defaults, send_email):
+        return {"ticker": "AAPL", "status": "OK", "time": 0.0,
+                "result": {"ticker": "AAPL", "close": 100.0}}
+
+    captured = {}
+
+    def fake_execute_signals(tickers, data_dir, portfolio, limit_tracker,
+                             broker, allow_new_entries=True, **kwargs):
+        captured["allow_new_entries"] = allow_new_entries
+        return [], [], []
+
+    monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
+    monkeypatch.setattr(execute, "execute_signals", fake_execute_signals)
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
+
+    config = {
+        "daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0},
+        "execution": {},
+    }
+    daemon_state = {"cursors": {}, "halt_top_k_stale": True}
     live_daemon.process_cycle(
         "test_market", {}, config, daemon_state,
         portfolio=mock.Mock(), broker=mock.Mock(spec=[]), logger=mock.Mock(),

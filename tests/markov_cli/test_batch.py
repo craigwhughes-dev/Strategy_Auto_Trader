@@ -287,17 +287,17 @@ class TestBatch:
     def test_run_single_with_timeout_completes_normally(self):
         from Strategy_Auto_Trader.markov_cli import batch
 
-        with mock.patch.object(batch, "run_single", _fake_run_single_ok):
-            batch.run_single_with_timeout(["--ticker", "AAPL"], timeout_seconds=10)
+        batch.run_single_with_timeout(["--ticker", "AAPL"], timeout_seconds=10, run_fn=_fake_run_single_ok)
 
     def test_run_single_with_timeout_kills_hung_process(self):
         from Strategy_Auto_Trader.markov_cli import batch
 
-        with mock.patch.object(batch, "run_single", _fake_run_single_hangs):
-            t0 = time.time()
-            with pytest.raises(batch.TimeoutError):
-                batch.run_single_with_timeout(["--ticker", "AAPL"], timeout_seconds=1)
-            elapsed = time.time() - t0
+        t0 = time.time()
+        with pytest.raises(batch.TimeoutError):
+            batch.run_single_with_timeout(
+                ["--ticker", "AAPL"], timeout_seconds=1, run_fn=_fake_run_single_hangs,
+            )
+        elapsed = time.time() - t0
         # Proves the child was actually killed, not just that join() gave up
         # while the hung process kept running in the background.
         assert elapsed < 20
@@ -305,6 +305,7 @@ class TestBatch:
     def test_run_single_with_timeout_propagates_child_failure(self):
         from Strategy_Auto_Trader.markov_cli import batch
 
-        with mock.patch.object(batch, "run_single", _fake_run_single_fails):
-            with pytest.raises(RuntimeError, match="exited with code"):
-                batch.run_single_with_timeout(["--ticker", "AAPL"], timeout_seconds=10)
+        with pytest.raises(RuntimeError, match="exited with code"):
+            batch.run_single_with_timeout(
+                ["--ticker", "AAPL"], timeout_seconds=10, run_fn=_fake_run_single_fails,
+            )

@@ -67,6 +67,8 @@ def _run_consolidated_fake(close, p_bull_seq, **kwargs):
             call_idx["i"] = 0
             self._history.clear()
 
+    kwargs.setdefault("volume_min_ratio", 1.0)
+    kwargs.setdefault("min_hold_bars", 48)
     return consolidated_backtest(df, regime_model=FakeRegimeModel(), **kwargs)
 
 
@@ -152,6 +154,53 @@ class TestConsolidatedEngine:
         assert pre["bb_pctb_full"] is not None
         assert pre["macd_bear_x"] is None   # still exit-only, correctly gated
 
+    def test_precompute_hourly_seasonal_vol_ratio_shape_matches(self):
+        """use_seasonal_volume=True should still produce a vol_ratio_full of
+        the same shape as the flat path — downstream indexing must not break."""
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import _precompute_hourly_vote_series
+        idx = pd.date_range("2024-01-02 09:00", periods=300, freq="1h", tz="UTC")
+        close = pd.Series(np.linspace(100, 120, 300), index=idx)
+        volume = np.full(300, 1000.0)
+        pre = _precompute_hourly_vote_series(
+            close, volume, use_seasonal_volume=True
+        )
+        assert pre["vol_ratio_full"] is not None
+        assert len(pre["vol_ratio_full"]) == 300
+
+    def test_precompute_hourly_seasonal_vol_ratio_constant_volume_ones(self):
+        """Constant volume → every seasonal ratio should be ≈ 1.0."""
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import _precompute_hourly_vote_series
+        import numpy.testing as npt
+        idx = pd.date_range("2024-01-02 09:00", periods=300, freq="1h", tz="UTC")
+        close = pd.Series(np.linspace(100, 120, 300), index=idx)
+        volume = np.full(300, 1000.0)
+        pre = _precompute_hourly_vote_series(
+            close, volume, use_seasonal_volume=True
+        )
+        npt.assert_allclose(pre["vol_ratio_full"], 1.0, atol=1e-9)
+
+    def test_precompute_seasonal_falls_back_to_flat_without_datetimeindex(self):
+        """When close has a plain RangeIndex (not DatetimeIndex), seasonal is
+        skipped and the flat rolling result is used instead."""
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import _precompute_hourly_vote_series
+        close = pd.Series(np.linspace(100, 120, 300))  # no DatetimeIndex
+        volume = np.full(300, 1000.0)
+        pre_flat = _precompute_hourly_vote_series(close, volume)
+        pre_seas = _precompute_hourly_vote_series(close, volume, use_seasonal_volume=True)
+        np.testing.assert_array_equal(pre_flat["vol_ratio_full"], pre_seas["vol_ratio_full"])
+
+    def test_consolidated_backtest_seasonal_volume_flag_accepted(self):
+        """use_seasonal_volume=True must not raise and must return a valid result."""
+        result = _run_consolidated_fake(
+            np.linspace(100, 130, 700),
+            [0.9] * 700,
+            volume_min_ratio=1.0,
+            min_hold_bars=48,
+            use_seasonal_volume=True,
+        )
+        assert "n_bars" in result
+        assert result["n_bars"] > 0
+
     # -- _build_mom_snap --------------------------------------------------
 
     def test_build_mom_snap_returns_expected_keys(self):
@@ -186,7 +235,7 @@ class TestConsolidatedEngine:
     def test_consolidated_too_short_returns_empty(self):
         from Strategy_Auto_Trader.quant_hmm.consolidated_engine import consolidated_backtest
         df = _hourly_df(np.linspace(100, 110, 10))
-        result = consolidated_backtest(df, min_train_bars=500)
+        result = consolidated_backtest(df, min_train_bars=500, volume_min_ratio=1.0, min_hold_bars=48)
         assert result["n_bars"] == 0
         assert result["n_buys"] == 0
 
@@ -356,6 +405,7 @@ class TestConsolidatedEngine:
         result = consolidated_backtest(
             df, regime_model=spy, weights={"hmm": 0.0},
             min_train_bars=50, hmm_refit_bars=50, regime_smooth=1,
+            volume_min_ratio=1.0, min_hold_bars=48,
         )
         assert spy.step_calls == 0
         assert spy.refit_calls == 0
@@ -371,6 +421,7 @@ class TestConsolidatedEngine:
             df, regime_model=spy, weights={"hmm": 0.0},
             skip_unused_indicators=False,
             min_train_bars=50, hmm_refit_bars=50, regime_smooth=1,
+            volume_min_ratio=1.0, min_hold_bars=48,
         )
         assert spy.step_calls == 150
         assert spy.refit_calls >= 1
@@ -382,6 +433,7 @@ class TestConsolidatedEngine:
         consolidated_backtest(
             df, regime_model=spy,
             min_train_bars=50, hmm_refit_bars=50, regime_smooth=1,
+            volume_min_ratio=1.0, min_hold_bars=48,
         )
         assert spy.step_calls == 150
 
@@ -421,6 +473,7 @@ class TestConsolidatedEngine:
         result = consolidated_backtest(
             df, regime_model=spy, weights={"rsi": 0.0},
             min_train_bars=50, hmm_refit_bars=50, regime_smooth=1,
+            volume_min_ratio=1.0, min_hold_bars=48,
         )
         assert result["n_bars"] > 0
         assert result["detail"]["rsi"].isna().all()
@@ -436,7 +489,7 @@ class TestConsolidatedEngine:
         df = _hourly_df(close)
         result = consolidated_backtest(
             df, min_train_bars=100, hmm_refit_bars=100, regime_smooth=10,
-            buy_threshold=2.0,
+            buy_threshold=2.0, volume_min_ratio=1.0, min_hold_bars=48,
         )
         assert not result["detail"].empty
         assert np.isfinite(result["final_portfolio"])
@@ -629,7 +682,10 @@ class TestConsolidatedEngine:
             regime_smooth=1,
             buy_threshold=1.0,
             volume_min_ratio=0.0,
-            min_hold_bars=48,  # Global default (high)
+            # No min_hold_bars kwarg — exit strategy's min_hold_bars=0 is the source of truth.
+            # Passing None here (rather than omitting) prevents the helper's setdefault(48) from
+            # overriding and shadowing the strategy-declared 0.
+            min_hold_bars=None,
             entry_strategy=QuickExitEntry(),
             exit_strategy=QuickExit(),
         )
@@ -771,6 +827,9 @@ class TestConsolidatedEngine:
             close, p_bull_seq,
             min_train_bars=50, hmm_refit_bars=50, regime_smooth=1,
             buy_threshold=1.0, volume_min_ratio=0.0,
+            # min_hold_bars=None lets NoKellyExit.min_hold_bars=0 take effect
+            # (setdefault in the helper would otherwise inject 48 and override it)
+            min_hold_bars=None,
             entry_strategy=RepeatingEntry(),
             exit_strategy=NoKellyExit(),
         )
@@ -823,6 +882,8 @@ class TestConsolidatedEngine:
             close, p_bull_seq,
             min_train_bars=50, hmm_refit_bars=50, regime_smooth=1,
             buy_threshold=1.0, volume_min_ratio=0.0,
+            # min_hold_bars=None lets ShortLookbackExit.min_hold_bars=0 take effect
+            min_hold_bars=None,
             entry_strategy=RepeatingEntry(),
             exit_strategy=ShortLookbackExit(),
         )

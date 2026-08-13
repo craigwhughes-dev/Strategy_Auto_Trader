@@ -113,6 +113,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-kelly", dest="use_kelly", action="store_false", default=True,
                         help="Use fixed 10%% allocation instead of Kelly sizing")
 
+    # Volume seasonality
+    parser.add_argument("--seasonal-volume", dest="seasonal_volume", action="store_true",
+                        default=False,
+                        help="Normalise volume ratio by same-hour-of-day trailing mean "
+                             "instead of flat rolling-20 average (opt-in, unvalidated — "
+                             "run with and without to compare before enabling live)")
+
     # Exit indicators — default: the selected strategy's own value.
     parser.add_argument("--exit-rsi-reversal", dest="exit_rsi", action="store_true",
                         default=argparse.SUPPRESS)
@@ -444,6 +451,7 @@ def main(argv: list[str] | None = None) -> int:
         min_train_bars=engine_params["min_train_bars"],
         hmm_refit_bars=engine_params["hmm_refit_bars"],
         bars_per_year=engine_params["bars_per_year"],
+        use_seasonal_volume=args.seasonal_volume,
     )
 
     if regime_model is not None:

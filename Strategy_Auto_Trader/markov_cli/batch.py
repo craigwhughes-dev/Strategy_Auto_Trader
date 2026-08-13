@@ -27,10 +27,10 @@ class TimeoutError(Exception):
     pass
 
 
-def _run_in_child(argv: list[str], error_queue) -> None:
+def _run_in_child(argv: list[str], error_queue, run_fn=run_single) -> None:
     import traceback as _tb
     try:
-        run_single(argv)
+        run_fn(argv)
     except SystemExit as e:
         if e.code not in (None, 0):
             error_queue.put(_tb.format_exc())
@@ -40,19 +40,26 @@ def _run_in_child(argv: list[str], error_queue) -> None:
         raise
 
 
-def run_single_with_timeout(argv: list[str], timeout_seconds: int = 300) -> None:
+def run_single_with_timeout(argv: list[str], timeout_seconds: int = 300, run_fn=run_single) -> None:
     """Run backtest with timeout protection (5 minutes default).
 
-    Runs run_single in a child process so a stalled ticker (stuck network
-    fetch, hung HMM fit, etc.) can be forcibly killed instead of freezing the
-    whole daemon cycle indefinitely — signal.SIGALRM only interrupts a thread,
-    it can't be used on Windows and doesn't unblock a stuck C-level I/O call.
+    Runs run_fn (run_single by default) in a child process so a stalled
+    ticker (stuck network fetch, hung HMM fit, etc.) can be forcibly killed
+    instead of freezing the whole daemon cycle indefinitely — signal.SIGALRM
+    only interrupts a thread, it can't be used on Windows and doesn't unblock
+    a stuck C-level I/O call.
 
-    Raises TimeoutError if run_single exceeds the limit.
+    run_fn is passed as a Process arg (not read off the module at import
+    time) so it must be picklable by reference (a module-level function) —
+    this is what lets tests inject a fake without the child process, which
+    re-imports this module fresh under spawn, silently ignoring any
+    mock.patch applied in the parent.
+
+    Raises TimeoutError if run_fn exceeds the limit.
     """
     ctx = multiprocessing.get_context("spawn")
     error_queue = ctx.Queue()
-    proc = ctx.Process(target=_run_in_child, args=(argv, error_queue))
+    proc = ctx.Process(target=_run_in_child, args=(argv, error_queue, run_fn))
     proc.start()
     proc.join(timeout_seconds)
 
@@ -136,6 +143,9 @@ def _build_argv(ticker_cfg: dict, defaults: dict) -> list[str]:
 
     if merged.get("exit_consolidation", False):
         argv.append("--exit-consolidation")
+
+    if merged.get("seasonal_volume", False):
+        argv.append("--seasonal-volume")
 
     if merged.get("signal_reports_only", False):
         argv.append("--signal-reports-only")

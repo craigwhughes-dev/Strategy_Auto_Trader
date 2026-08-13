@@ -124,6 +124,8 @@ def compute_global_top_k(
             "--workers", str(cfg.get("workers", 4)),
             "--output", str(output_path),
         ]
+        if cfg.get("seasonal_volume", False):
+            cmd.append("--seasonal-volume")
         if vol_kept:
             cmd += ["--tickers", ",".join(sorted(vol_kept | open_positions))]
             print(f"  top_k_screen: ranking {len(vol_kept)} TQ-screened tickers "
@@ -180,7 +182,7 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict,
       - overrides: {ticker: {override_key: value}} for tickers with a watchlist override
     """
     from ..quant_hmm.vol_screen import screen_tickers
-    from ..strategy.base.registry import wants_low_trend_quality
+    from ..strategy.base.registry import wants_low_trend_quality, wants_vol_screen_disabled
 
     watchlist = load_watchlist(market_cfg["watchlist"])
     all_tickers = [t["ticker"] if isinstance(t, dict) else t for t in watchlist.get("tickers", [])]
@@ -193,7 +195,6 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict,
 
     # Check vol screen config
     vol_cfg = market_cfg.get("vol_screen", {})
-    do_vol_screen = vol_cfg.get("enabled", True)
     min_trend_quality = vol_cfg.get("min_trend_quality", 0.0)
     max_downside_vol = vol_cfg.get("max_downside_vol", None)
     vol_period = vol_cfg.get("period", "2y")
@@ -220,6 +221,12 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict,
     wants_choppy = (
         wants_low_trend_quality(market_strategy) if market_strategy else False
     )
+    wants_screen_off = (
+        wants_vol_screen_disabled(market_strategy) if market_strategy else False
+    )
+    # Strategy opt-out always wins over vol_screen.enabled config.
+    # Per-ticker watchlist strategy overrides not handled — same as wants_choppy.
+    do_vol_screen = vol_cfg.get("enabled", True) and not wants_screen_off
 
     if do_vol_screen:
         print(f"  Vol-screening {len(all_tickers)} tickers for {market_name}...")

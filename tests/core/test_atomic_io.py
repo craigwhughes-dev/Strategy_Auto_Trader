@@ -105,6 +105,49 @@ def test_atomic_write_json_cleans_temp_on_failure(tmp_path, monkeypatch):
     assert len(temp_files) == 0
 
 
+def test_atomic_write_json_retries_transient_permission_error(tmp_path, monkeypatch):
+    """A transient PermissionError on os.replace (e.g. AV scanner or a reader
+    briefly holding the file without FILE_SHARE_DELETE on Windows) is retried
+    rather than immediately failing the write."""
+    import os as os_module
+
+    path = tmp_path / "test.json"
+    original_replace = os_module.replace
+    call_count = [0]
+
+    def flaky_replace(src, dst):
+        call_count[0] += 1
+        if call_count[0] < 3:
+            raise PermissionError("Simulated transient lock")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr("os.replace", flaky_replace)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    atomic_write_json(path, {"data": "value"})
+
+    assert call_count[0] == 3
+    assert json.loads(path.read_text(encoding="utf-8")) == {"data": "value"}
+
+
+def test_atomic_write_json_raises_after_exhausting_retries(tmp_path, monkeypatch):
+    """A persistent PermissionError on os.replace still raises (and cleans up
+    the temp file) after exhausting retries, rather than retrying forever."""
+
+    def always_fails(src, dst):
+        raise PermissionError("Simulated persistent lock")
+
+    monkeypatch.setattr("os.replace", always_fails)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    path = tmp_path / "test.json"
+    with pytest.raises(PermissionError, match="Simulated persistent lock"):
+        atomic_write_json(path, {"data": "value"})
+
+    temp_files = list(tmp_path.glob(".tmp_*"))
+    assert len(temp_files) == 0
+
+
 def test_atomic_write_json_encoding_utf8(tmp_path):
     """atomic_write_json writes UTF-8 encoded JSON."""
     path = tmp_path / "test.json"

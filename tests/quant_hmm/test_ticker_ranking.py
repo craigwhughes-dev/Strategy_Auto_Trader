@@ -84,7 +84,7 @@ class TestGenerateCandidates:
         candidates from the same underlying per-ticker function — regression
         guard for the parallel dispatch/collection wiring."""
 
-        def fake_fetch(ticker, strategy_name, vol_filter_tag, vol_filter_ok=True):
+        def fake_fetch(ticker, strategy_name, vol_filter_tag, vol_filter_ok=True, use_seasonal_volume=False):
             rec = TradeRecord(date_opened="2026-01-12", ticker=ticker, strategy=strategy_name,
                                entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
             cand = Candidate(

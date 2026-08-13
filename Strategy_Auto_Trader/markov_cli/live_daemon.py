@@ -415,6 +415,7 @@ def write_app_status_snapshot(
         "daemon_pid": pid,
         "dry_run": config.get("execution", {}).get("dry_run", True),
         "halt_new_entries": daemon_state.get("halt_new_entries", False),
+        "halt_top_k_stale": daemon_state.get("halt_top_k_stale", False),
         "paused_by_user": daemon_state.get("paused_by_user", False),
         "reconciliation_discrepancies": daemon_state.get("reconciliation_discrepancies", []),
         "last_reconcile_date": daemon_state.get("last_reconcile_date", ""),
@@ -775,11 +776,15 @@ def _execute_processed_tickers(
     try:
         limit_tracker = portfolio.get_limit_tracker()
         allow_new_entries = not (
-            daemon_state.get("halt_new_entries") or daemon_state.get("paused_by_user")
+            daemon_state.get("halt_new_entries")
+            or daemon_state.get("halt_top_k_stale")
+            or daemon_state.get("paused_by_user")
         )
         if daemon_state.get("halt_new_entries"):
             logger.warning(f"[{market_name}] Reconciliation mismatch unresolved — new entries blocked")
-        elif daemon_state.get("paused_by_user"):
+        if daemon_state.get("halt_top_k_stale"):
+            logger.warning(f"[{market_name}] top_k_screen stale/missing — new entries blocked")
+        if daemon_state.get("paused_by_user"):
             logger.info(f"[{market_name}] Buying paused by user — new entries blocked")
         market_currency = get_market_currency(market_name, config)
         buys, sells, skipped = execute_signals_with_retry(
@@ -1007,7 +1012,7 @@ def check_overnight_screening(
                     logger.warning(f"  Could not read scope summary for {mkt}: {exc}")
         except Exception as e:
             logger.error(f"Error in overnight screening: {e}")
-        _check_top_k_screen_health(logger)
+        _check_top_k_screen_health(daemon_state, config, logger)
         _check_orphaned_positions(config, logger)
 
 
@@ -1039,19 +1044,41 @@ def _check_orphaned_positions(config: dict, logger: logging.Logger) -> None:
                 logger.error(f"  orphaned-position alert email failed: {e}")
 
 
-def _check_top_k_screen_health(logger: logging.Logger) -> None:
-    """After overnight_scope runs, check state/top_k_universe.json's status —
-    a fallback or stale ranking degrades silently (still trades, just on a
-    non-fresh ticker set) unless surfaced here via the same alert-email path
-    reconciliation mismatches use."""
+def _check_top_k_screen_health(
+    daemon_state: dict,
+    config: dict,
+    logger: logging.Logger,
+) -> None:
+    """After overnight_scope runs, check state/top_k_universe.json's status.
+
+    Sets daemon_state["halt_top_k_stale"] = True when the ranking is missing,
+    stale (>1 day old), or failed — using a separate key from halt_new_entries
+    so reconciliation-halt and top-K-halt are independent conditions that can
+    clear independently. Clears the flag when a fresh "ok" ranking is found.
+    Only halts if top_k_screen is enabled in config; ignores missing files when
+    it is disabled (no ranking is expected in that case).
+    """
+    top_k_enabled = config.get("top_k_screen", {}).get("enabled", False)
     state_path = STATE_DIR / "top_k_universe.json"
+
     if not state_path.exists():
+        if top_k_enabled:
+            logger.warning("  top_k_universe.json missing — halting new entries until ranking recovers")
+            daemon_state["halt_top_k_stale"] = True
+            try:
+                from ..output.emailer import send_top_k_screen_alert
+                send_top_k_screen_alert("missing", None)
+            except Exception as e:
+                logger.error(f"  top_k_screen alert email failed: {e}")
         return
+
     try:
         with open(state_path, encoding="utf-8") as f:
             state = json.load(f)
     except Exception as e:
         logger.warning(f"  Could not read top_k_universe.json: {e}")
+        if top_k_enabled:
+            daemon_state["halt_top_k_stale"] = True
         return
 
     status = state.get("status")
@@ -1066,12 +1093,17 @@ def _check_top_k_screen_health(logger: logging.Logger) -> None:
 
     if status != "ok" or is_stale:
         effective_status = "stale" if is_stale else (status or "unknown")
-        logger.warning(f"  top_k_screen status={effective_status} (state date {state_date})")
+        logger.warning(f"  top_k_screen status={effective_status} (state date {state_date}) — halting new entries")
+        daemon_state["halt_top_k_stale"] = True
         try:
             from ..output.emailer import send_top_k_screen_alert
             send_top_k_screen_alert(effective_status, state_date)
         except Exception as e:
             logger.error(f"  top_k_screen alert email failed: {e}")
+    else:
+        if daemon_state.get("halt_top_k_stale"):
+            logger.info("  top_k_screen healthy — clearing halt_top_k_stale")
+        daemon_state["halt_top_k_stale"] = False
 
 
 def check_protective_stops(

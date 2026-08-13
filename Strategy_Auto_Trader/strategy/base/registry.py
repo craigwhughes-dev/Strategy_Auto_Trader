@@ -127,3 +127,22 @@ def wants_low_trend_quality(name: str) -> bool:
             f"Unknown strategy '{name}'. Available: {sorted(STRATEGY_REGISTRY)}"
         )
     return getattr(STRATEGY_REGISTRY[name]["entry"], "wants_low_trend_quality", False)
+
+
+def wants_vol_screen_disabled(name: str) -> bool:
+    """True if the named strategy opts out of the per-market vol_screen
+    stage-1 sweep in overnight_scope.py. Strategy opt-out always wins over
+    the vol_screen.enabled config flag.
+
+    Reads the Entry class's `skip_overnight_vol_screen` attribute (default
+    False) instead of a hardcoded name list — set the flag on the strategy's
+    Entry class, not here.
+
+    Note: per-ticker watchlist strategy overrides are not handled here —
+    same limitation as wants_low_trend_quality().
+    """
+    if name not in STRATEGY_REGISTRY:
+        raise KeyError(
+            f"Unknown strategy '{name}'. Available: {sorted(STRATEGY_REGISTRY)}"
+        )
+    return getattr(STRATEGY_REGISTRY[name]["entry"], "skip_overnight_vol_screen", False)

@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
+
+_REPLACE_RETRIES = 3
+_REPLACE_RETRY_DELAY_SECONDS = 0.05
 
 
 def atomic_write_json(path: Path, obj: dict) -> None:
@@ -29,8 +33,18 @@ def atomic_write_json(path: Path, obj: dict) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(obj, f, indent=2)
-        # os.replace is atomic on Windows (unlike os.rename which can fail)
-        os.replace(temp_path, path)
+        # os.replace is atomic on Windows (unlike os.rename which can fail),
+        # but can still raise a transient PermissionError if another process
+        # (AV scanner, a reader without FILE_SHARE_DELETE) briefly holds the
+        # target file open — retry a few times before giving up.
+        for attempt in range(_REPLACE_RETRIES):
+            try:
+                os.replace(temp_path, path)
+                break
+            except PermissionError:
+                if attempt == _REPLACE_RETRIES - 1:
+                    raise
+                time.sleep(_REPLACE_RETRY_DELAY_SECONDS * (attempt + 1))
     except Exception:
         # Clean up temp file on failure
         try:

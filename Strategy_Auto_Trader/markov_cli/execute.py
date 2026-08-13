@@ -117,10 +117,30 @@ def execute_signals(
 
     buy_signals: list[tuple[str, dict]] = []
     sell_signals: list[tuple[str, dict]] = []
+    hold_details: dict[str, list[str]] = {}
 
     for ticker in tickers:
         signal = read_latest_signal(ticker, data_dir)
         if signal is None or signal["flag"] == "HOLD":
+            if signal is None:
+                bucket = "no_data"
+                detail = ticker
+            else:
+                raw = signal.get("signal_flag", "HOLD")
+                reason = signal.get("reason", "")
+                score = signal.get("score", 0.0)
+                detail = f"{ticker}={score:.1f}"
+                if raw == "SELL":
+                    bucket = "bearish"
+                elif raw == "BUY":
+                    bucket = "entry_blocked"
+                elif reason:
+                    bucket = reason
+                elif score > 0:
+                    bucket = "below_threshold"
+                else:
+                    bucket = "no_signal"
+            hold_details.setdefault(bucket, []).append(detail)
             skipped.append(ticker)
             resolved.add(ticker)
             continue
@@ -134,6 +154,12 @@ def execute_signals(
             buy_signals.append((ticker, signal))
         elif signal["flag"] == "SELL":
             sell_signals.append((ticker, signal))
+
+    if hold_details and not buy_signals and not sell_signals:
+        parts = []
+        for bucket, details in sorted(hold_details.items(), key=lambda x: -len(x[1])):
+            parts.append(f"{bucket}({', '.join(details)})={len(details)}")
+        logger.info(f"  HOLD breakdown: {', '.join(parts)}")
 
     # Sort order must match live_sim.py's arbitrate() (entry_score descending) —
     # that's the backtest-validated ordering the optimised_new switch was decided on.

@@ -40,7 +40,7 @@ def _screen_one(ticker: str, years: int = 2) -> dict | None:
             vol_stop_mult=0.5, vol_stop_window=20,
             profit_stop_scale=0.5, min_stop_pct=0.05,
             initial_cash=20_000.0, trade_cost=10.0,
-            use_kelly=True,
+            use_kelly=True, volume_min_ratio=1.0,
         )
     except Exception:
         return None

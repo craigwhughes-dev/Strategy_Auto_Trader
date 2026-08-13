@@ -25,6 +25,8 @@ def read_latest_signal(ticker: str, data_dir: Path) -> dict | None:
 
     Returned dict keys:
         flag           — "BUY" | "SELL" | "HOLD" (from qualityGate.json)
+        reason         — human-readable hold/sell reason (from qualityGate.json)
+        signal_flag    — raw signal before quality gate ("BUY"/"SELL"/"HOLD")
         close          — last bar close price
         kelly_fraction — last bar Kelly fraction (defaults to 0.10)
         score          — last bar composite signal score (defaults to 0.0)
@@ -52,14 +54,18 @@ def read_latest_signal(ticker: str, data_dir: Path) -> dict | None:
         last = detail.iloc[-1]
 
         flag = "HOLD"
+        reason = ""
         gate_path = latest / "qualityGate.json"
         if gate_path.exists():
             with open(gate_path, encoding="utf-8") as fh:
                 gate = json.load(fh)
             flag = gate.get("flag", "HOLD")
+            reason = gate.get("reason", "")
 
         return {
             "flag": flag,
+            "reason": reason,
+            "signal_flag": str(last.get("signal_flag", "HOLD")),
             "close": float(last.get("close", 0.0)),
             "kelly_fraction": float(last.get("kelly_fraction", 0.10)),
             "score": float(last.get("score", 0.0)),

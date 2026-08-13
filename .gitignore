@@ -35,6 +35,12 @@ daemon_output*.txt
 HANDOFF.md
 todo.md
 BACKTEST_LOG.md
+BACKTEST_LOG_ARCHIVE*.md
+
+# Scratch scripts and their run output
+scripts/_tmp_*.py
+scripts/garch_prototype_ftse_results.txt
+scripts/vol_threshold_profiles.csv
 
 # Local planning / temporary docs
 *PLAN.md

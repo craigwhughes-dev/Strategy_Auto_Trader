@@ -101,6 +101,7 @@ def main() -> int:
                 initial_cash=args.lot_size, trade_cost=args.trade_cost,
                 exit_on_rsi_reversal=True, max_hold_days=240,
                 use_kelly=True, regime_smooth=24, min_hold_bars=48,
+                volume_min_ratio=1.0,
             )
         except Exception:
             continue

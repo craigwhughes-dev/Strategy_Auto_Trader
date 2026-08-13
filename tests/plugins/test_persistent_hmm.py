@@ -34,7 +34,7 @@ def _run(df, model):
     from Strategy_Auto_Trader.quant_hmm.consolidated_engine import consolidated_backtest
     return consolidated_backtest(
         df, regime_model=model, min_train_bars=100, hmm_refit_bars=100,
-        regime_smooth=10,
+        regime_smooth=10, volume_min_ratio=1.0, min_hold_bars=48,
     )
 
 
