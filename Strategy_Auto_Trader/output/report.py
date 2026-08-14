@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import logging
+
 import math
 from datetime import date
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
+
 
 
 _FLAG_COLOUR = {"BUY": "#1a7a3f", "SELL": "#a02020", "HOLD": "#5a5a5a"}
@@ -564,4 +569,4 @@ def write_daily_summary(
 </html>"""
 
     out_path.write_text(html, encoding="utf-8")
-    print(f"  Daily summary: {out_path}")
+    logger.info(f"  Daily summary: {out_path}")

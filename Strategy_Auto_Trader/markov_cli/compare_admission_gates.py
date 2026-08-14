@@ -25,6 +25,8 @@ Usage:
 
 from __future__ import annotations
 
+import logging
+
 import sys
 import time
 
@@ -32,6 +34,10 @@ import numpy as np
 import pandas as pd
 
 from .compare_exits import TEST_TICKERS, _fetch
+from ..core.cli_logging import setup_cli_logger
+
+logger = logging.getLogger(__name__)
+
 
 VARIANTS = [
     {"name": "baseline (current defaults)", "require_flip_entry": True,  "force_vol_filter_on": False},
@@ -65,9 +71,11 @@ def _build_variant(vol_filter_ok: bool, variant: dict):
 
 
 def main() -> int:
+    setup_cli_logger("compare_admission_gates")
+
     from ..quant_hmm.consolidated_engine import consolidated_backtest
 
-    print(f"Ablating optimised_new admission gates across {len(TEST_TICKERS)} "
+    logger.info(f"Ablating optimised_new admission gates across {len(TEST_TICKERS)} "
           f"tickers (~2.9yr hourly history)\n")
 
     price_data = {}
@@ -77,13 +85,13 @@ def main() -> int:
         if df is not None and len(df) > 300:
             price_data[ticker] = df
             vol_filter_by_ticker[ticker] = _resolve_vol_filter_ok(ticker)
-            print(f"  Fetched {ticker}: {len(df)} bars, vol_filter_ok={vol_filter_by_ticker[ticker]}")
+            logger.info(f"  Fetched {ticker}: {len(df)} bars, vol_filter_ok={vol_filter_by_ticker[ticker]}")
         else:
-            print(f"  Skipped {ticker}: insufficient data")
+            logger.info(f"  Skipped {ticker}: insufficient data")
 
     n_vetoed = sum(1 for v in vol_filter_by_ticker.values() if not v)
     if n_vetoed:
-        print(f"\n  Note: {n_vetoed}/{len(vol_filter_by_ticker)} tickers are vol_filter-vetoed "
+        logger.info(f"\n  Note: {n_vetoed}/{len(vol_filter_by_ticker)} tickers are vol_filter-vetoed "
               f"today -- baseline and require_flip_entry=False will show 0 trades for those; "
               f"only the 'vol_filter pre-screen off' variant will trade them. Weigh the "
               f"vol_filter ablation result accordingly if this is most of the basket.")
@@ -139,14 +147,14 @@ def main() -> int:
 
         if done % len(VARIANTS) == 0:
             elapsed = time.time() - t0
-            print(f"  [{done}/{total}] {ticker} done ({elapsed:.0f}s)")
+            logger.info(f"  [{done}/{total}] {ticker} done ({elapsed:.0f}s)")
 
     df_res = pd.DataFrame(all_results)
     elapsed = time.time() - t0
 
-    print(f"\n{'='*100}")
-    print(f" Results by ticker ({elapsed:.0f}s)")
-    print(f"{'='*100}")
+    logger.info(f"\n{'='*100}")
+    logger.info(f" Results by ticker ({elapsed:.0f}s)")
+    logger.info(f"{'='*100}")
 
     first_variant = VARIANTS[0]["name"]
     for ticker in price_data:
@@ -154,18 +162,18 @@ def main() -> int:
         baseline = sub[sub["variant"] == first_variant]
         bh_ret = baseline["bh_return"].iloc[0] * 100 if len(baseline) else 0
 
-        print(f"\n  {ticker}  (B&H: {bh_ret:+.1f}%, vol_filter_ok={vol_filter_by_ticker[ticker]})")
-        print(f"  {'Variant':<32s} {'P&L':>10s} {'Return':>8s} {'Win%':>6s} {'W/L':>7s} {'Sharpe':>7s} {'Trades':>7s}")
-        print(f"  {'-'*32} {'-'*10} {'-'*8} {'-'*6} {'-'*7} {'-'*7} {'-'*7}")
+        logger.info(f"\n  {ticker}  (B&H: {bh_ret:+.1f}%, vol_filter_ok={vol_filter_by_ticker[ticker]})")
+        logger.info(f"  {'Variant':<32s} {'P&L':>10s} {'Return':>8s} {'Win%':>6s} {'W/L':>7s} {'Sharpe':>7s} {'Trades':>7s}")
+        logger.info(f"  {'-'*32} {'-'*10} {'-'*8} {'-'*6} {'-'*7} {'-'*7} {'-'*7}")
 
         for _, row in sub.iterrows():
             ret = row["total_return"] * 100 if np.isfinite(row["total_return"]) else float("nan")
-            print(f"  {row['variant']:<32s} {row['pl']:>+9,.0f} {ret:>+7.1f}% {row['win_rate']:>5.0f}% "
+            logger.info(f"  {row['variant']:<32s} {row['pl']:>+9,.0f} {ret:>+7.1f}% {row['win_rate']:>5.0f}% "
                   f"{row['wins']:>3d}/{row['losses']:<3d} {row['sharpe']:>7.3f} {row['n_trades']:>7.0f}")
 
-    print(f"\n{'='*100}")
-    print(f" Aggregate (average across {len(price_data)} tickers)")
-    print(f"{'='*100}")
+    logger.info(f"\n{'='*100}")
+    logger.info(f" Aggregate (average across {len(price_data)} tickers)")
+    logger.info(f"{'='*100}")
 
     agg = df_res.groupby("variant").agg({
         "total_return": "mean",
@@ -179,20 +187,20 @@ def main() -> int:
     variant_order = [v["name"] for v in VARIANTS]
     agg = agg.loc[[v for v in variant_order if v in agg.index]]
 
-    print(f"\n  {'Variant':<32s} {'Avg P&L':>10s} {'Avg Return':>10s} {'Win%':>6s} {'Sharpe':>7s} {'Sortino':>8s} {'MaxDD':>7s} {'Trades':>7s}")
-    print(f"  {'-'*32} {'-'*10} {'-'*10} {'-'*6} {'-'*7} {'-'*8} {'-'*7} {'-'*7}")
+    logger.info(f"\n  {'Variant':<32s} {'Avg P&L':>10s} {'Avg Return':>10s} {'Win%':>6s} {'Sharpe':>7s} {'Sortino':>8s} {'MaxDD':>7s} {'Trades':>7s}")
+    logger.info(f"  {'-'*32} {'-'*10} {'-'*10} {'-'*6} {'-'*7} {'-'*8} {'-'*7} {'-'*7}")
     for variant_name, row in agg.iterrows():
-        print(f"  {variant_name:<32s} {row['pl']:>+9,.0f} {row['total_return']*100:>+9.1f}% "
+        logger.info(f"  {variant_name:<32s} {row['pl']:>+9,.0f} {row['total_return']*100:>+9.1f}% "
               f"{row['win_rate']:>5.0f}% {row['sharpe']:>7.3f} {row['sortino']:>8.3f} "
               f"{row['max_dd']*100:>6.1f}% {row['n_trades']:>6.0f}")
 
-    print(f"\n  {'Variant':<32s} {'Profitable':>11s} {'Profitable %':>13s}")
-    print(f"  {'-'*32} {'-'*11} {'-'*13}")
+    logger.info(f"\n  {'Variant':<32s} {'Profitable':>11s} {'Profitable %':>13s}")
+    logger.info(f"  {'-'*32} {'-'*11} {'-'*13}")
     for variant in VARIANTS:
         vals = df_res[df_res["variant"] == variant["name"]].set_index("ticker")["pl"]
         n_profit = sum(1 for pl in vals if np.isfinite(pl) and pl > 0)
         n_total = sum(1 for pl in vals if np.isfinite(pl))
-        print(f"  {variant['name']:<32s} {n_profit:>7d}/{n_total:<3d} {n_profit/n_total*100 if n_total else 0:>12.0f}%")
+        logger.info(f"  {variant['name']:<32s} {n_profit:>7d}/{n_total:<3d} {n_profit/n_total*100 if n_total else 0:>12.0f}%")
 
     return 0
 

@@ -11,9 +11,15 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+from ..core.cli_logging import setup_cli_logger
+
+logger = logging.getLogger(__name__)
+
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 CONFIG_DIR = ROOT / "config"
@@ -128,7 +134,7 @@ def compute_global_top_k(
             cmd.append("--seasonal-volume")
         if vol_kept:
             cmd += ["--tickers", ",".join(sorted(vol_kept | open_positions))]
-            print(f"  top_k_screen: ranking {len(vol_kept)} TQ-screened tickers "
+            logger.info(f"  top_k_screen: ranking {len(vol_kept)} TQ-screened tickers "
                   f"(+ {len(open_positions)} open positions)")
 
         start = time.time()
@@ -139,20 +145,20 @@ def compute_global_top_k(
             )
             elapsed = time.time() - start
             if result.returncode != 0:
-                print(f"  top_k_screen: rank_universe_cli exited {result.returncode} "
+                logger.info(f"  top_k_screen: rank_universe_cli exited {result.returncode} "
                       f"after {elapsed/60:.1f} min, falling back to previous night's set. "
                       f"stderr: {result.stderr[-500:]}")
                 return _load_previous_top_k_set()
             scores = json.loads(output_path.read_text(encoding="utf-8"))
         except subprocess.TimeoutExpired:
-            print(f"  top_k_screen: ranking exceeded {timeout_seconds/3600:.1f}h timeout, "
+            logger.info(f"  top_k_screen: ranking exceeded {timeout_seconds/3600:.1f}h timeout, "
                   f"falling back to previous night's set")
             return _load_previous_top_k_set()
         except Exception as e:
-            print(f"  top_k_screen: ranking failed ({e}), falling back to previous night's set")
+            logger.info(f"  top_k_screen: ranking failed ({e}), falling back to previous night's set")
             return _load_previous_top_k_set()
 
-        print(f"  top_k_screen: ranked {len(scores)} tickers in {elapsed/60:.1f} min")
+        logger.info(f"  top_k_screen: ranked {len(scores)} tickers in {elapsed/60:.1f} min")
 
     top_tickers = set(sorted(scores.keys(), key=lambda t: -scores[t])[:k])
     top_tickers |= open_positions  # never drop an open position for falling outside top-K
@@ -229,7 +235,7 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict,
     do_vol_screen = vol_cfg.get("enabled", True) and not wants_screen_off
 
     if do_vol_screen:
-        print(f"  Vol-screening {len(all_tickers)} tickers for {market_name}...")
+        logger.info(f"  Vol-screening {len(all_tickers)} tickers for {market_name}...")
         vol_kept, vol_profiles = screen_tickers(
             all_tickers,
             min_trend_quality=min_trend_quality,
@@ -271,7 +277,7 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict,
         for ticker in all_tickers:
             if ticker not in stage1_tickers and ticker not in open_positions and ticker not in already_excluded:
                 excluded.append({"ticker": ticker, "reason": "top_k_screen"})
-        print(f"  top-K filter for {market_name}: {len(stage1_tickers)}/{before} survive "
+        logger.info(f"  top-K filter for {market_name}: {len(stage1_tickers)}/{before} survive "
               f"(global top-{len(global_top_k)} intersected with market watchlist)")
 
     # Final kept list: stage1 plus every open position, unconditionally — a
@@ -285,7 +291,7 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict,
     # 2026-07-30 entry). Not halt-worthy on its own, just needs visibility.
     orphaned = sorted(t for t in open_positions if t not in all_tickers)
     if orphaned:
-        print(f"  WARNING: {len(orphaned)} open position(s) not in {market_name}'s "
+        logger.info(f"  WARNING: {len(orphaned)} open position(s) not in {market_name}'s "
               f"watchlist file, force-kept: {', '.join(orphaned)}")
 
     return {
@@ -380,24 +386,26 @@ def _collect_vol_kept_combined(config: dict) -> set[str]:
     for market_cfg in config.get("markets", {}).values():
         watchlist = load_watchlist(market_cfg["watchlist"])
         tickers = [t["ticker"] if isinstance(t, dict) else t for t in watchlist.get("tickers", [])]
-        print(f"  Pre-screening {len(tickers)} {market_cfg['watchlist'].split('_')[1].split('.')[0]} "
+        logger.info(f"  Pre-screening {len(tickers)} {market_cfg['watchlist'].split('_')[1].split('.')[0]} "
               f"tickers for ranking (min_trend_quality={min_tq})...")
         kept, _ = screen_tickers(tickers, min_trend_quality=min_tq, max_downside_vol=None,
                                  period=period, verbose=False)
         combined.update(kept)
 
-    print(f"  Pre-screen: {len(combined)} tickers pass TQ≥{min_tq} across all markets")
+    logger.info(f"  Pre-screen: {len(combined)} tickers pass TQ≥{min_tq} across all markets")
     return combined
 
 
 def main() -> int:
     """Run overnight scope screening for all markets."""
+    setup_cli_logger("overnight_scope")
+
     config = load_config()
     exec_state = load_execution_state()
 
-    print(f"\n{'='*64}")
-    print(f" Overnight scope screening")
-    print(f"{'='*64}\n")
+    logger.info(f"\n{'='*64}")
+    logger.info(f" Overnight scope screening")
+    logger.info(f"{'='*64}\n")
 
     # Pre-screen watchlists for TQ before ranking so rank_universe_cli ranks
     # only quality tickers (avoids wasting k slots on tickers Stage 1 vetoes).
@@ -406,7 +414,7 @@ def main() -> int:
                                          vol_kept=vol_kept_combined or None)
 
     for market_name, raw_market_cfg in config.get("markets", {}).items():
-        print(f" {market_name}")
+        logger.info(f" {market_name}")
         market_cfg = _with_merged_defaults(raw_market_cfg, config)
         result = screen_market(market_name, market_cfg, exec_state, global_top_k=global_top_k)
 
@@ -418,20 +426,20 @@ def main() -> int:
             config.get("execution", {}),
         )
 
-        print(f"   Kept ({len(result['kept'])}): {', '.join(result['kept'])}")
+        logger.info(f"   Kept ({len(result['kept'])}): {', '.join(result['kept'])}")
         if result['excluded']:
             by_reason: dict[str, list[str]] = {}
             for e in result['excluded']:
                 by_reason.setdefault(e['reason'], []).append(e['ticker'])
             for reason, tickers in sorted(by_reason.items()):
-                print(f"   Excluded by {reason} ({len(tickers)}): {', '.join(tickers)}")
+                logger.info(f"   Excluded by {reason} ({len(tickers)}): {', '.join(tickers)}")
         if result['open_positions']:
-            print(f"   Open positions (exempt): {', '.join(result['open_positions'])}")
-        print()
+            logger.info(f"   Open positions (exempt): {', '.join(result['open_positions'])}")
+        logger.info("")
 
-    print(f"{'='*64}")
-    print(f" Overnight scope complete")
-    print(f"{'='*64}\n")
+    logger.info(f"{'='*64}")
+    logger.info(f" Overnight scope complete")
+    logger.info(f"{'='*64}\n")
     return 0
 
 

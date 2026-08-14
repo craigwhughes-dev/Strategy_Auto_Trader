@@ -8,12 +8,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 import time
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from ..core.cli_logging import setup_cli_logger
+
+logger = logging.getLogger(__name__)
+
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -35,6 +41,8 @@ def _get_company_info(ticker: str) -> tuple[str, str]:
 
 
 def main() -> int:
+    setup_cli_logger("trade_report")
+
     parser = argparse.ArgumentParser(prog="trade-report")
     parser.add_argument("--tickers", type=Path, default=ROOT / "config" / "scan_tickers.json",
                         help="JSON file with ticker lists")
@@ -62,10 +70,10 @@ def main() -> int:
         ticker_data = json.load(f)
     tickers = ticker_data.get(args.index, [])
     if not tickers:
-        print(f"No tickers found under key '{args.index}'")
+        logger.info(f"No tickers found under key '{args.index}'")
         return 1
 
-    print(
+    logger.info(
         f"Trade report: {len(tickers)} {args.index} tickers, start={args.start_date}, "
         f"max_downside_vol={args.max_downside_vol:.2%}, "
         f"lot=GBP{args.lot_size:.0f}, cost=GBP{args.trade_cost:.0f}"
@@ -80,7 +88,7 @@ def main() -> int:
     for i, ticker in enumerate(tickers, 1):
         if i % 10 == 0 or i == 1:
             elapsed = time.time() - t0
-            print(f"  [{i}/{len(tickers)}] {elapsed:.0f}s...")
+            logger.info(f"  [{i}/{len(tickers)}] {elapsed:.0f}s...")
 
         df = _fetch(ticker)
         if df is None or len(df) < 300:
@@ -200,10 +208,10 @@ def main() -> int:
             })
 
     elapsed = time.time() - t0
-    print(f"\n  Done: {len(all_trades)} trades from {len(summary_rows)} tickers in {elapsed:.0f}s")
+    logger.info(f"\n  Done: {len(all_trades)} trades from {len(summary_rows)} tickers in {elapsed:.0f}s")
 
     if not all_trades:
-        print("  No trades found.")
+        logger.info("  No trades found.")
         return 1
 
     trades_df = pd.DataFrame(all_trades)
@@ -261,16 +269,16 @@ def main() -> int:
         ])
         stats.to_excel(writer, sheet_name="Stats", index=False)
 
-    print(f"\n  Report saved: {args.output}")
+    logger.info(f"\n  Report saved: {args.output}")
 
     total_pl = trades_df["Net P&L"].sum()
     n_wins = (trades_df[trades_df["Status"] == "CLOSED"]["Net P&L"] > 0).sum()
     n_losses = (trades_df[trades_df["Status"] == "CLOSED"]["Net P&L"] < 0).sum()
     n_open = (trades_df["Status"] == "OPEN").sum()
-    print(f"\n  Total trades:  {len(trades_df)}")
-    print(f"  Wins/Losses:   {n_wins}/{n_losses} (open: {n_open})")
-    print(f"  Total Net P&L: GBP{total_pl:,.2f}")
-    print(f"  Win rate:      {n_wins/(n_wins+n_losses)*100:.1f}%" if (n_wins+n_losses) else "")
+    logger.info(f"\n  Total trades:  {len(trades_df)}")
+    logger.info(f"  Wins/Losses:   {n_wins}/{n_losses} (open: {n_open})")
+    logger.info(f"  Total Net P&L: GBP{total_pl:,.2f}")
+    logger.info(f"  Win rate:      {n_wins/(n_wins+n_losses)*100:.1f}%" if (n_wins+n_losses) else "")
 
     return 0
 

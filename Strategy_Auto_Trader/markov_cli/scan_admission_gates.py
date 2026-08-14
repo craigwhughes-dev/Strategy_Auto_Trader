@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import time
 import traceback
@@ -29,6 +30,11 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+
+from ..core.cli_logging import setup_cli_logger
+
+logger = logging.getLogger(__name__)
+
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SCAN_DIR = ROOT / "reports" / "admission_gate_scan"
@@ -179,6 +185,8 @@ def _scan_ticker_gates_worker(ticker: str) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    setup_cli_logger("scan_admission_gates")
+
     from .full_scan import load_sp_ftse_universe
 
     parser = argparse.ArgumentParser(prog="scan-admission-gates", description=__doc__)
@@ -202,13 +210,13 @@ def main(argv: list[str] | None = None) -> int:
     tasks = [t for t in tickers if t not in done_tickers]
     skipped = len(tickers) - len(tasks)
 
-    print(f"Admission-gate scan: {len(tickers)} tickers, {len(VARIANTS)} variants each, "
+    logger.info(f"Admission-gate scan: {len(tickers)} tickers, {len(VARIANTS)} variants each, "
           f"{args.workers} worker(s)")
-    print(f"  output: {_summary_path()}")
-    print(f"  {skipped} already done (skipped), {len(tasks)} to run\n", flush=True)
+    logger.info(f"  output: {_summary_path()}")
+    logger.info(f"  {skipped} already done (skipped), {len(tasks)} to run\n")
 
     if not tasks:
-        print("Nothing to do.")
+        logger.info("Nothing to do.")
         return 0
 
     done = failed = 0
@@ -216,10 +224,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.workers == 1:
         for i, ticker in enumerate(tasks, 1):
-            print(f"[{i}/{len(tasks)}] {ticker} ...", flush=True)
+            logger.info(f"[{i}/{len(tasks)}] {ticker} ...")
             payload = _scan_ticker_gates_worker(ticker)
             if payload["traceback"]:
-                print(payload["traceback"], flush=True)
+                logger.info(payload["traceback"])
             _append_rows(payload["rows"])
             if payload["rows"][0]["status"] == "ok":
                 done += 1
@@ -235,12 +243,12 @@ def main(argv: list[str] | None = None) -> int:
                     payload = future.result()
                 except BrokenProcessPool:
                     in_flight = [futures[f] for f in futures if not f.done()]
-                    print(f"\nBroken worker pool; in-flight tickers: {in_flight}")
+                    logger.info(f"\nBroken worker pool; in-flight tickers: {in_flight}")
                     executor.shutdown(wait=False, cancel_futures=True)
                     return 1
 
                 if payload["traceback"]:
-                    print(payload["traceback"], flush=True)
+                    logger.info(payload["traceback"])
                 _append_rows(payload["rows"])
                 if payload["rows"][0]["status"] == "ok":
                     done += 1
@@ -249,13 +257,13 @@ def main(argv: list[str] | None = None) -> int:
                 completed = done + failed
                 elapsed = time.time() - t0
                 eta = (elapsed / completed) * (len(tasks) - completed) if completed else 0
-                print(f"[{completed}/{len(tasks)}] {ticker}: {payload['rows'][0]['status']} "
-                      f"({elapsed:.0f}s elapsed, ~{eta/60:.0f}min remaining)", flush=True)
+                logger.info(f"[{completed}/{len(tasks)}] {ticker}: {payload['rows'][0]['status']} "
+                      f"({elapsed:.0f}s elapsed, ~{eta/60:.0f}min remaining)")
         finally:
             executor.shutdown(wait=True)
 
     elapsed = time.time() - t0
-    print(f"\nScan finished: {done} ok, {failed} failed/no-data, {skipped} already done. "
+    logger.info(f"\nScan finished: {done} ok, {failed} failed/no-data, {skipped} already done. "
           f"{elapsed/60:.1f} min.")
     return 0
 

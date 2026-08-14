@@ -8,11 +8,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 import time
 from pathlib import Path
 
 import numpy as np
+
+from ..core.cli_logging import setup_cli_logger
+
+logger = logging.getLogger(__name__)
+
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -65,6 +71,8 @@ def _screen_one(ticker: str, years: int = 2) -> dict | None:
 
 
 def main() -> int:
+    setup_cli_logger("screen")
+
     parser = argparse.ArgumentParser(prog="screen")
     parser.add_argument("--input", type=Path, default=ROOT / "config" / "scan_tickers.json")
     args = parser.parse_args()
@@ -75,7 +83,7 @@ def main() -> int:
     all_tickers = data.get("sp500", []) + data.get("ftse100", [])
     all_tickers = sorted(set(all_tickers))
     total = len(all_tickers)
-    print(f"Screening {total} tickers (consolidated engine, fast settings)")
+    logger.info(f"Screening {total} tickers (consolidated engine, fast settings)")
 
     results = []
     winners = []
@@ -86,7 +94,7 @@ def main() -> int:
             elapsed = time.time() - t0
             rate = elapsed / i if i > 1 else 0
             eta = rate * (total - i)
-            print(f"  [{i}/{total}]  {elapsed:.0f}s elapsed, ~{eta:.0f}s remaining...")
+            logger.info(f"  [{i}/{total}]  {elapsed:.0f}s elapsed, ~{eta:.0f}s remaining...")
 
         r = _screen_one(ticker)
         if r is None:
@@ -102,27 +110,27 @@ def main() -> int:
                 tag = "PROFIT"
             else:
                 tag = "BEATS B&H"
-            print(f"  + {ticker:<10s}  strat={r['strategy_return']*100:+.1f}%  "
+            logger.info(f"  + {ticker:<10s}  strat={r['strategy_return']*100:+.1f}%  "
                   f"bh={r['bh_return']*100:+.1f}%  "
                   f"sharpe={r['sharpe']:.2f}  [{tag}]")
 
     elapsed = time.time() - t0
-    print(f"\nDone: {len(results)} analysed, {total - len(results)} skipped, "
+    logger.info(f"\nDone: {len(results)} analysed, {total - len(results)} skipped, "
           f"{len(winners)} winners in {elapsed:.0f}s")
 
     out_path = ROOT / "reports" / "screen_winners.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(winners, f, indent=2)
-    print(f"Winners saved to {out_path}")
+    logger.info(f"Winners saved to {out_path}")
 
     winners_sorted = sorted(winners, key=lambda r: r["strategy_return"], reverse=True)
-    print(f"\n{'Ticker':<10s} {'Strat':>8s} {'B&H':>8s} {'Sharpe':>7s} {'Sortino':>8s} {'Calmar':>7s} {'MaxDD':>7s} {'P&L':>10s} {'Trades':>6s}")
-    print("-" * 77)
+    logger.info(f"\n{'Ticker':<10s} {'Strat':>8s} {'B&H':>8s} {'Sharpe':>7s} {'Sortino':>8s} {'Calmar':>7s} {'MaxDD':>7s} {'P&L':>10s} {'Trades':>6s}")
+    logger.info("-" * 77)
     for r in winners_sorted:
         def _f2(v):
             return f"{v:.2f}" if np.isfinite(v) else "NaN"
-        print(f"{r['ticker']:<10s} {r['strategy_return']*100:>+7.1f}% "
+        logger.info(f"{r['ticker']:<10s} {r['strategy_return']*100:>+7.1f}% "
               f"{r['bh_return']*100:>+7.1f}% {_f2(r['sharpe']):>7s} "
               f"{_f2(r.get('sortino', float('nan'))):>8s} {_f2(r.get('calmar', float('nan'))):>7s} "
               f"{r['max_dd']*100:>6.1f}% {r['pl']:>+9,.0f} {r['n_trades']:>6d}")

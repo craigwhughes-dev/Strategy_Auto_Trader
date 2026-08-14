@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from unittest import mock
 
@@ -120,22 +121,22 @@ def test_main_invalid_subcommand():
         main(["invalid"])
 
 
-def test_main_pause_prints_message(commands_dir, capsys):
-    """CLI pause prints confirmation message."""
+def test_main_pause_prints_message(commands_dir, caplog):
+    """CLI pause logs confirmation message."""
+    caplog.set_level(logging.INFO)
     with mock.patch("Strategy_Auto_Trader.markov_cli.manual_control.COMMANDS_DIR", commands_dir):
         exit_code = main(["pause"])
 
     assert exit_code == 0
-    captured = capsys.readouterr()
-    assert "pause command queued" in captured.out
-    assert "Takes effect within ~60s" in captured.out
+    assert "pause command queued" in caplog.text
+    assert "Takes effect within ~60s" in caplog.text
 
 
-def test_main_unpause_prints_message(commands_dir, capsys):
-    """CLI unpause prints confirmation message."""
+def test_main_unpause_prints_message(commands_dir, caplog):
+    """CLI unpause logs confirmation message."""
+    caplog.set_level(logging.INFO)
     with mock.patch("Strategy_Auto_Trader.markov_cli.manual_control.COMMANDS_DIR", commands_dir):
         exit_code = main(["unpause"])
 
     assert exit_code == 0
-    captured = capsys.readouterr()
-    assert "unpause command queued" in captured.out
+    assert "unpause command queued" in caplog.text

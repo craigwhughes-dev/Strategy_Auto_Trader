@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from unittest import mock
 
 import numpy as np
@@ -200,16 +201,16 @@ class TestQuantTradeReport:
         assert stats_dict["Wins"] == 1
         assert stats_dict["Losses"] == 1
 
-    def test_print_final_summary_outputs_totals(self, capsys):
+    def test_print_final_summary_outputs_totals(self, caplog):
         from Strategy_Auto_Trader.quant_hmm.quant_trade_report import _print_final_summary
         trades_df = pd.DataFrame({
             "Net P&L": [10.0, -5.0, 3.0],
             "Status": ["CLOSED", "CLOSED", "OPEN"],
         })
+        caplog.set_level(logging.INFO)
         _print_final_summary(trades_df)
-        out = capsys.readouterr().out
-        assert "Total trades:  3" in out
-        assert "Win rate:" in out
+        assert "Total trades:  3" in caplog.text
+        assert "Win rate:" in caplog.text
 
     # -- new helper tests ---------------------------------------------------
 

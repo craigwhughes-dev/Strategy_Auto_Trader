@@ -6,11 +6,17 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import sys
 import time
 
 import numpy as np
 import pandas as pd
+
+from ..core.cli_logging import setup_cli_logger
+
+logger = logging.getLogger(__name__)
+
 
 TEST_TICKERS = [
     "HSBA.L", "INTC", "T", "CSCO", "BA",
@@ -36,18 +42,20 @@ def _fetch(ticker: str) -> pd.DataFrame | None:
 
 
 def main() -> int:
+    setup_cli_logger("compare_exits")
+
     from ..quant_hmm.consolidated_engine import consolidated_backtest
 
-    print(f"Comparing {len(STRATEGIES)} exit strategies across {len(TEST_TICKERS)} tickers\n")
+    logger.info(f"Comparing {len(STRATEGIES)} exit strategies across {len(TEST_TICKERS)} tickers\n")
 
     price_data = {}
     for ticker in TEST_TICKERS:
         df = _fetch(ticker)
         if df is not None and len(df) > 300:
             price_data[ticker] = df
-            print(f"  Fetched {ticker}: {len(df)} bars")
+            logger.info(f"  Fetched {ticker}: {len(df)} bars")
         else:
-            print(f"  Skipped {ticker}: insufficient data")
+            logger.info(f"  Skipped {ticker}: insufficient data")
 
     base_args = dict(
         min_train_bars=500, hmm_refit_bars=500,
@@ -123,14 +131,14 @@ def main() -> int:
 
         if done % len(STRATEGIES) == 0:
             elapsed = time.time() - t0
-            print(f"  [{done}/{total}] {ticker} done ({elapsed:.0f}s)")
+            logger.info(f"  [{done}/{total}] {ticker} done ({elapsed:.0f}s)")
 
     df_res = pd.DataFrame(all_results)
     elapsed = time.time() - t0
 
-    print(f"\n{'='*100}")
-    print(f" Results by ticker ({elapsed:.0f}s)")
-    print(f"{'='*100}")
+    logger.info(f"\n{'='*100}")
+    logger.info(f" Results by ticker ({elapsed:.0f}s)")
+    logger.info(f"{'='*100}")
 
     first_strat = STRATEGIES[0]["name"]
     for ticker in price_data:
@@ -138,20 +146,20 @@ def main() -> int:
         baseline = sub[sub["strategy"] == first_strat]
         bh_ret = baseline["bh_return"].iloc[0] * 100 if len(baseline) else 0
 
-        print(f"\n  {ticker}  (B&H: {bh_ret:+.1f}%)")
-        print(f"  {'Strategy':<22s} {'P&L':>10s} {'Return':>8s} {'Win%':>6s} {'W/L':>7s} {'AvgW':>6s} {'AvgL':>7s} {'TP':>4s} {'SL':>4s}")
-        print(f"  {'-'*22} {'-'*10} {'-'*8} {'-'*6} {'-'*7} {'-'*6} {'-'*7} {'-'*4} {'-'*4}")
+        logger.info(f"\n  {ticker}  (B&H: {bh_ret:+.1f}%)")
+        logger.info(f"  {'Strategy':<22s} {'P&L':>10s} {'Return':>8s} {'Win%':>6s} {'W/L':>7s} {'AvgW':>6s} {'AvgL':>7s} {'TP':>4s} {'SL':>4s}")
+        logger.info(f"  {'-'*22} {'-'*10} {'-'*8} {'-'*6} {'-'*7} {'-'*6} {'-'*7} {'-'*4} {'-'*4}")
 
         for _, row in sub.iterrows():
             ret = row["total_return"] * 100 if np.isfinite(row["total_return"]) else float("nan")
             profitable = " $" if row["pl"] > 0 else ""
-            print(f"  {row['strategy']:<22s} {row['pl']:>+9,.0f} {ret:>+7.1f}% {row['win_rate']:>5.0f}% "
+            logger.info(f"  {row['strategy']:<22s} {row['pl']:>+9,.0f} {ret:>+7.1f}% {row['win_rate']:>5.0f}% "
                   f"{row['wins']:>3d}/{row['losses']:<3d} {row['avg_win']:>+5.1f}% {row['avg_loss']:>+6.1f}% "
                   f"{row['rr_tp']:>4d} {row['rr_sl']:>4d}{profitable}")
 
-    print(f"\n{'='*100}")
-    print(f" Aggregate (average across {len(price_data)} tickers)")
-    print(f"{'='*100}")
+    logger.info(f"\n{'='*100}")
+    logger.info(f" Aggregate (average across {len(price_data)} tickers)")
+    logger.info(f"{'='*100}")
 
     agg = df_res.groupby("strategy").agg({
         "total_return": "mean",
@@ -167,20 +175,20 @@ def main() -> int:
     strat_order = [s["name"] for s in STRATEGIES]
     agg = agg.loc[[s for s in strat_order if s in agg.index]]
 
-    print(f"\n  {'Strategy':<22s} {'Avg P&L':>10s} {'Avg Return':>10s} {'Win%':>6s} {'AvgW':>7s} {'AvgL':>7s} {'Sharpe':>7s} {'Sortino':>8s} {'Trades':>7s}")
-    print(f"  {'-'*22} {'-'*10} {'-'*10} {'-'*6} {'-'*7} {'-'*7} {'-'*7} {'-'*8} {'-'*7}")
+    logger.info(f"\n  {'Strategy':<22s} {'Avg P&L':>10s} {'Avg Return':>10s} {'Win%':>6s} {'AvgW':>7s} {'AvgL':>7s} {'Sharpe':>7s} {'Sortino':>8s} {'Trades':>7s}")
+    logger.info(f"  {'-'*22} {'-'*10} {'-'*10} {'-'*6} {'-'*7} {'-'*7} {'-'*7} {'-'*8} {'-'*7}")
     for strat_name, row in agg.iterrows():
-        print(f"  {strat_name:<22s} {row['pl']:>+9,.0f} {row['total_return']*100:>+9.1f}% "
+        logger.info(f"  {strat_name:<22s} {row['pl']:>+9,.0f} {row['total_return']*100:>+9.1f}% "
               f"{row['win_rate']:>5.0f}% {row['avg_win']:>+6.1f}% {row['avg_loss']:>+6.1f}% "
               f"{row['sharpe']:>7.3f} {row['sortino']:>8.3f} {row['n_trades']:>6.0f}")
 
-    print(f"\n  {'Strategy':<22s} {'Profitable':>11s} {'Profitable %':>13s}")
-    print(f"  {'-'*22} {'-'*11} {'-'*13}")
+    logger.info(f"\n  {'Strategy':<22s} {'Profitable':>11s} {'Profitable %':>13s}")
+    logger.info(f"  {'-'*22} {'-'*11} {'-'*13}")
     for strat in STRATEGIES:
         strat_pls = df_res[df_res["strategy"] == strat["name"]].set_index("ticker")["pl"]
         n_profit = sum(1 for pl in strat_pls if np.isfinite(pl) and pl > 0)
         n_total = sum(1 for pl in strat_pls if np.isfinite(pl))
-        print(f"  {strat['name']:<22s} {n_profit:>7d}/{n_total:<3d} {n_profit/n_total*100 if n_total else 0:>12.0f}%")
+        logger.info(f"  {strat['name']:<22s} {n_profit:>7d}/{n_total:<3d} {n_profit/n_total*100 if n_total else 0:>12.0f}%")
 
     return 0
 

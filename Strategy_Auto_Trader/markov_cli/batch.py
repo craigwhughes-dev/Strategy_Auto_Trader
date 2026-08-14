@@ -18,6 +18,7 @@ from pathlib import Path
 import pandas as pd
 
 from .run import main as run_single
+from ..core.cli_logging import setup_cli_logger
 
 logger = logging.getLogger(__name__)
 
@@ -424,7 +425,7 @@ def process_ticker(
                         "bh_return": result["bh_return"],
                     })
                 elif result["trade_event"] == "SELL":
-                    print(f"  SELL skipped (no prior BUY since reference date)")
+                    logger.info(f"  SELL skipped (no prior BUY since reference date)")
 
             return {"ticker": ticker, "status": "OK", "time": elapsed, "result": result}
         else:
@@ -439,6 +440,8 @@ def process_ticker(
 
 
 def main() -> int:
+    setup_cli_logger("batch")
+
     parser = argparse.ArgumentParser(prog="batch-runner")
     parser.add_argument("--watchlist", type=Path, default=DEFAULTS_FILE,
                         help="Path to watchlist JSON (default: config/watchlist.json)")
@@ -455,7 +458,7 @@ def main() -> int:
 
     watchlist_path = args.watchlist
     if not watchlist_path.exists():
-        print(f"Watchlist not found: {watchlist_path}")
+        logger.info(f"Watchlist not found: {watchlist_path}")
         return 1
 
     with open(watchlist_path, encoding="utf-8") as f:
@@ -465,29 +468,29 @@ def main() -> int:
     tickers = config.get("tickers", [])
 
     if not tickers:
-        print("No tickers in watchlist.")
+        logger.info("No tickers in watchlist.")
         return 1
 
     if args.fast_screen:
-        print(f"\n  Stage 1: fast-screening {len(tickers)} tickers (no HMM, no chart)...")
+        logger.info(f"\n  Stage 1: fast-screening {len(tickers)} tickers (no HMM, no chart)...")
         tickers, skipped_screen = _fast_screen_tickers(tickers)
-        print(f"  Screen result: {len(tickers)} passed, {len(skipped_screen)} skipped")
+        logger.info(f"  Screen result: {len(tickers)} passed, {len(skipped_screen)} skipped")
         if skipped_screen:
-            print(f"  Skipped: {', '.join(skipped_screen)}")
+            logger.info(f"  Skipped: {', '.join(skipped_screen)}")
         if not tickers:
-            print("  No tickers passed the fast screen — nothing to run.")
+            logger.info("  No tickers passed the fast screen — nothing to run.")
             return 0
 
     send_email = not args.no_email and bool(os.environ.get("SMTP_PASSWORD"))
     if not args.no_email and not os.environ.get("SMTP_PASSWORD"):
-        print("  Note: SMTP_PASSWORD not set, skipping emails. Use --no-email to suppress this message.")
+        logger.info("  Note: SMTP_PASSWORD not set, skipping emails. Use --no-email to suppress this message.")
 
-    print(f"\n{'='*64}")
-    print(f" Batch run: {len(tickers)} tickers from {watchlist_path.name}")
-    print(f" Email alerts: {'ON' if send_email else 'OFF'}")
-    print(f" Roundup email: {'ON' if args.roundup else 'OFF'}")
-    print(f" Portfolio-status email: {'ON' if args.portfolio_status else 'OFF'}")
-    print(f"{'='*64}")
+    logger.info(f"\n{'='*64}")
+    logger.info(f" Batch run: {len(tickers)} tickers from {watchlist_path.name}")
+    logger.info(f" Email alerts: {'ON' if send_email else 'OFF'}")
+    logger.info(f" Roundup email: {'ON' if args.roundup else 'OFF'}")
+    logger.info(f" Portfolio-status email: {'ON' if args.portfolio_status else 'OFF'}")
+    logger.info(f"{'='*64}")
 
     run_results = []    # status tracking
     collected = []      # successfully collected results for email
@@ -496,9 +499,9 @@ def main() -> int:
 
     for i, ticker_cfg in enumerate(tickers, 1):
         ticker = ticker_cfg.get("ticker", "???")
-        print(f"\n{'='*64}")
-        print(f" [{i}/{len(tickers)}]  {ticker}")
-        print(f"{'='*64}")
+        logger.info(f"\n{'='*64}")
+        logger.info(f" [{i}/{len(tickers)}]  {ticker}")
+        logger.info(f"{'='*64}")
 
         result_dict = process_ticker(ticker_cfg, defaults, send_email)
         run_results.append({"ticker": result_dict["ticker"], "status": result_dict["status"], "time": result_dict["time"]})
@@ -509,49 +512,49 @@ def main() -> int:
             failed_list.append({"ticker": ticker, "error": result_dict["status"]})
 
     # ── print summary ────────────────────────────────────────────────────────
-    print(f"\n\n{'='*64}")
-    print(f" Batch summary: {len(run_results)} tickers")
-    print(f"{'='*64}")
+    logger.info(f"\n\n{'='*64}")
+    logger.info(f" Batch summary: {len(run_results)} tickers")
+    logger.info(f"{'='*64}")
     ok = sum(1 for r in run_results if r["status"] == "OK")
     fail = len(run_results) - ok
-    print(f"  Passed: {ok}   Failed: {fail}")
-    print(f"\n  {'Ticker':<12s}  {'Status':<10s}  {'Time':>6s}")
-    print(f"  {'-'*12}  {'-'*10}  {'-'*6}")
+    logger.info(f"  Passed: {ok}   Failed: {fail}")
+    logger.info(f"\n  {'Ticker':<12s}  {'Status':<10s}  {'Time':>6s}")
+    logger.info(f"  {'-'*12}  {'-'*10}  {'-'*6}")
     for r in run_results:
         status = "OK" if r["status"] == "OK" else "FAIL"
-        print(f"  {r['ticker']:<12s}  {status:<10s}  {r['time']:5.1f}s")
+        logger.info(f"  {r['ticker']:<12s}  {status:<10s}  {r['time']:5.1f}s")
     if fail:
-        print("\n  Failed tickers:")
+        logger.info("\n  Failed tickers:")
         for r in run_results:
             if r["status"] != "OK":
-                print(f"    {r['ticker']}: {r['status']}")
+                logger.info(f"    {r['ticker']}: {r['status']}")
 
     total_time = sum(r["time"] for r in run_results)
-    print(f"\n  Total time: {total_time:.0f}s")
-    print(f"  Journal: {journal_trade_count} new trade(s) logged")
+    logger.info(f"\n  Total time: {total_time:.0f}s")
+    logger.info(f"  Journal: {journal_trade_count} new trade(s) logged")
 
     # ── daily roundup email ──────────────────────────────────────────────────
     if send_email and args.roundup and collected:
-        print("\n  Sending daily roundup email...")
+        logger.info("\n  Sending daily roundup email...")
         try:
             from ..output.emailer import send_daily_roundup
             send_daily_roundup(collected, failed_list)
         except Exception as exc:
-            print(f"  Roundup email error: {exc}")
+            logger.info(f"  Roundup email error: {exc}")
 
     # ── portfolio status email (active trades with P&L since entry) ────────
     if send_email and args.portfolio_status:
         from ..output.trade_state import get_open_positions
         open_buys = get_open_positions()
         if open_buys:
-            print(f"\n  Building portfolio status for {len(open_buys)} active trades...")
+            logger.info(f"\n  Building portfolio status for {len(open_buys)} active trades...")
             positions = _build_portfolio_status(open_buys, collected)
             if positions:
                 try:
                     from ..output.emailer import send_portfolio_status
                     send_portfolio_status(positions)
                 except Exception as exc:
-                    print(f"  Portfolio email error: {exc}")
+                    logger.info(f"  Portfolio email error: {exc}")
 
     return 0 if fail == 0 else 1
 

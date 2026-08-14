@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from unittest import mock
 
 import pandas as pd
@@ -30,7 +31,7 @@ class TestQuantRun:
         }
         return pd.DataFrame([row])
 
-    def test_print_results_in_position(self, capsys):
+    def test_print_results_in_position(self, caplog):
         from Strategy_Auto_Trader.quant_hmm.quant_run import _print_results
         bt = {
             "sharpe_strategy": 1.2, "sharpe_bh": 0.8,
@@ -42,13 +43,13 @@ class TestQuantRun:
         }
         args = self._make_args()
         detail = self._make_detail(in_position=True)
+        caplog.set_level(logging.INFO)
         _print_results(bt, args, detail)
-        out = capsys.readouterr().out
-        assert "Sharpe (annualised)" in out
-        assert "Trades: 2" in out
-        assert "IN POSITION" in out
+        assert "Sharpe (annualised)" in caplog.text
+        assert "Trades: 2" in caplog.text
+        assert "IN POSITION" in caplog.text
 
-    def test_print_results_flat_no_trades(self, capsys):
+    def test_print_results_flat_no_trades(self, caplog):
         from Strategy_Auto_Trader.quant_hmm.quant_run import _print_results
         bt = {
             "sharpe_strategy": float("nan"), "sharpe_bh": float("nan"),
@@ -60,17 +61,18 @@ class TestQuantRun:
         }
         args = self._make_args()
         detail = self._make_detail(in_position=False)
+        caplog.set_level(logging.INFO)
         _print_results(bt, args, detail)
-        out = capsys.readouterr().out
-        assert "No completed trades." in out
-        assert "FLAT" in out
+        assert "No completed trades." in caplog.text
+        assert "FLAT" in caplog.text
 
-    def test_print_exit_breakdown_no_trades_prints_nothing(self, capsys):
+    def test_print_exit_breakdown_no_trades_prints_nothing(self, caplog):
         from Strategy_Auto_Trader.quant_hmm.quant_run import _print_exit_breakdown
+        caplog.set_level(logging.INFO)
         _print_exit_breakdown(pd.DataFrame(), 0)
-        assert capsys.readouterr().out == ""
+        assert caplog.text == ""
 
-    def test_print_exit_breakdown_groups_by_reason(self, capsys):
+    def test_print_exit_breakdown_groups_by_reason(self, caplog):
         from Strategy_Auto_Trader.quant_hmm.quant_run import _print_exit_breakdown
         detail = pd.DataFrame({
             "trade_event": ["SELL", "SELL", "SELL"],
@@ -78,12 +80,12 @@ class TestQuantRun:
             "close": [95.0, 115.0, 97.0],
             "entry_price": [100.0, 100.0, 100.0],
         })
+        caplog.set_level(logging.INFO)
         _print_exit_breakdown(detail, n_trades=3)
-        out = capsys.readouterr().out
-        assert "stop_loss" in out
-        assert "take_profit" in out
+        assert "stop_loss" in caplog.text
+        assert "take_profit" in caplog.text
 
-    def test_print_sentiment_detail_outputs_composite_line(self, capsys):
+    def test_print_sentiment_detail_outputs_composite_line(self, caplog):
         from Strategy_Auto_Trader.quant_hmm.quant_run import _print_sentiment_detail
         sent_data = {
             "sentiment_label": "bullish", "sentiment_score": 0.5, "confidence": 3,
@@ -93,8 +95,8 @@ class TestQuantRun:
             "insider": {"insider_net": 1000, "insider_buys_90d": 3, "insider_sells_90d": 1},
             "short_interest": {"short_pct_float": 2.5, "short_ratio": 1.2},
         }
+        caplog.set_level(logging.INFO)
         _print_sentiment_detail(sent_data)
-        out = capsys.readouterr().out
-        assert "Sentiment & Alternative Data" in out
-        assert "BULLISH" in out
-        assert "Put/Call ratio" in out
+        assert "Sentiment & Alternative Data" in caplog.text
+        assert "BULLISH" in caplog.text
+        assert "Put/Call ratio" in caplog.text

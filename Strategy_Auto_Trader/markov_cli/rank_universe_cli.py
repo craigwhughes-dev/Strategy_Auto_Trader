@@ -15,6 +15,8 @@ Usage:
 
 from __future__ import annotations
 
+import logging
+
 import argparse
 import json
 import sys
@@ -22,9 +24,15 @@ from pathlib import Path
 
 from . import full_scan
 from ..quant_hmm.ticker_ranking import rank_universe
+from ..core.cli_logging import setup_cli_logger
+
+logger = logging.getLogger(__name__)
+
 
 
 def main(argv: list[str] | None = None) -> int:
+    setup_cli_logger("rank_universe_cli")
+
     parser = argparse.ArgumentParser(prog="rank-universe")
     parser.add_argument("--strategy", default="optimised")
     parser.add_argument("--vol-weight", type=float, default=0.7)
@@ -58,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(scores, indent=2), encoding="utf-8")
-    print(f"Ranked {len(tickers)} tickers, {len(scores)} with candidates, "
+    logger.info(f"Ranked {len(tickers)} tickers, {len(scores)} with candidates, "
           f"scores written to {output_path}")
     return 0
 

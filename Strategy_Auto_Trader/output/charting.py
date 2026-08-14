@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import matplotlib
+
+logger = logging.getLogger(__name__)
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -29,7 +34,7 @@ def plot_backtest(
     """
     detail = bt["detail"]
     if detail.empty:
-        print("  No backtest data to chart.")
+        logger.info("  No backtest data to chart.")
         return
 
     start = detail.index[0]
@@ -154,7 +159,7 @@ def plot_backtest(
 
     plt.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
-    print(f"  Chart saved: {out_path}")
+    logger.info(f"  Chart saved: {out_path}")
 
 
 def _style_ax(ax: plt.Axes) -> None:

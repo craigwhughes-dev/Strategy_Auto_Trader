@@ -6,10 +6,16 @@ writes. Pure filesystem write, no network/process dependency.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from ..core.cli_logging import setup_cli_logger
+
+logger = logging.getLogger(__name__)
+
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 STATE_DIR = ROOT / "state"
@@ -39,6 +45,8 @@ def _write_command(action: str, commands_dir: Path | None = None) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     """Main CLI entry point."""
+    setup_cli_logger("manual_control")
+
     parser = argparse.ArgumentParser(
         prog="manual_control",
         description="Pause or resume new BUY orders in the live daemon."
@@ -50,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
 
     action = "PAUSE_BUYING" if args.command == "pause" else "RESUME_BUYING"
     cmd_id = _write_command(action)
-    print(f"{args.command} command queued (id={cmd_id}). Takes effect within ~60s of the daemon's next poll cycle.")
+    logger.info(f"{args.command} command queued (id={cmd_id}). Takes effect within ~60s of the daemon's next poll cycle.")
     return 0
 
 

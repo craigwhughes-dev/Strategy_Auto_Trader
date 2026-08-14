@@ -80,6 +80,8 @@ Resume: a ticker whose daily CSV already exists is skipped unless
 
 from __future__ import annotations
 
+import logging
+
 import argparse
 import json
 import time
@@ -110,6 +112,10 @@ from ..quant_hmm.consolidated_engine import consolidated_backtest
 from ..quant_hmm.data_cache import fetch_hourly_cached, volatility_profile_cached
 from ..quant_hmm.ticker_ranking import _HMM_CACHE_DIR as HMM_CACHE_DIR
 from ..strategy.base.registry import resolve_strategy
+from ..core.cli_logging import setup_cli_logger
+
+logger = logging.getLogger(__name__)
+
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 UNIVERSE_FILE = ROOT / "config" / "universe_full.json"
@@ -380,13 +386,13 @@ def build_universe(out_path: Path = UNIVERSE_FILE) -> list[str]:
     for name, fn in (("ftse100", _ftse100_tickers), ("sp500", _sp500_tickers)):
         try:
             sources[name] = fn()
-            print(f"  {name}: {len(sources[name])} tickers from Wikipedia")
+            logger.info(f"  {name}: {len(sources[name])} tickers from Wikipedia")
         except Exception as exc:
-            print(f"  {name}: fetch failed ({exc}) — relying on watchlists")
+            logger.info(f"  {name}: fetch failed ({exc}) — relying on watchlists")
             sources[name] = []
 
     watch = _watchlist_tickers()
-    print(f"  watchlists: {len(watch)} tickers")
+    logger.info(f"  watchlists: {len(watch)} tickers")
 
     fresh = set(sources["ftse100"]) | set(sources["sp500"])
     all_tickers = fresh | set(watch)
@@ -400,7 +406,7 @@ def build_universe(out_path: Path = UNIVERSE_FILE) -> list[str]:
         "sources": {k: len(v) for k, v in sources.items()} | {"watchlists": len(watch)},
         "tickers": universe,
     }, indent=2), encoding="utf-8")
-    print(f"  universe: {len(universe)} tickers ({len(uk)} UK + {len(us)} US) -> {out_path}")
+    logger.info(f"  universe: {len(universe)} tickers ({len(uk)} UK + {len(us)} US) -> {out_path}")
     return universe
 
 
@@ -416,7 +422,7 @@ def build_sp_ftse_universe(out_path: Path = SP_FTSE_UNIVERSE_FILE) -> list[str]:
     sources: dict[str, list[str]] = {}
     for name, fn in (("ftse100", _ftse100_tickers), ("sp500", _sp500_tickers)):
         sources[name] = fn()
-        print(f"  {name}: {len(sources[name])} tickers from Wikipedia")
+        logger.info(f"  {name}: {len(sources[name])} tickers from Wikipedia")
 
     all_tickers = set(sources["ftse100"]) | set(sources["sp500"])
     uk = sorted(t for t in all_tickers if t.endswith(".L"))
@@ -429,7 +435,7 @@ def build_sp_ftse_universe(out_path: Path = SP_FTSE_UNIVERSE_FILE) -> list[str]:
         "sources": {k: len(v) for k, v in sources.items()},
         "tickers": universe,
     }, indent=2), encoding="utf-8")
-    print(f"  sp_ftse universe: {len(universe)} tickers ({len(uk)} UK + {len(us)} US) -> {out_path}")
+    logger.info(f"  sp_ftse universe: {len(universe)} tickers ({len(uk)} UK + {len(us)} US) -> {out_path}")
     return universe
 
 
@@ -749,16 +755,18 @@ def _report_row(row: dict, prefix: str, completed: int | None = None,
     _append_summary_row(row)
     progress = f"[{completed}/{total}] " if completed is not None and total is not None else ""
     if row["status"] == "ok":
-        print(f"{progress}{prefix}ok: {row['bars_fetched']} bars, {row['days_covered']} days, "
+        logger.info(f"{progress}{prefix}ok: {row['bars_fetched']} bars, {row['days_covered']} days, "
               f"{row['n_buys']} buys/{row['n_sells']} sells, "
-              f"trend_quality={row.get('trend_quality')}, {row['elapsed_s']}s", flush=True)
+              f"trend_quality={row.get('trend_quality')}, {row['elapsed_s']}s")
         return True
     else:
-        print(f"{progress}{prefix}{row['status']}: {row.get('note', '')}", flush=True)
+        logger.info(f"{progress}{prefix}{row['status']}: {row.get('note', '')}")
         return False
 
 
 def main(argv: list[str] | None = None) -> int:
+    setup_cli_logger("full_scan")
+
     parser = argparse.ArgumentParser(prog="full-scan", description=__doc__)
     parser.add_argument("--tickers", nargs="+", default=None,
                         help="Explicit ticker list (default: config/universe_full.json)")
@@ -810,18 +818,18 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error(f"--data-cutoff must be YYYY-MM-DD or 'today', got {args.data_cutoff!r}")
 
     if args.build_universe or (args.tickers is None and not UNIVERSE_FILE.exists()):
-        print("Building universe...")
+        logger.info("Building universe...")
         build_universe()
 
     tickers = args.tickers if args.tickers else load_universe()
     if args.limit:
         tickers = tickers[: args.limit]
 
-    print(f"Full scan: {len(tickers)} tickers, strategy={args.strategy}, "
+    logger.info(f"Full scan: {len(tickers)} tickers, strategy={args.strategy}, "
           f"no vol screening, max hourly history (730d), cost model {args.cost_model}"
           + (f", data cutoff {data_cutoff.isoformat()}" if data_cutoff else ""))
-    print(f"  outputs: {SCAN_DIR}  journals: {JOURNAL_DIR}")
-    print(f"  workers: {args.workers} (rows land in completion order)\n", flush=True)
+    logger.info(f"  outputs: {SCAN_DIR}  journals: {JOURNAL_DIR}")
+    logger.info(f"  workers: {args.workers} (rows land in completion order)\n")
 
     # Parent-side resume/skip check: build task list before submitting to pool.
     tasks_to_run = []
@@ -834,7 +842,7 @@ def main(argv: list[str] | None = None) -> int:
         tasks_to_run.append(ticker)
 
     if not tasks_to_run:
-        print(f"Scan finished: 0 ok, 0 failed/no-data, {skipped} already done.")
+        logger.info(f"Scan finished: 0 ok, 0 failed/no-data, {skipped} already done.")
         return 0
 
     done = failed = 0
@@ -842,7 +850,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.workers == 1:
         # Sequential path: no pool, direct calls (regression baseline).
         for i, ticker in enumerate(tasks_to_run, 1):
-            print(f"[{i}/{len(tasks_to_run)}] {ticker} ...", flush=True)
+            logger.info(f"[{i}/{len(tasks_to_run)}] {ticker} ...")
             try:
                 vix_data = _vix_once() if not args.no_sentiment else None
                 row = scan_ticker(
@@ -891,7 +899,7 @@ def main(argv: list[str] | None = None) -> int:
                 except BrokenProcessPool:
                     # Pool died: report in-flight and exit non-zero.
                     in_flight = [futures[f] for f in futures if not f.done()]
-                    print(f"\nBroken worker pool; in-flight tickers: {in_flight}")
+                    logger.info(f"\nBroken worker pool; in-flight tickers: {in_flight}")
                     executor.shutdown(wait=False, cancel_futures=True)
                     return 1
                 except Exception as exc:
@@ -904,25 +912,25 @@ def main(argv: list[str] | None = None) -> int:
                     traceback_str = traceback.format_exc()
 
                 if traceback_str:
-                    print(traceback_str, flush=True)
+                    logger.info(traceback_str)
                 completed = done + failed + 1
                 if _report_row(row, f"{ticker}: ", completed=completed, total=len(tasks_to_run)):
                     done += 1
                 else:
                     failed += 1
         except KeyboardInterrupt:
-            print("\nInterrupted; canceling remaining futures...", flush=True)
+            logger.info("\nInterrupted; canceling remaining futures...")
             executor.shutdown(wait=False, cancel_futures=True)
             # Completed rows already written; incomplete tickers will resume next run.
-            print(f"Scan interrupted: {done} ok, {failed} failed/no-data, {skipped} already done.")
+            logger.info(f"Scan interrupted: {done} ok, {failed} failed/no-data, {skipped} already done.")
             return 1
         else:
             executor.shutdown()
 
-    print(f"\nScan finished: {done} ok, {failed} failed/no-data, {skipped} already done.")
-    print(f"For the A1-A12 cross-ticker journal analyses, combine then analyze:\n"
+    logger.info(f"\nScan finished: {done} ok, {failed} failed/no-data, {skipped} already done.")
+    logger.info(f"For the A1-A12 cross-ticker journal analyses, combine then analyze:\n"
           f"  uv run python -c \"from Strategy_Auto_Trader.markov_cli.full_scan import combine_journals; "
-          f"print(combine_journals())\"\n"
+          f"logger.info(combine_journals())\"\n"
           f"  uv run python scripts/analyze_journal.py --journal <combined path>")
     return 0
 

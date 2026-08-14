@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -54,7 +55,10 @@ from ..quant_hmm.ticker_ranking import (
     generate_candidates,
     trend_quality_asof,
 )
+from ..core.cli_logging import setup_cli_logger
 from ..strategy.base.registry import wants_low_trend_quality
+
+logger = logging.getLogger(__name__)
 
 
 def _position_value(pos: dict, day: pd.Timestamp, price_by_ticker: dict[str, pd.Series] | None) -> float:
@@ -239,7 +243,7 @@ def arbitrate(
 
         skipped = len(day_candidates) - taken
         if taken or skipped:
-            print(f"    {day.date()}: took {taken}, skipped {skipped}  (cash={cash:,.2f})")
+            logger.info(f"    {day.date()}: took {taken}, skipped {skipped}  (cash={cash:,.2f})")
 
         deployed = sum(_position_value(pos, day, price_by_ticker) for pos in open_positions)
         equity_curve.append({
@@ -284,16 +288,16 @@ def simulate_strategy(
     parallelized, multi-pot-size, mark-to-market run see generate_candidates()
     + arbitrate() directly (used by main() for --universe/--pot-sizes runs).
     """
-    print(f"\n{'='*64}\n Strategy: {strategy_name}  (vol_filter={vol_filter_tag})\n{'='*64}")
+    logger.info(f"\n{'='*64}\n Strategy: {strategy_name}  (vol_filter={vol_filter_tag})\n{'='*64}")
 
     all_candidates: list[Candidate] = []
     for ticker in tickers:
-        print(f"  fetching + backtesting {ticker}...")
+        logger.info(f"  fetching + backtesting {ticker}...")
         cands = fetch_and_extract(ticker, strategy_name, vol_filter_tag, vol_filter_ok)
         cutoff = pd.Timestamp(start_date)
         # Normalize to naive timestamps for comparison (hourly data is tz-aware)
         cands = [c for c in cands if c.date_opened.tz_localize(None) >= cutoff]
-        print(f"    {len(cands)} candidate trade(s) on/after {start_date}")
+        logger.info(f"    {len(cands)} candidate trade(s) on/after {start_date}")
         all_candidates.extend(cands)
 
     result = arbitrate(
@@ -307,7 +311,7 @@ def simulate_strategy(
 
     executed = result["executed"]
     total_pnl = sum(r.pnl_usd for r in executed)
-    print(f"\n  {strategy_name}: {len(executed)} trade(s) executed, "
+    logger.info(f"\n  {strategy_name}: {len(executed)} trade(s) executed, "
           f"final pot £{result['final_cash']:,.2f} (P&L £{total_pnl:+,.2f} on £{initial_cash:,.0f} start, "
           f"£{result['total_interest']:,.2f} interest on idle cash)")
 
@@ -324,6 +328,8 @@ def _write_position_summary(rows: list[dict], path: Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    setup_cli_logger("live_sim")
+
     parser = argparse.ArgumentParser(prog="live-sim")
     parser.add_argument("--tickers", nargs="+", default=None,
                         help="Explicit ticker list. Mutually exclusive with --universe.")
@@ -392,12 +398,12 @@ def main(argv: list[str] | None = None) -> int:
 
     pot_sizes = args.pot_sizes if args.pot_sizes else [args.initial_cash]
 
-    print(f"Live simulation: {len(args.tickers)} tickers x {len(args.strategies)} strategies "
+    logger.info(f"Live simulation: {len(args.tickers)} tickers x {len(args.strategies)} strategies "
           f"x {len(pot_sizes)} pot size(s)")
-    print(f"  start={args.start_date}  pot_sizes={pot_sizes}  "
+    logger.info(f"  start={args.start_date}  pot_sizes={pot_sizes}  "
           f"trade_cost=£{args.trade_cost:.2f}  workers={args.workers}  source={args.source}")
     if args.vol_filter_exempt:
-        print(f"  vol-filter-exempt strategies: {', '.join(args.vol_filter_exempt)}")
+        logger.info(f"  vol-filter-exempt strategies: {', '.join(args.vol_filter_exempt)}")
 
     all_executed: list[TradeRecord] = []
     summary_rows: list[dict] = []
@@ -406,7 +412,7 @@ def main(argv: list[str] | None = None) -> int:
         exempt = args.no_vol_filter or strategy_name in args.vol_filter_exempt
         vol_filter_tag = "disabled" if args.no_vol_filter else ("exempt" if exempt else "daily-rescreened")
 
-        print(f"\n{'='*64}\n Strategy: {strategy_name}  (vol_filter={vol_filter_tag})\n{'='*64}")
+        logger.info(f"\n{'='*64}\n Strategy: {strategy_name}  (vol_filter={vol_filter_tag})\n{'='*64}")
         # Full ticker list always — the vol veto no longer decides which
         # tickers get backtested at all (that baked in today's snapshot for
         # the whole history); it's applied per-candidate below instead, using
@@ -434,7 +440,7 @@ def main(argv: list[str] | None = None) -> int:
             candidates = _filter_candidates_by_daily_trend_quality(
                 candidates, trend_quality_by_ticker, args.min_trend_quality, wants_low,
             )
-            print(f"  daily vol gate: {len(candidates)}/{n_before} candidates survive "
+            logger.info(f"  daily vol gate: {len(candidates)}/{n_before} candidates survive "
                   f"(min_trend_quality={args.min_trend_quality}, "
                   f"{'inverted (wants choppy)' if wants_low else 'standard'})")
 
@@ -447,22 +453,22 @@ def main(argv: list[str] | None = None) -> int:
             )
             top_tickers_list = sorted(ticker_scores.keys(),
                                       key=lambda t: -ticker_scores[t])[:args.top_k]
-            print(f"  top-k filter: {len(candidates)}/{n_before} candidates from {args.top_k} best tickers")
-            print(f"    selected: {', '.join(top_tickers_list)}")
+            logger.info(f"  top-k filter: {len(candidates)}/{n_before} candidates from {args.top_k} best tickers")
+            logger.info(f"    selected: {', '.join(top_tickers_list)}")
             for t in top_tickers_list[:5]:
-                print(f"      {t}: score={ticker_scores.get(t, 0):.3f}")
+                logger.info(f"      {t}: score={ticker_scores.get(t, 0):.3f}")
             if len(top_tickers_list) > 5:
-                print(f"      ... and {len(top_tickers_list) - 5} more")
+                logger.info(f"      ... and {len(top_tickers_list) - 5} more")
 
             if args.dump_ticker_scores:
                 dump_path = Path(args.dump_ticker_scores)
                 dump_path.parent.mkdir(parents=True, exist_ok=True)
                 dump_path.write_text(json.dumps(ticker_scores, indent=2), encoding="utf-8")
-                print(f"  ticker_scores dumped to {dump_path}")
+                logger.info(f"  ticker_scores dumped to {dump_path}")
 
         if candidates:
             earliest = min(c.date_opened for c in candidates)
-            print(f"  {len(candidates)} candidate trade(s) on/after {args.start_date} "
+            logger.info(f"  {len(candidates)} candidate trade(s) on/after {args.start_date} "
                   f"(earliest actual: {earliest.date()})")
 
         for pot_size in pot_sizes:
@@ -479,7 +485,7 @@ def main(argv: list[str] | None = None) -> int:
             total_pnl = sum(r.pnl_usd for r in result["executed"])
             peak_deployed = max((row["deployed"] for row in result["equity_curve"]), default=0.0)
             max_dd = _max_drawdown([row["portfolio_value"] for row in result["equity_curve"]])
-            print(f"  pot £{pot_size:,.0f}: {len(result['executed'])}/{result['n_candidates']} admitted "
+            logger.info(f"  pot £{pot_size:,.0f}: {len(result['executed'])}/{result['n_candidates']} admitted "
                   f"({result['n_rejected_cash']} rejected for cash, "
                   f"{result['n_rejected_kelly']} rejected for kelly<=0), "
                   f"final £{result['final_cash']:,.2f} (P&L £{total_pnl:+,.2f}, "
@@ -499,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
 
     journal_path = Path(args.journal) if args.journal else LIVE_JOURNAL
     n_logged = append_trades(journal_path, all_executed)
-    print(f"\n{'='*64}\n {n_logged} trade(s) logged to {journal_path}\n{'='*64}")
+    logger.info(f"\n{'='*64}\n {n_logged} trade(s) logged to {journal_path}\n{'='*64}")
 
     if summary_rows:
         if args.position_summary:
@@ -508,7 +514,7 @@ def main(argv: list[str] | None = None) -> int:
             ts = pd.Timestamp.now().strftime("%Y%m%dT%H%M%S")
             summary_path = LIVE_JOURNAL.parent / f"live_sim_position_summary_{ts}.csv"
         _write_position_summary(summary_rows, summary_path)
-        print(f" position summary written to {summary_path}")
+        logger.info(f" position summary written to {summary_path}")
 
     return 0
 

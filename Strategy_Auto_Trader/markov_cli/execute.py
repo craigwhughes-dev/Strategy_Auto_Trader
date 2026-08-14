@@ -18,6 +18,8 @@ import logging
 import sys
 from pathlib import Path
 
+from ..core.cli_logging import setup_cli_logger
+
 ROOT = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = ROOT / "data"
 STATE_DIR = ROOT / "state"
@@ -389,6 +391,8 @@ def _slippage_tag(signal_price: float, fill_price: float, action: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    setup_cli_logger("execute")
+
     from ..broker.portfolio import PortfolioManager
     from ..broker.signal_reader import read_latest_signal
 
@@ -413,7 +417,7 @@ def main(argv: list[str] | None = None) -> int:
                 broker_host=broker_host, broker_port=broker_port,
             )
         except SelfCheckError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
+            logger.error(f"ERROR: {e}")
             return 1
 
     data_dir = Path(args.data_dir)
@@ -465,18 +469,18 @@ def _print_summary(
     dry_run: bool,
 ) -> None:
     tag = "[DRY RUN] " if dry_run else ""
-    print(f"\n{tag}Execution summary")
-    print(f"  BUY  orders : {len(buys)}")
+    logger.info(f"\n{tag}Execution summary")
+    logger.info(f"  BUY  orders : {len(buys)}")
     for b in buys:
-        print(f"    {b}")
-    print(f"  SELL orders : {len(sells)}")
+        logger.info(f"    {b}")
+    logger.info(f"  SELL orders : {len(sells)}")
     for s in sells:
-        print(f"    {s}")
-    print(f"  Skipped     : {len(skipped)}")
+        logger.info(f"    {s}")
+    logger.info(f"  Skipped     : {len(skipped)}")
     open_pos = portfolio.positions  # type: ignore[attr-defined]
-    print(f"  Open positions ({len(open_pos)}):")
+    logger.info(f"  Open positions ({len(open_pos)}):")
     for ticker, pos in open_pos.items():
-        print(
+        logger.info(
             f"    {ticker}: {pos['quantity']} shares @ "
             f"{pos['fill_price']:.2f} (entered {pos['entry_date']})"
         )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from unittest import mock
 
 import pandas as pd
@@ -125,7 +126,7 @@ class TestRun:
         assert data["flag"] == "HOLD"
         assert data["reason"] == "insufficient data"
 
-    def test_print_backtest_summary_outputs_key_lines(self, capsys):
+    def test_print_backtest_summary_outputs_key_lines(self, caplog):
         from Strategy_Auto_Trader.markov_cli.run import _print_backtest_summary
         detail = pd.DataFrame(
             {"trade_event": ["BUY", "HOLD", "SELL"]},
@@ -140,10 +141,10 @@ class TestRun:
             "trade_cost": 10.0, "n_buys": 1, "n_sells": 1,
             "final_kelly": 0.10, "detail": detail,
         }
+        caplog.set_level(logging.INFO)
         _print_backtest_summary(bt)
-        out = capsys.readouterr().out
-        assert "Sharpe (annualised)" in out
-        assert "Strategy P&L" in out
+        assert "Sharpe (annualised)" in caplog.text
+        assert "Strategy P&L" in caplog.text
 
     # -- daily-bar interval support -----------------------------------------
 

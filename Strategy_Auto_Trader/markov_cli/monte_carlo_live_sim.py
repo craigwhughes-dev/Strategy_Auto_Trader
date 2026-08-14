@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,7 @@ import pandas as pd
 
 from . import full_scan
 from .live_sim import _max_drawdown, arbitrate
+from ..core.cli_logging import setup_cli_logger
 from ..plugins.costs import COST_MODEL_CHOICES
 from ..quant_hmm.data_cache import fetch_hourly_cached
 from ..quant_hmm.synthetic_data import (
@@ -58,6 +60,8 @@ from ..quant_hmm.ticker_ranking import (
 from ..strategy.base.registry import wants_low_trend_quality
 
 _MC_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "monte_carlo"
+
+logger = logging.getLogger(__name__)
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -187,6 +191,8 @@ def _run_one_path(
 
 
 def main(argv: list[str] | None = None) -> int:
+    setup_cli_logger("monte_carlo_live_sim")
+
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
 
@@ -203,12 +209,12 @@ def main(argv: list[str] | None = None) -> int:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     for strategy_name in args.strategies:
-        print(f"\n{'='*64}\n Strategy: {strategy_name}\n{'='*64}")
-        print(f"  universe={len(all_universe)} tickers, n_paths={args.n_paths}, "
+        logger.info(f"\n{'='*64}\n Strategy: {strategy_name}\n{'='*64}")
+        logger.info(f"  universe={len(all_universe)} tickers, n_paths={args.n_paths}, "
               f"pot_sizes={pot_sizes}, source={args.source}")
 
         # --- One-time real-data setup ---
-        print("  generating real candidates to fix ticker universe...")
+        logger.info("  generating real candidates to fix ticker universe...")
         real_candidates, real_price_by_ticker, real_tq_by_ticker = generate_candidates(
             tickers=all_universe,
             strategy_name=strategy_name,
@@ -237,10 +243,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             fixed_tickers = sorted({c.ticker for c in real_candidates})
 
-        print(f"  fixed ticker set: {len(fixed_tickers)} tickers")
+        logger.info(f"  fixed ticker set: {len(fixed_tickers)} tickers")
 
         # Fetch full OHLC for fixed tickers (cached from generate_candidates pass above)
-        print("  fetching full OHLC and fitting generating HMMs...")
+        logger.info("  fetching full OHLC and fitting generating HMMs...")
         real_dfs: dict[str, pd.DataFrame] = {}
         hmm_models: dict[str, tuple] = {}  # ticker -> (model, order)
         historical_returns: dict[str, np.ndarray] = {}
@@ -257,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 model, order = fit_generating_hmm(df["Close"])
             except ValueError as e:
-                print(f"    {ticker}: HMM fit failed ({e}), skipping")
+                logger.info(f"    {ticker}: HMM fit failed ({e}), skipping")
                 skipped.append(ticker)
                 continue
             log_ret = np.log(df["Close"].values[1:] / df["Close"].values[:-1])
@@ -268,15 +274,15 @@ def main(argv: list[str] | None = None) -> int:
             historical_labels[ticker] = labels
 
         if skipped:
-            print(f"  skipped {len(skipped)} tickers (no data / HMM failure): {skipped[:5]}...")
+            logger.info(f"  skipped {len(skipped)} tickers (no data / HMM failure): {skipped[:5]}...")
         final_tickers = [t for t in fixed_tickers if t in real_dfs]
-        print(f"  {len(final_tickers)} tickers with fitted HMMs")
+        logger.info(f"  {len(final_tickers)} tickers with fitted HMMs")
 
         # --- Market HMM for cross-ticker coupling (finding C) ---
         market_model = market_order = None
         market_max_n = 0
         if args.market_coupling > 0.0:
-            print("  fitting market HMM on SPY for cross-ticker panic coupling...")
+            logger.info("  fitting market HMM on SPY for cross-ticker panic coupling...")
             spy_df = fetch_hourly_cached("SPY", period="730d", source=args.source)
             if spy_df is not None and not spy_df.empty:
                 if isinstance(spy_df.columns, pd.MultiIndex):
@@ -284,16 +290,16 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     market_model, market_order = fit_generating_hmm(spy_df["Close"])
                     market_max_n = max(len(df) for df in real_dfs.values())
-                    print(f"  market HMM fitted (SPY {len(spy_df)} bars), coupling={args.market_coupling}")
+                    logger.info(f"  market HMM fitted (SPY {len(spy_df)} bars), coupling={args.market_coupling}")
                 except ValueError as e:
-                    print(f"  WARNING: SPY HMM fit failed ({e}), market_coupling disabled")
+                    logger.info(f"  WARNING: SPY HMM fit failed ({e}), market_coupling disabled")
                     args.market_coupling = 0.0
             else:
-                print("  WARNING: SPY data unavailable, market_coupling disabled")
+                logger.info("  WARNING: SPY data unavailable, market_coupling disabled")
                 args.market_coupling = 0.0
 
         # --- Synthetic paths ---
-        print(f"  generating synthetic df_by_ticker for each path...")
+        logger.info(f"  generating synthetic df_by_ticker for each path...")
 
         def _make_df_by_ticker(path_idx: int) -> dict[str, pd.DataFrame]:
             # Sample one shared market state sequence per path (if coupling enabled).
@@ -326,7 +332,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             return result
 
-        print(f"  running {args.n_paths} synthetic paths (workers={args.workers})...")
+        logger.info(f"  running {args.n_paths} synthetic paths (workers={args.workers})...")
 
         all_results: list[dict] = []
 
@@ -358,7 +364,7 @@ def main(argv: list[str] | None = None) -> int:
                     all_results.append(future.result())
                     done = len(all_results)
                     if done % max(1, args.n_paths // 5) == 0:
-                        print(f"    {done}/{args.n_paths} paths done")
+                        logger.info(f"    {done}/{args.n_paths} paths done")
         else:
             for i in range(args.n_paths):
                 pdf = _make_df_by_ticker(i)
@@ -373,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 done = i + 1
                 if done % max(1, args.n_paths // 5) == 0:
-                    print(f"    {done}/{args.n_paths} paths done")
+                    logger.info(f"    {done}/{args.n_paths} paths done")
 
         # --- Aggregate ---
         label = strategy_name
@@ -413,20 +419,20 @@ def main(argv: list[str] | None = None) -> int:
         (out_dir / "mc_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         pd.DataFrame(paths_rows).to_csv(out_dir / "mc_paths.csv", index=False)
 
-        print(f"\n  Results ({args.n_paths} paths, {len(final_tickers)} tickers):")
+        logger.info(f"\n  Results ({args.n_paths} paths, {len(final_tickers)} tickers):")
         for pot_size in pot_sizes:
             key = str(pot_size)
             if key in summary:
                 tr = summary[key].get("total_return", {})
                 dd = summary[key].get("max_drawdown", {})
                 pol = summary[key].get("prob_of_loss", float("nan"))
-                print(f"  pot={pot_size:,.0f}: "
+                logger.info(f"  pot={pot_size:,.0f}: "
                       f"return p5={tr.get('p5', float('nan')):+.1%}  "
                       f"p50={tr.get('p50', float('nan')):+.1%}  "
                       f"p95={tr.get('p95', float('nan')):+.1%}  "
                       f"dd_p50={dd.get('p50', float('nan')):.1%}  "
                       f"prob_loss={pol:.1%}")
-        print(f"  Outputs: {out_dir}")
+        logger.info(f"  Outputs: {out_dir}")
 
     return 0
 

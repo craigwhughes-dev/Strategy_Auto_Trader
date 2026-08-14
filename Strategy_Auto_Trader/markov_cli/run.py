@@ -6,6 +6,8 @@ Usage:
 
 from __future__ import annotations
 
+import logging
+
 import argparse
 import json
 import sys
@@ -27,6 +29,10 @@ from ..plugins.costs import COST_MODEL_CHOICES, make_cost_model
 from ..plugins.kelly_sizer import FixedSizer, KellySizer
 from ..plugins.context_adjuster import NullAdjuster, SentimentAdjuster
 from ..strategy.base.registry import STRATEGY_REGISTRY, resolve_strategy
+from ..core.cli_logging import setup_cli_logger
+
+logger = logging.getLogger(__name__)
+
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
@@ -310,13 +316,13 @@ def _print_backtest_summary(bt: dict) -> None:
     def _f(v: float) -> str:
         return f"{v:.3f}" if np.isfinite(v) else "NaN"
 
-    print(f"  {'':30s}  {'Strategy':>10s}  {'Buy & Hold':>10s}")
-    print(f"  {'Sharpe (annualised)':30s}  {_f(bt['sharpe_strategy']):>10s}  {_f(bt['sharpe_bh']):>10s}")
-    print(f"  {'Sortino (annualised)':30s}  {_f(bt.get('sortino_strategy', float('nan'))):>10s}  {_f(bt.get('sortino_bh', float('nan'))):>10s}")
-    print(f"  {'Calmar':30s}  {_f(bt.get('calmar_strategy', float('nan'))):>10s}  {_f(bt.get('calmar_bh', float('nan'))):>10s}")
-    print(f"  {'Max drawdown':30s}  {_pct(bt['max_drawdown_strategy']):>10s}  {_pct(bt['max_drawdown_bh']):>10s}")
-    print(f"  {'Total return':30s}  {_pct(bt['total_return_strategy']):>10s}  {_pct(bt['total_return_bh']):>10s}")
-    print(f"  {'Bars in market':30s}  {bt['n_bars']:>10d}")
+    logger.info(f"  {'':30s}  {'Strategy':>10s}  {'Buy & Hold':>10s}")
+    logger.info(f"  {'Sharpe (annualised)':30s}  {_f(bt['sharpe_strategy']):>10s}  {_f(bt['sharpe_bh']):>10s}")
+    logger.info(f"  {'Sortino (annualised)':30s}  {_f(bt.get('sortino_strategy', float('nan'))):>10s}  {_f(bt.get('sortino_bh', float('nan'))):>10s}")
+    logger.info(f"  {'Calmar':30s}  {_f(bt.get('calmar_strategy', float('nan'))):>10s}  {_f(bt.get('calmar_bh', float('nan'))):>10s}")
+    logger.info(f"  {'Max drawdown':30s}  {_pct(bt['max_drawdown_strategy']):>10s}  {_pct(bt['max_drawdown_bh']):>10s}")
+    logger.info(f"  {'Total return':30s}  {_pct(bt['total_return_strategy']):>10s}  {_pct(bt['total_return_bh']):>10s}")
+    logger.info(f"  {'Bars in market':30s}  {bt['n_bars']:>10d}")
 
     ic  = bt["initial_cash"]
     fp  = bt["final_portfolio"]
@@ -333,18 +339,20 @@ def _print_backtest_summary(bt: dict) -> None:
         bt_end   = str(detail.index[-1])[:10]
     else:
         bt_start = bt_end = "N/A"
-    print(f"\n  -- P&L simulation ({bt_start} to {bt_end} | {cur}{ic:,.0f} initial, {cur}{bt.get('trade_cost',10):.0f}/trade) --")
-    print(f"  {'Trades (buys + sells)':30s}  {bt['n_buys']} + {bt['n_sells']} = {bt['n_buys']+bt['n_sells']}")
-    print(f"  {'Strategy final portfolio':30s}  {cur}{fp:,.2f}")
-    print(f"  {'Strategy P&L':30s}  {sign}{cur}{pl:,.2f}  ({sign}{pct:.1f}%)")
+    logger.info(f"\n  -- P&L simulation ({bt_start} to {bt_end} | {cur}{ic:,.0f} initial, {cur}{bt.get('trade_cost',10):.0f}/trade) --")
+    logger.info(f"  {'Trades (buys + sells)':30s}  {bt['n_buys']} + {bt['n_sells']} = {bt['n_buys']+bt['n_sells']}")
+    logger.info(f"  {'Strategy final portfolio':30s}  {cur}{fp:,.2f}")
+    logger.info(f"  {'Strategy P&L':30s}  {sign}{cur}{pl:,.2f}  ({sign}{pct:.1f}%)")
     if np.isfinite(bh_pl):
         bh_sign = "+" if bh_pl >= 0 else ""
-        print(f"  {'Buy & Hold final':30s}  {cur}{bh_fp:,.2f}")
-        print(f"  {'Buy & Hold P&L':30s}  {bh_sign}{cur}{bh_pl:,.2f}  ({bh_sign}{bh_tr*100:.1f}%)")
-    print(f"  {'Kelly fraction (final)':30s}  {bt['final_kelly']*100:.1f}%")
+        logger.info(f"  {'Buy & Hold final':30s}  {cur}{bh_fp:,.2f}")
+        logger.info(f"  {'Buy & Hold P&L':30s}  {bh_sign}{cur}{bh_pl:,.2f}  ({bh_sign}{bh_tr*100:.1f}%)")
+    logger.info(f"  {'Kelly fraction (final)':30s}  {bt['final_kelly']*100:.1f}%")
 
 
 def main(argv: list[str] | None = None) -> int:
+    setup_cli_logger("run")
+
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
     entry_overrides, exit_overrides = _build_strategy_overrides(args)
@@ -353,30 +361,30 @@ def main(argv: list[str] | None = None) -> int:
 
     engine_params = _DAILY_ENGINE_PARAMS if args.interval == "1d" else _HOURLY_ENGINE_PARAMS
 
-    print(f"\nstrategy-auto-trader (consolidated engine) — ticker={args.ticker}, interval={args.interval}")
+    logger.info(f"\nstrategy-auto-trader (consolidated engine) — ticker={args.ticker}, interval={args.interval}")
 
     run_dir = _make_run_dir(args.ticker)
-    print(f"  run output directory: {run_dir}")
+    logger.info(f"  run output directory: {run_dir}")
 
     t0 = time.time()
     if args.interval == "1d":
-        print(f"  fetching {args.ticker} daily data from Yahoo Finance (max history)...")
+        logger.info(f"  fetching {args.ticker} daily data from Yahoo Finance (max history)...")
         df = fetch_daily(args.ticker)
         if df is None or df.empty:
-            print(f"  ERROR: could not fetch daily data for {args.ticker}")
+            logger.info(f"  ERROR: could not fetch daily data for {args.ticker}")
             _write_quality_gate(run_dir, "HOLD", "no data")
             return 1
     else:
-        print(f"  fetching {args.ticker} hourly data (source={args.source})...")
+        logger.info(f"  fetching {args.ticker} hourly data (source={args.source})...")
         df = fetch_hourly(args.ticker, period="730d", source=args.source)
         if df is None or df.empty:
-            print(f"  ERROR: could not fetch hourly data for {args.ticker}")
+            logger.info(f"  ERROR: could not fetch hourly data for {args.ticker}")
             _write_quality_gate(run_dir, "HOLD", "no data")
             return 1
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    print(f"  fetched {len(df)} {args.interval} bars | {df.index.min()} -> {df.index.max()}")
+    logger.info(f"  fetched {len(df)} {args.interval} bars | {df.index.min()} -> {df.index.max()}")
 
     df.to_csv(run_dir / "inputData.csv")
 
@@ -419,7 +427,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     interval_label = "daily multi-cycle" if args.interval == "1d" else "consolidated walk-forward"
-    print(f"\nRunning {interval_label} backtest...")
+    logger.info(f"\nRunning {interval_label} backtest...")
     bt = consolidated_backtest(
         df,
         regime_model=regime_model,
@@ -462,11 +470,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if regime_model is not None:
         regime_model.save()
-        print(f"  HMM: {regime_model.cache_hits} bars from cache, "
+        logger.info(f"  HMM: {regime_model.cache_hits} bars from cache, "
               f"{regime_model.computed_steps} computed")
 
     if bt["n_bars"] == 0:
-        print("  Insufficient data for consolidated backtest (need >= min_train_bars bars).")
+        logger.info("  Insufficient data for consolidated backtest (need >= min_train_bars bars).")
         _write_quality_gate(run_dir, "HOLD", "insufficient data")
         return 0
 
@@ -497,9 +505,9 @@ def main(argv: list[str] | None = None) -> int:
 
     _write_quality_gate(run_dir, cur_flag, cur_reason)
 
-    print(f"\n  >>> {cur_flag}  (p_bull_smooth={last_p_bull:.2f}, regime_signal={last_regime:.2f}) <<<")
+    logger.info(f"\n  >>> {cur_flag}  (p_bull_smooth={last_p_bull:.2f}, regime_signal={last_regime:.2f}) <<<")
     if last_event:
-        print(f"  last bar: {last_event}  reason={last_row.get('sell_reason','')}")
+        logger.info(f"  last bar: {last_event}  reason={last_row.get('sell_reason','')}")
 
     # Chart + HTML report are for humans; on daemon cycles they are only
     # rendered when there is a signal event worth reviewing.
@@ -507,7 +515,7 @@ def main(argv: list[str] | None = None) -> int:
     close_series = pd.Series(df["Close"].values, index=df.index, name="Close")
 
     if not make_reports:
-        print("  Chart/report skipped (no signal event)")
+        logger.info("  Chart/report skipped (no signal event)")
 
     # Chart (close series from hourly df, uses quant_engine detail format)
     if make_reports:
@@ -515,7 +523,7 @@ def main(argv: list[str] | None = None) -> int:
             plot_backtest(close_series, bt, ticker=args.ticker,
                           out_path=run_dir / "backtest_chart.png")
         except Exception as exc:
-            print(f"  Chart skipped: {exc}")
+            logger.info(f"  Chart skipped: {exc}")
 
     # Generate detailed HTML daily summary report
     try:
@@ -535,7 +543,7 @@ def main(argv: list[str] | None = None) -> int:
         if make_reports and not detail.empty:
             company_name, company_sector = _fetch_company_info(args.ticker)
             if company_name != args.ticker:
-                print(f"  {company_name}  [{company_sector}]" if company_sector else f"  {company_name}")
+                logger.info(f"  {company_name}  [{company_sector}]" if company_sector else f"  {company_name}")
 
             last_row = detail.iloc[-1]
 
@@ -615,7 +623,7 @@ def main(argv: list[str] | None = None) -> int:
                 out_path=run_dir / "daily_summary.html",
             )
     except Exception as exc:
-        print(f"  Daily summary report skipped: {exc}")
+        logger.info(f"  Daily summary report skipped: {exc}")
 
     # Send email if BUY or SELL signal (suppressed when --no-email, e.g. daemon/batch callers)
     try:
@@ -631,14 +639,14 @@ def main(argv: list[str] | None = None) -> int:
                     "run_dir": str(run_dir),
                 })
     except Exception as exc:
-        print(f"  Email alert skipped: {exc}")
+        logger.info(f"  Email alert skipped: {exc}")
 
     elapsed = time.time() - t0
-    print(f"\nIntermediate data written to: {run_dir}  ({elapsed:.0f}s)")
-    print("\n----------------------------------------------------------------")
-    print(" Framework: Roan (@RohOnChain).")
-    print(" Backtests are historical, not forward-looking.")
-    print("----------------------------------------------------------------\n")
+    logger.info(f"\nIntermediate data written to: {run_dir}  ({elapsed:.0f}s)")
+    logger.info("\n----------------------------------------------------------------")
+    logger.info(" Framework: Roan (@RohOnChain).")
+    logger.info(" Backtests are historical, not forward-looking.")
+    logger.info("----------------------------------------------------------------\n")
     return 0
 
 

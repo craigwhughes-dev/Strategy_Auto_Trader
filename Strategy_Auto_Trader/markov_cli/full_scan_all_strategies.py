@@ -18,11 +18,17 @@ Usage:
 
 from __future__ import annotations
 
+import logging
+
 import argparse
 from datetime import date
 
 from . import full_scan
 from ..strategy.base.registry import STRATEGY_REGISTRY
+from ..core.cli_logging import setup_cli_logger
+
+logger = logging.getLogger(__name__)
+
 
 STRATEGIES = sorted(STRATEGY_REGISTRY)
 
@@ -31,6 +37,8 @@ def main(argv: list[str] | None = None, scan_main=None) -> int:
     """Run full_scan once per strategy.
 
     scan_main is a DI seam (default: full_scan.main)."""
+    setup_cli_logger("full_scan_all_strategies")
+
     run_scan = scan_main if scan_main is not None else full_scan.main
     parser = argparse.ArgumentParser(prog="full-scan-all-strategies", description=__doc__)
     parser.add_argument("--strategies", nargs="+", default=None,
@@ -73,24 +81,24 @@ def main(argv: list[str] | None = None, scan_main=None) -> int:
     strategies = args.strategies if args.strategies else STRATEGIES
     unknown = [s for s in strategies if s not in STRATEGY_REGISTRY]
     if unknown:
-        print(f"Unknown strategy name(s): {unknown}. Available: {STRATEGIES}")
+        logger.info(f"Unknown strategy name(s): {unknown}. Available: {STRATEGIES}")
         return 1
 
     if args.build_universe or not full_scan.SP_FTSE_UNIVERSE_FILE.exists():
-        print("Building S&P 500 + FTSE 100 universe...")
+        logger.info("Building S&P 500 + FTSE 100 universe...")
         full_scan.build_sp_ftse_universe()
 
     tickers = full_scan.load_sp_ftse_universe()
 
-    print(f"{'='*64}\n"
+    logger.info(f"{'='*64}\n"
           f" Full sweep: {len(strategies)} strategies x {len(tickers)} tickers\n"
           f" strategies: {', '.join(strategies)}\n"
           f" data cutoff: {data_cutoff or 'none (live data — cross-strategy diffs may drift)'}\n"
-          f"{'='*64}\n", flush=True)
+          f"{'='*64}\n")
 
     failed_strategies = []
     for i, strategy in enumerate(strategies, 1):
-        print(f"\n{'='*64}\n [{i}/{len(strategies)}] strategy: {strategy}\n{'='*64}", flush=True)
+        logger.info(f"\n{'='*64}\n [{i}/{len(strategies)}] strategy: {strategy}\n{'='*64}")
         scan_argv = ["--tickers", *tickers, "--strategy", strategy, "--no-sentiment",
                      "--workers", str(args.workers), "--cost-model", args.cost_model,
                      "--initial-cash", str(args.initial_cash)]
@@ -103,10 +111,10 @@ def main(argv: list[str] | None = None, scan_main=None) -> int:
         try:
             run_scan(scan_argv)
         except Exception as exc:
-            print(f"  strategy {strategy} crashed: {type(exc).__name__}: {exc}; continuing to next")
+            logger.info(f"  strategy {strategy} crashed: {type(exc).__name__}: {exc}; continuing to next")
             failed_strategies.append(strategy)
 
-    print(f"\n{'='*64}\n"
+    logger.info(f"\n{'='*64}\n"
           f" All strategies done. {len(strategies) - len(failed_strategies)}/{len(strategies)} completed cleanly.\n"
           + (f" Crashed: {', '.join(failed_strategies)}\n" if failed_strategies else "")
           + f"{'='*64}")

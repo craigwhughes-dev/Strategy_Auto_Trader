@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import base64
 import os
 import smtplib
@@ -9,6 +11,9 @@ from datetime import date
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
 
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.mail.yahoo.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
@@ -87,7 +92,7 @@ def send_trade_alert(result: dict) -> None:
 
     subject = f"[{signal}] {ticker} at ${price:,.2f}  (score {score:+.1f})"
     _send(subject, html)
-    print(f"  Email sent: {subject}")
+    logger.info(f"  Email sent: {subject}")
 
 
 def send_daily_roundup(results: list[dict], failed: list[dict]) -> None:
@@ -217,7 +222,7 @@ def send_daily_roundup(results: list[dict], failed: list[dict]) -> None:
     subject = (f"Roundup: {buys} BUY / {sells} SELL / {holds} HOLD"
                f" | {profitable} profitable | {n_events} trade event{'s' if n_events != 1 else ''}")
     _send(subject, html)
-    print(f"  Roundup email sent: {subject}")
+    logger.info(f"  Roundup email sent: {subject}")
 
 
 def send_reconciliation_alert(discrepancies: list[str]) -> None:
@@ -240,7 +245,7 @@ def send_reconciliation_alert(discrepancies: list[str]) -> None:
     n = len(discrepancies)
     subject = f"RECONCILIATION MISMATCH: {n} discrepanc{'ies' if n != 1 else 'y'} — new entries halted"
     _send(subject, html)
-    print(f"  Reconciliation alert sent: {subject}")
+    logger.info(f"  Reconciliation alert sent: {subject}")
 
 
 def send_top_k_screen_alert(status: str, state_date: str | None) -> None:
@@ -269,7 +274,7 @@ def send_top_k_screen_alert(status: str, state_date: str | None) -> None:
 
     subject = f"Top-K screen degraded: {status}"
     _send(subject, html)
-    print(f"  Top-K screen alert sent: {subject}")
+    logger.info(f"  Top-K screen alert sent: {subject}")
 
 
 def send_orphaned_position_alert(market_name: str, tickers: list[str]) -> None:
@@ -294,7 +299,7 @@ def send_orphaned_position_alert(market_name: str, tickers: list[str]) -> None:
     n = len(tickers)
     subject = f"[{market_name}] {n} open position(s) missing from watchlist"
     _send(subject, html)
-    print(f"  Orphaned-position alert sent: {subject}")
+    logger.info(f"  Orphaned-position alert sent: {subject}")
 
 
 def send_execution_interrupted_alert(
@@ -332,7 +337,7 @@ def send_execution_interrupted_alert(
     else:
         subject = f"EXECUTION INTERRUPTED [{market_name}]: {len(unresolved)} ticker(s) outcome unknown — new entries halted"
     _send(subject, html)
-    print(f"  Execution-interrupted alert sent: {subject}")
+    logger.info(f"  Execution-interrupted alert sent: {subject}")
 
 
 def send_portfolio_status(positions: list[dict]) -> None:
@@ -407,4 +412,4 @@ def send_portfolio_status(positions: list[dict]) -> None:
 
     subject = f"Active trades: {n} positions | {winners} winning, {losers} losing"
     _send(subject, html)
-    print(f"  Portfolio status email sent: {subject}")
+    logger.info(f"  Portfolio status email sent: {subject}")

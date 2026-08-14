@@ -7,6 +7,8 @@ Usage:
 
 from __future__ import annotations
 
+import logging
+
 import argparse
 import json
 import sys
@@ -20,6 +22,10 @@ import pandas as pd
 from .quant_engine import fetch_hourly, quant_backtest
 from .sentiment import composite_sentiment, vix_regime
 from .vol_screen import screen_tickers
+from ..core.cli_logging import setup_cli_logger
+
+logger = logging.getLogger(__name__)
+
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -507,49 +513,51 @@ def _print_final_summary(trades_df: pd.DataFrame) -> None:
     n_wins = (closed["Net P&L"] > 0).sum() if not closed.empty else 0
     n_losses = (closed["Net P&L"] < 0).sum() if not closed.empty else 0
     n_open = (trades_df["Status"] == "OPEN").sum()
-    print(f"\n  Total trades:  {len(trades_df)}")
-    print(f"  Wins/Losses:   {n_wins}/{n_losses} (open: {n_open})")
-    print(f"  Total Net P&L: GBP{total_pl:,.2f}")
+    logger.info(f"\n  Total trades:  {len(trades_df)}")
+    logger.info(f"  Wins/Losses:   {n_wins}/{n_losses} (open: {n_open})")
+    logger.info(f"  Total Net P&L: GBP{total_pl:,.2f}")
     if (n_wins + n_losses) > 0:
-        print(f"  Win rate:      {n_wins/(n_wins+n_losses)*100:.1f}%")
+        logger.info(f"  Win rate:      {n_wins/(n_wins+n_losses)*100:.1f}%")
 
 
 def main() -> int:
+    setup_cli_logger("quant_trade_report")
+
     args = _build_arg_parser().parse_args()
 
     start_date = pd.Timestamp(args.start_date).tz_localize(None)
 
     tickers = _load_watchlist_tickers(args.watchlist)
     if not tickers:
-        print("No tickers found in watchlist.")
+        logger.info("No tickers found in watchlist.")
         return 1
 
-    print(f"Quant HMM Trade Report: {len(tickers)} tickers, start={args.start_date}")
-    print(f"  Entry: P(Bull)>{args.entry_prob}  Exit: P(Bull)<{args.exit_prob}")
-    print(f"  Stop: {args.stop_loss*100:.0f}%  Target: {args.take_profit*100:.0f}%")
-    print(f"  Lot: GBP{args.lot_size:.0f}  Cost: GBP{args.trade_cost:.0f}  Kelly: {'on' if args.kelly else 'off'}")
+    logger.info(f"Quant HMM Trade Report: {len(tickers)} tickers, start={args.start_date}")
+    logger.info(f"  Entry: P(Bull)>{args.entry_prob}  Exit: P(Bull)<{args.exit_prob}")
+    logger.info(f"  Stop: {args.stop_loss*100:.0f}%  Target: {args.take_profit*100:.0f}%")
+    logger.info(f"  Lot: GBP{args.lot_size:.0f}  Cost: GBP{args.trade_cost:.0f}  Kelly: {'on' if args.kelly else 'off'}")
 
     # Volatility-character pre-screen: drop tickers with choppy/mean-reverting
     # price action where the HMM regime strategy historically underperforms
     # (see vol_screen.py — efficiency ratio & autocorrelation are the strongest predictors)
     vol_profiles_by_ticker = {}
     if args.vol_screen:
-        print(f"\n  Screening {len(tickers)} tickers for volatility character (trend_quality >= {args.min_trend_quality})...")
+        logger.info(f"\n  Screening {len(tickers)} tickers for volatility character (trend_quality >= {args.min_trend_quality})...")
         kept_tickers, vol_profiles = screen_tickers(
             tickers, min_trend_quality=args.min_trend_quality, verbose=False)
         vol_profiles_by_ticker = {p["ticker"]: p for p in vol_profiles}
         excluded = [t for t in tickers if t not in kept_tickers]
-        print(f"  Kept {len(kept_tickers)}/{len(tickers)} tickers; excluded as choppy: "
+        logger.info(f"  Kept {len(kept_tickers)}/{len(tickers)} tickers; excluded as choppy: "
               f"{', '.join(excluded) if excluded else '(none)'}")
         tickers = kept_tickers
 
     # Fetch VIX regime once (shared across all tickers)
     vix_sig = 0
     if args.sentiment:
-        print(f"  Fetching VIX regime...")
+        logger.info(f"  Fetching VIX regime...")
         vix_data = vix_regime()
         vix_sig = vix_data.get("vix_signal", 0)
-        print(f"  VIX: {vix_data.get('vix_current', 'N/A')} "
+        logger.info(f"  VIX: {vix_data.get('vix_current', 'N/A')} "
               f"({vix_data.get('vix_regime', 'N/A')}) "
               f"term={vix_data.get('vix_term_structure', 'N/A')}")
 
@@ -562,7 +570,7 @@ def main() -> int:
     for i, ticker in enumerate(tickers, 1):
         elapsed = time.time() - t0
         if i == 1 or i % 5 == 0:
-            print(f"  [{i}/{len(tickers)}] {ticker} ({elapsed:.0f}s)")
+            logger.info(f"  [{i}/{len(tickers)}] {ticker} ({elapsed:.0f}s)")
 
         df = fetch_hourly(ticker, period=args.period)
         if df is None or len(df) < 600:
@@ -601,7 +609,7 @@ def main() -> int:
                 currency=currency,
             )
         except Exception as e:
-            print(f"    {ticker}: backtest failed: {e}")
+            logger.info(f"    {ticker}: backtest failed: {e}")
             skipped.append(ticker)
             continue
 
@@ -638,19 +646,19 @@ def main() -> int:
                 sentiment_rows.append(_build_sentiment_row(ticker, company_name, sent_data, sent_score))
 
     elapsed = time.time() - t0
-    print(f"\n  Done: {len(all_trades)} trades from {len(summary_rows)} tickers in {elapsed:.0f}s")
+    logger.info(f"\n  Done: {len(all_trades)} trades from {len(summary_rows)} tickers in {elapsed:.0f}s")
     if skipped:
-        print(f"  Skipped: {len(skipped)} tickers (no data / too short)")
+        logger.info(f"  Skipped: {len(skipped)} tickers (no data / too short)")
 
     if not all_trades:
-        print("  No trades found.")
+        logger.info("  No trades found.")
         return 1
 
     trades_df = pd.DataFrame(all_trades)
     summary_df = pd.DataFrame(summary_rows).sort_values("Total Net P&L", ascending=False)
 
     _write_excel_report(args, trades_df, summary_df, sentiment_rows, vol_profiles_by_ticker, skipped)
-    print(f"\n  Report saved: {args.output}")
+    logger.info(f"\n  Report saved: {args.output}")
 
     _print_final_summary(trades_df)
 

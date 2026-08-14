@@ -9,6 +9,8 @@ silently drift from what live_sim.py's --top-k sweeps actually validated.
 
 from __future__ import annotations
 
+import logging
+
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +25,9 @@ from .consolidated_engine import consolidated_backtest
 from .data_cache import fetch_hourly_cached
 from .vol_screen import rolling_trend_quality
 from ..strategy.base.registry import resolve_strategy
+
+logger = logging.getLogger(__name__)
+
 
 _HMM_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "cache" / "hmm_cache"
 
@@ -289,7 +294,7 @@ def fetch_and_extract(
                                       use_seasonal_volume=use_seasonal_volume, source=source,
                                       df=df, use_persistent_cache=use_persistent_cache)
     if detail is None:
-        print(f"  {ticker}: no data or insufficient data, skipping")
+        logger.info(f"  {ticker}: no data or insufficient data, skipping")
         return []
     return candidates_from_detail(ticker, detail, strategy_name, vol_filter_tag)
 

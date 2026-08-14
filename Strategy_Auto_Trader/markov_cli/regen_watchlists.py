@@ -12,11 +12,17 @@ Usage:
 
 from __future__ import annotations
 
+import logging
+
 import json
 import sys
 from pathlib import Path
 
 from .overnight_scope import CONFIG_DIR, OVERRIDE_KEYS
+from ..core.cli_logging import setup_cli_logger
+
+logger = logging.getLogger(__name__)
+
 
 UNIVERSE_PATH = CONFIG_DIR / "universe_sp_ftse.json"
 
@@ -49,19 +55,21 @@ def regen_watchlist(watchlist_path: Path, universe_tickers: list[str]) -> tuple[
 
 
 def main() -> int:
+    setup_cli_logger("regen_watchlists")
+
     universe = json.loads(UNIVERSE_PATH.read_text(encoding="utf-8"))["tickers"]
     ftse_tickers = sorted(t for t in universe if t.endswith(".L"))
     sp500_tickers = sorted(t for t in universe if not t.endswith(".L"))
 
-    print(f"Universe: {len(universe)} tickers ({len(ftse_tickers)} FTSE, {len(sp500_tickers)} US)")
+    logger.info(f"Universe: {len(universe)} tickers ({len(ftse_tickers)} FTSE, {len(sp500_tickers)} US)")
 
     ftse_old, ftse_new = regen_watchlist(CONFIG_DIR / "watchlist_ftse.json", ftse_tickers)
-    print(f"watchlist_ftse.json: {ftse_old} -> {ftse_new} tickers")
+    logger.info(f"watchlist_ftse.json: {ftse_old} -> {ftse_new} tickers")
 
     sp500_old, sp500_new = regen_watchlist(CONFIG_DIR / "watchlist_sp500.json", sp500_tickers)
-    print(f"watchlist_sp500.json: {sp500_old} -> {sp500_new} tickers")
+    logger.info(f"watchlist_sp500.json: {sp500_old} -> {sp500_new} tickers")
 
-    print("\nReview the diff before running the daemon's overnight_scope with top_k_screen enabled.")
+    logger.info("\nReview the diff before running the daemon's overnight_scope with top_k_screen enabled.")
     return 0
 
 

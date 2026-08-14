@@ -20,6 +20,8 @@ Output:
 
 from __future__ import annotations
 
+import logging
+
 import json
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -46,6 +48,10 @@ from ..quant_hmm.synthetic_data import (
 )
 from ..quant_hmm.vol_screen import volatility_profile
 from ..strategy.base.registry import resolve_strategy
+from ..core.cli_logging import setup_cli_logger
+
+logger = logging.getLogger(__name__)
+
 
 _MC_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "monte_carlo"
 
@@ -120,6 +126,8 @@ def _run_one_path(
 
 
 def main(argv: list[str] | None = None) -> int:
+    setup_cli_logger("monte_carlo")
+
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
     args.interval = "1h"  # MC is hourly only
@@ -131,17 +139,17 @@ def main(argv: list[str] | None = None) -> int:
     n_bars = args.path_bars if args.path_bars else int(round(args.path_years * _HOURS_PER_YEAR))
     engine_params = _HOURLY_ENGINE_PARAMS
 
-    print(f"\nmonte-carlo — ticker={args.ticker}, strategy={args.strategy}, "
+    logger.info(f"\nmonte-carlo — ticker={args.ticker}, strategy={args.strategy}, "
           f"n_paths={args.n_paths}, path_bars={n_bars}")
 
-    print(f"  fetching {args.ticker} hourly data (source={args.source})...")
+    logger.info(f"  fetching {args.ticker} hourly data (source={args.source})...")
     real_df = fetch_hourly(args.ticker, period="730d", source=args.source)
     if real_df is None or real_df.empty:
-        print(f"  ERROR: could not fetch data for {args.ticker}")
+        logger.info(f"  ERROR: could not fetch data for {args.ticker}")
         return 1
     if isinstance(real_df.columns, pd.MultiIndex):
         real_df.columns = real_df.columns.get_level_values(0)
-    print(f"  {len(real_df)} bars | {real_df.index.min()} -> {real_df.index.max()}")
+    logger.info(f"  {len(real_df)} bars | {real_df.index.min()} -> {real_df.index.max()}")
 
     profile = volatility_profile(args.ticker, source=args.source)
     tq = profile.get("trend_quality") if profile else None
@@ -150,10 +158,10 @@ def main(argv: list[str] | None = None) -> int:
     # admission gate for live trading, not a stress-test gate. Forcing True lets
     # the strategy signals drive entries so the MC produces meaningful results even
     # for tickers the vol-screen would otherwise exclude.
-    print(f"  real trend_quality={tq} (vol_filter_ok={real_vol_filter_ok}); "
+    logger.info(f"  real trend_quality={tq} (vol_filter_ok={real_vol_filter_ok}); "
           f"synthetic paths use vol_filter_ok=True")
 
-    print("  fitting generating HMM on real returns...")
+    logger.info("  fitting generating HMM on real returns...")
     model, order = fit_generating_hmm(real_df["Close"])
 
     log_returns = np.log(real_df["Close"].values[1:] / real_df["Close"].values[:-1])
@@ -196,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = _MC_DIR / f"{safe_ticker}_{args.strategy}_{timestamp}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"  generating {args.n_paths} synthetic paths ({n_bars} bars each, "
+    logger.info(f"  generating {args.n_paths} synthetic paths ({n_bars} bars each, "
           f"block_size={args.block_size})...")
     synth_dfs = [
         generate_synthetic_df(
@@ -212,9 +220,9 @@ def main(argv: list[str] | None = None) -> int:
         sample_dir.mkdir(exist_ok=True)
         for i, sdf in enumerate(synth_dfs[:args.save_sample_paths]):
             sdf.to_csv(sample_dir / f"path_{i:04d}.csv")
-        print(f"  saved {min(args.save_sample_paths, args.n_paths)} sample paths to {sample_dir}")
+        logger.info(f"  saved {min(args.save_sample_paths, args.n_paths)} sample paths to {sample_dir}")
 
-    print(f"  running backtests (workers={args.workers})...")
+    logger.info(f"  running backtests (workers={args.workers})...")
     results: list[dict] = []
 
     if args.workers > 1:
@@ -231,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
                 results.append(future.result())
                 done = len(results)
                 if done % max(1, args.n_paths // 10) == 0:
-                    print(f"    {done}/{args.n_paths} paths done")
+                    logger.info(f"    {done}/{args.n_paths} paths done")
     else:
         for i, sdf in enumerate(synth_dfs):
             results.append(
@@ -241,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             done = i + 1
             if done % max(1, args.n_paths // 10) == 0:
-                print(f"    {done}/{args.n_paths} paths done")
+                logger.info(f"    {done}/{args.n_paths} paths done")
 
     metrics = ["sharpe_strategy", "sortino_strategy", "max_drawdown_strategy",
                "total_return_strategy", "final_portfolio"]
@@ -264,13 +272,13 @@ def main(argv: list[str] | None = None) -> int:
     (out_dir / "mc_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     pd.DataFrame(paths_rows).to_csv(out_dir / "mc_paths.csv", index=False)
 
-    print(f"\nResults ({args.n_paths} paths, {n_bars} bars each):")
+    logger.info(f"\nResults ({args.n_paths} paths, {n_bars} bars each):")
     for m in metrics:
         if m in summary:
             s = summary[m]
-            print(f"  {m:35s}  p5={s['p5']:+.3f}  p50={s['p50']:+.3f}  p95={s['p95']:+.3f}")
-    print(f"  {'prob_of_loss':35s}  {summary['prob_of_loss']:.1%}")
-    print(f"\nOutputs: {out_dir}")
+            logger.info(f"  {m:35s}  p5={s['p5']:+.3f}  p50={s['p50']:+.3f}  p95={s['p95']:+.3f}")
+    logger.info(f"  {'prob_of_loss':35s}  {summary['prob_of_loss']:.1%}")
+    logger.info(f"\nOutputs: {out_dir}")
     return 0
 
 

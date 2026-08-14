@@ -18,10 +18,16 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 
 import numpy as np
 import pandas as pd
+
+from ..core.cli_logging import setup_cli_logger
+
+logger = logging.getLogger(__name__)
+
 
 
 def _trend_quality_score(
@@ -205,7 +211,7 @@ def screen_tickers(
 
     for i, ticker in enumerate(tickers, 1):
         if verbose and (i == 1 or i % 20 == 0):
-            print(f"  [{i}/{len(tickers)}] screening {ticker}...")
+            logger.info(f"  [{i}/{len(tickers)}] screening {ticker}...")
 
         prof = volatility_profile(ticker, period=period)
         if prof is None:
@@ -219,6 +225,8 @@ def screen_tickers(
 
 
 def main() -> int:
+    setup_cli_logger("vol_screen")
+
     parser = argparse.ArgumentParser(prog="vol-screen")
     parser.add_argument("--tickers", help="Comma-separated ticker list")
     parser.add_argument("--watchlist", help="Path to watchlist JSON (uses 'tickers' key)")
@@ -235,19 +243,19 @@ def main() -> int:
             wl = json.load(f)
         tickers = [t["ticker"] if isinstance(t, dict) else t for t in wl.get("tickers", [])]
     else:
-        print("Provide --tickers or --watchlist")
+        logger.info("Provide --tickers or --watchlist")
         return 1
 
     kept, profiles = screen_tickers(tickers, min_trend_quality=args.min_trend_quality, period=args.period)
 
     df = pd.DataFrame(profiles).sort_values("trend_quality", ascending=False)
-    print(f"\n{'Ticker':10s} {'TrendQ':>8s} {'EffRatio':>9s} {'Autocorr':>9s} {'AnnVol':>8s} {'DownVol':>8s} {'SignChg':>8s}  Verdict")
+    logger.info(f"\n{'Ticker':10s} {'TrendQ':>8s} {'EffRatio':>9s} {'Autocorr':>9s} {'AnnVol':>8s} {'DownVol':>8s} {'SignChg':>8s}  Verdict")
     for _, row in df.iterrows():
         verdict = "KEEP" if row["trend_quality"] >= args.min_trend_quality else "exclude (choppy)"
-        print(f"{row['ticker']:10s} {row['trend_quality']:>8.2f} {row['efficiency_ratio']:>9.3f} "
+        logger.info(f"{row['ticker']:10s} {row['trend_quality']:>8.2f} {row['efficiency_ratio']:>9.3f} "
               f"{row['autocorr']:>9.3f} {row['ann_vol']:>8.3f} {row['downside_vol']:>8.3f} {row['sign_change_freq']:>8.3f}  {verdict}")
 
-    print(f"\n  Kept: {len(kept)}/{len(tickers)} tickers (trend_quality >= {args.min_trend_quality})")
+    logger.info(f"\n  Kept: {len(kept)}/{len(tickers)} tickers (trend_quality >= {args.min_trend_quality})")
     return 0
 
 
