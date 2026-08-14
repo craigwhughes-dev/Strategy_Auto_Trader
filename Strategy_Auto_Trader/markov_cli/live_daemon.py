@@ -33,16 +33,53 @@ DATA_DIR = ROOT / "data"
 LOGS_DIR = ROOT / "logs"
 
 
+class _DailyFileHandler(logging.Handler):
+    """FileHandler that swaps to a fresh daemon_<date>.log at local midnight.
+
+    Daemon runs for weeks between restarts (Task Scheduler auto-restart), so a
+    date computed once at setup_logging() call time goes stale — every line
+    after midnight would land in yesterday's file. Date is rechecked per emit
+    instead of relying on rollover-on-interval like TimedRotatingFileHandler,
+    so the naming stays daemon_<date>.log rather than a numbered/suffixed file.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._current_date = None
+        self._stream = None
+
+    def _ensure_current_file(self):
+        today = datetime.now().date().isoformat()
+        if today != self._current_date:
+            if self._stream is not None:
+                self._stream.close()
+            log_path = LOGS_DIR / f"daemon_{today}.log"
+            self._stream = open(log_path, "a", encoding="utf-8")
+            self._current_date = today
+
+    def emit(self, record):
+        try:
+            self._ensure_current_file()
+            msg = self.format(record)
+            self._stream.write(msg + "\n")
+            self._stream.flush()
+        except Exception:
+            self.handleError(record)
+
+    def close(self):
+        if self._stream is not None:
+            self._stream.close()
+        super().close()
+
+
 def setup_logging() -> logging.Logger:
-    """Set up rotating daily log."""
+    """Set up daily log that rolls over to a new file at local midnight."""
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    today = datetime.now().date().isoformat()
-    log_path = LOGS_DIR / f"daemon_{today}.log"
 
     logger = logging.getLogger("live_daemon")
     logger.setLevel(logging.DEBUG)
 
-    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler = _DailyFileHandler()
     handler.setFormatter(logging.Formatter(
         "%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
