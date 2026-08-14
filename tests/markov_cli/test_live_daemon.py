@@ -460,19 +460,18 @@ def test_process_cycle_market_config_can_override_reports_default(monkeypatch):
     assert captured["defaults"]["signal_reports_only"] is False
 
 
-def test_process_cycle_defaults_source_yfinance(monkeypatch):
-    """Temporarily back to yfinance until scripts/ibkr_backfill_universe.py
-    has run (see HANDOFF.md) — bouncing the daemon before then would bootstrap
-    every touched ticker live against IBKR's pacing cap. Flip to "ibkr" once
-    the backfill completes."""
+def test_process_cycle_defaults_source_ibkr(monkeypatch):
+    """The live daemon defaults to the local IBKR-backed cache, not yfinance —
+    this is what makes live and backtest share the same on-disk data
+    (ibkr_backfill_universe.py completed 2026-08-14, see HANDOFF.md)."""
     captured = _run_process_cycle_capture_defaults(monkeypatch, market_cfg={})
-    assert captured["defaults"]["source"] == "yfinance"
+    assert captured["defaults"]["source"] == "ibkr"
 
 
 def test_process_cycle_market_config_can_override_source_default(monkeypatch):
     captured = _run_process_cycle_capture_defaults(
-        monkeypatch, market_cfg={"defaults": {"source": "ibkr"}})
-    assert captured["defaults"]["source"] == "ibkr"
+        monkeypatch, market_cfg={"defaults": {"source": "yfinance"}})
+    assert captured["defaults"]["source"] == "yfinance"
 
 
 # -- item 8: interleaved manual-command polling -----------------------------
@@ -2644,9 +2643,8 @@ class TestRetryPendingTickers:
         assert exec_calls[0][0][1] == ["MNG.L"]  # ticker_list positional arg
 
     def test_defaults_source_matches_main_cycle(self, monkeypatch):
-        """The retry path shares the same data source default as the main
-        cycle (currently yfinance, temporarily, until the IBKR backfill has
-        run — see HANDOFF.md) — a retried ticker must not silently diverge."""
+        """The retry path shares the same IBKR-backed data source default as
+        the main cycle — a retried ticker must not fall back to yfinance."""
         from Strategy_Auto_Trader.markov_cli import batch
 
         daemon_state = {"pending_retry_tickers": {"ftse": ["MNG.L"]}}
@@ -2666,7 +2664,7 @@ class TestRetryPendingTickers:
             self._config(), daemon_state, portfolio=mock.Mock(), broker=mock.Mock(), logger=mock.Mock(),
         )
 
-        assert captured["defaults"]["source"] == "yfinance"
+        assert captured["defaults"]["source"] == "ibkr"
 
     def test_skips_market_closed(self, monkeypatch):
         """Market closed by the time reconciliation clears — don't fire, and

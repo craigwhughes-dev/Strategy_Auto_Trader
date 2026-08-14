@@ -206,7 +206,7 @@ def _is_market_open(ticker: str, positions: dict, config: dict, logger: logging.
         return False
 
     market_cfg = markets[market_name]
-    return is_trading_hours(market_cfg, logger)
+    return is_trading_hours(market_cfg, logger, market_name=market_name)
 
 
 def _execute_sell(

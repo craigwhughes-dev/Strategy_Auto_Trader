@@ -24,7 +24,7 @@ from .data_cache import fetch_hourly_cached
 from .vol_screen import rolling_trend_quality
 from ..strategy.base.registry import resolve_strategy
 
-_HMM_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "state" / "hmm_cache"
+_HMM_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "cache" / "hmm_cache"
 
 
 @dataclass

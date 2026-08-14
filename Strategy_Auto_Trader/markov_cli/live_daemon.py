@@ -415,7 +415,7 @@ def write_app_status_snapshot(
     markets_status = {}
     now = datetime.now(timezone.utc)
     for market_name, market_cfg in config.get("markets", {}).items():
-        in_trading = is_trading_hours(market_cfg, logger)
+        in_trading = is_trading_hours(market_cfg, logger, market_name=market_name, quiet=True)
         last_hour = last_cycle_hour.get(market_name, -1)
         markets_status[market_name] = {
             "in_trading_hours": in_trading,
@@ -454,15 +454,24 @@ def _write_app_status_snapshot_safe(
         logger.error(f"Failed to write app_status.json: {e}", exc_info=True)
 
 
-def is_trading_hours(market_cfg: dict, logger: logging.Logger, *, now: datetime | None = None) -> bool:
+def is_trading_hours(
+    market_cfg: dict,
+    logger: logging.Logger,
+    *,
+    now: datetime | None = None,
+    market_name: str | None = None,
+    quiet: bool = False,
+) -> bool:
     """Check if market is currently in trading hours."""
+    label = market_name or market_cfg["timezone"]
     tz = ZoneInfo(market_cfg["timezone"])
     if now is None:
         now = datetime.now(tz)
 
     weekday = now.weekday()
     if weekday >= 5:
-        logger.debug(f"  Market {market_cfg['timezone']}: weekend, skipping")
+        if not quiet:
+            logger.debug(f"  Market {label}: weekend, skipping")
         return False
 
     start_str = market_cfg["trading_start"]
@@ -471,8 +480,8 @@ def is_trading_hours(market_cfg: dict, logger: logging.Logger, *, now: datetime 
     end_time = datetime.strptime(end_str, "%H:%M").time()
 
     is_open = start_time <= now.time() <= end_time
-    if not is_open:
-        logger.debug(f"  Market {market_cfg['timezone']}: outside hours "
+    if not is_open and not quiet:
+        logger.debug(f"  Market {label}: outside hours "
                      f"({start_str}-{end_str}), skipping")
     return is_open
 
@@ -874,17 +883,16 @@ def retry_pending_tickers(
         if market_cfg is None:
             daemon_state.get("pending_retry_tickers", {}).pop(market_name, None)
             continue
-        if not is_trading_hours(market_cfg, logger):
+        if not is_trading_hours(market_cfg, logger, market_name=market_name):
             logger.info(f"[{market_name}] Market closed — deferring interrupted-ticker retry to next open")
             continue
 
         tickers = daemon_state.get("pending_retry_tickers", {}).pop(market_name, [])
         in_scope = load_in_scope_tickers(market_name, logger)
         overrides = load_ticker_overrides(market_name, logger)
-        # source temporarily back to yfinance — flip to "ibkr" once
-        # scripts/ibkr_backfill_universe.py has run (see HANDOFF.md); until
-        # then every ticker would bootstrap live against IBKR's pacing cap.
-        defaults = {"signal_reports_only": True, "source": "yfinance", **market_cfg.get("defaults", {})}
+        # ibkr_backfill_universe.py completed 2026-08-14 (589/603 tickers,
+        # see HANDOFF.md) — back on the local IBKR-backed cache.
+        defaults = {"signal_reports_only": True, "source": "ibkr", **market_cfg.get("defaults", {})}
         retry_tickers = [t for t in tickers if t in in_scope]
         if not retry_tickers:
             save_daemon_state(daemon_state)
@@ -940,10 +948,9 @@ def process_cycle(
 
     # Daemon cycles skip chart/HTML rendering unless a signal fires; a market
     # config can override by setting defaults.signal_reports_only = false.
-    # source temporarily back to yfinance — flip to "ibkr" once
-    # scripts/ibkr_backfill_universe.py has run (see HANDOFF.md); until then
-    # every ticker would bootstrap live against IBKR's pacing cap.
-    defaults = {"signal_reports_only": True, "source": "yfinance", **market_cfg.get("defaults", {})}
+    # ibkr_backfill_universe.py completed 2026-08-14 (589/603 tickers,
+    # see HANDOFF.md) — back on the local IBKR-backed cache.
+    defaults = {"signal_reports_only": True, "source": "ibkr", **market_cfg.get("defaults", {})}
     processed = []
     skipped_budget = []
 
@@ -1684,7 +1691,7 @@ def main(argv: list[str] | None = None) -> int:
                 # Check each market
                 now = datetime.now(timezone.utc)
                 for market_name, market_cfg in config.get("markets", {}).items():
-                    if not is_trading_hours(market_cfg, logger):
+                    if not is_trading_hours(market_cfg, logger, market_name=market_name):
                         continue
 
                     current_hour = now.hour

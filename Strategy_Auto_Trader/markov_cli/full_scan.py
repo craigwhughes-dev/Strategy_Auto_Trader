@@ -108,6 +108,7 @@ from ..plugins.persistent_hmm import PersistentHMMRegimeModel
 from ..quant_hmm import sentiment as sentiment_mod
 from ..quant_hmm.consolidated_engine import consolidated_backtest
 from ..quant_hmm.data_cache import fetch_hourly_cached, volatility_profile_cached
+from ..quant_hmm.ticker_ranking import _HMM_CACHE_DIR as HMM_CACHE_DIR
 from ..strategy.base.registry import resolve_strategy
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -115,7 +116,6 @@ UNIVERSE_FILE = ROOT / "config" / "universe_full.json"
 SP_FTSE_UNIVERSE_FILE = ROOT / "config" / "universe_sp_ftse.json"
 SCAN_DIR = ROOT / "reports" / "full_scan"
 JOURNAL_DIR = ROOT / "data" / "journals" / "full_scan"
-HMM_CACHE_DIR = ROOT / "state" / "hmm_cache"
 
 
 def _scan_paths(strategy: str, ticker: str) -> tuple[Path, Path, Path]:

@@ -43,7 +43,7 @@
   },
   "daytime": {
     "cycle_buffer_minutes": 5,
-    "max_seconds_per_cycle": 1500,
+    "max_seconds_per_cycle": 2400,
     "poll_interval_seconds": 60
   },
   "execution": {

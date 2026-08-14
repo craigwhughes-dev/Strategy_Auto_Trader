@@ -18,6 +18,7 @@ import pandas as pd
 
 from ..quant_hmm.quant_engine import fetch_daily, fetch_hourly
 from ..quant_hmm.consolidated_engine import consolidated_backtest
+from ..quant_hmm.ticker_ranking import _HMM_CACHE_DIR as HMM_CACHE_DIR
 from ..core.quality_gate import _apply_quality_gate  # noqa: F401 — available for custom gate logic
 from ..core.momentum import composite_signal, exit_indicators, momentum_signals
 from ..output.charting import plot_backtest
@@ -149,7 +150,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                              "at zero (useful when developing a new strategy)")
     parser.add_argument("--no-hmm-cache", dest="hmm_cache", action="store_false", default=True,
                         help="Recompute the HMM from scratch instead of continuing from the "
-                             "persisted per-ticker filter state in state/hmm_cache/")
+                             "persisted per-ticker filter state in data/cache/hmm_cache/")
 
     # Output
     parser.add_argument("--signal-reports-only", action="store_true", default=False,
@@ -409,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
         from ..plugins.persistent_hmm import PersistentHMMRegimeModel
         safe_ticker = args.ticker.replace("/", "-").replace("\\", "-")
         regime_model = PersistentHMMRegimeModel(
-            DATA_DIR.parent / "state" / "hmm_cache" / f"{safe_ticker}.pkl",
+            HMM_CACHE_DIR / f"{safe_ticker}.pkl",
             dates=df.index,
             closes=df["Close"].values,
             regime_smooth=args.regime_smooth,
