@@ -105,7 +105,8 @@ class TestGenerateCandidates:
         guard for the parallel dispatch/collection wiring."""
 
         def fake_fetch(ticker, strategy_name, vol_filter_tag, vol_filter_ok=True,
-                      use_seasonal_volume=False, source="yfinance"):
+                      use_seasonal_volume=False, source="yfinance",
+                      df=None, use_persistent_cache=True):
             rec = TradeRecord(date_opened="2026-01-12", ticker=ticker, strategy=strategy_name,
                                entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
             cand = Candidate(
@@ -225,6 +226,132 @@ class TestTrendQualityAsof:
         series = pd.Series([0.3, 0.6], index=[pd.Timestamp("2026-01-01"), pd.Timestamp("2026-01-10")])
         score = trend_quality_asof("AAPL", pd.Timestamp("2026-01-12"), {"AAPL": series})
         assert score == 0.6
+
+
+def _make_minimal_ohlcv(n: int = 600) -> pd.DataFrame:
+    import numpy as np
+    rng = np.random.default_rng(0)
+    closes = 100.0 * np.exp(np.cumsum(rng.normal(0.0001, 0.01, n)))
+    idx = pd.date_range("2023-01-01", periods=n, freq="h")
+    spread = np.abs(rng.normal(0, 0.005, n))
+    return pd.DataFrame(
+        {"Open": closes, "High": closes * (1 + spread),
+         "Low": closes * (1 - spread), "Close": closes,
+         "Volume": rng.integers(500, 5000, n).astype(float)},
+        index=idx,
+    )
+
+
+class TestRunTickerBacktestDISeam:
+    """DI-seam invariants: df param bypasses fetch; use_persistent_cache=False
+    prevents HMM cache reads/writes."""
+
+    def test_df_param_skips_fetch_hourly_cached(self):
+        """When df is provided, fetch_hourly_cached must never be called."""
+        fixture_df = _make_minimal_ohlcv()
+        with mock.patch("Strategy_Auto_Trader.quant_hmm.ticker_ranking.fetch_hourly_cached") as m_fetch:
+            with mock.patch("Strategy_Auto_Trader.quant_hmm.ticker_ranking.consolidated_backtest",
+                            return_value={"detail": pd.DataFrame()}):
+                run_ticker_backtest("AAPL", "default", df=fixture_df)
+        m_fetch.assert_not_called()
+
+    def test_use_persistent_cache_false_skips_persistent_hmm(self):
+        """use_persistent_cache=False must not construct PersistentHMMRegimeModel
+        and must not call .save()."""
+        fixture_df = _make_minimal_ohlcv()
+        with mock.patch(
+            "Strategy_Auto_Trader.quant_hmm.ticker_ranking.PersistentHMMRegimeModel"
+        ) as m_hmm:
+            with mock.patch("Strategy_Auto_Trader.quant_hmm.ticker_ranking.consolidated_backtest",
+                            return_value={"detail": pd.DataFrame()}):
+                run_ticker_backtest("AAPL", "default", df=fixture_df, use_persistent_cache=False)
+        m_hmm.assert_not_called()
+
+    def test_default_args_still_call_fetch_and_persistent_hmm(self):
+        """Calling with no new kwargs must preserve the original behavior:
+        fetch_hourly_cached called, PersistentHMMRegimeModel constructed."""
+        fake_df = _make_minimal_ohlcv()
+        with mock.patch("Strategy_Auto_Trader.quant_hmm.ticker_ranking.fetch_hourly_cached",
+                        return_value=fake_df) as m_fetch:
+            with mock.patch(
+                "Strategy_Auto_Trader.quant_hmm.ticker_ranking.PersistentHMMRegimeModel"
+            ) as m_hmm:
+                m_hmm.return_value.save = mock.MagicMock()
+                with mock.patch("Strategy_Auto_Trader.quant_hmm.ticker_ranking.consolidated_backtest",
+                                return_value={"detail": pd.DataFrame()}):
+                    run_ticker_backtest("AAPL", "default")
+        m_fetch.assert_called_once()
+        m_hmm.assert_called_once()
+
+
+class TestGenerateCandidatesDISeam:
+    """df_by_ticker and use_persistent_cache thread correctly through generate_candidates."""
+
+    def test_df_by_ticker_passed_to_workers(self, base_record, ts_base):
+        """df_by_ticker values must reach fetch_extract_and_prices as the df kwarg,
+        not be silently dropped."""
+        fixture_df = _make_minimal_ohlcv()
+        df_by_ticker = {"A": fixture_df}
+
+        received_dfs: list = []
+
+        def fake_fep(ticker, strategy_name, vol_filter_tag,
+                     vol_filter_ok=True, use_seasonal_volume=False, source="yfinance",
+                     df=None, use_persistent_cache=True):
+            received_dfs.append((ticker, df))
+            rec = TradeRecord(date_opened="2026-01-12", ticker=ticker, strategy=strategy_name,
+                              entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
+            cand = Candidate(
+                ticker=ticker, date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=1),
+                entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec,
+            )
+            close = pd.Series([100.0], index=[ts_base])
+            tq = pd.Series([0.5], index=[ts_base])
+            return [cand], close, tq
+
+        with mock.patch(
+            "Strategy_Auto_Trader.quant_hmm.ticker_ranking.fetch_extract_and_prices",
+            side_effect=fake_fep,
+        ):
+            generate_candidates(["A"], "test", df_by_ticker=df_by_ticker,
+                                use_persistent_cache=False)
+
+        assert len(received_dfs) == 1
+        ticker, received_df = received_dfs[0]
+        assert ticker == "A"
+        assert received_df is fixture_df
+
+    def test_df_by_ticker_parallel_threads_correctly(self, base_record, ts_base):
+        """With workers > 1 (mocked as ImmediateExecutor), df_by_ticker values
+        reach the worker without pickling errors (plain DataFrame args)."""
+        fixture_df = _make_minimal_ohlcv()
+        df_by_ticker = {"A": fixture_df, "B": fixture_df}
+
+        received: dict = {}
+
+        def fake_fep(ticker, strategy_name, vol_filter_tag,
+                     vol_filter_ok=True, use_seasonal_volume=False, source="yfinance",
+                     df=None, use_persistent_cache=True):
+            received[ticker] = df
+            rec = TradeRecord(date_opened="2026-01-12", ticker=ticker, strategy=strategy_name,
+                              entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
+            cand = Candidate(
+                ticker=ticker, date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=1),
+                entry_score=1.0, kelly_fraction=0.1, return_pct=0.05, record=rec,
+            )
+            return [cand], pd.Series([100.0], index=[ts_base]), pd.Series([0.5], index=[ts_base])
+
+        with mock.patch(
+            "Strategy_Auto_Trader.quant_hmm.ticker_ranking.fetch_extract_and_prices",
+            side_effect=fake_fep,
+        ):
+            with mock.patch("Strategy_Auto_Trader.quant_hmm.ticker_ranking.ProcessPoolExecutor",
+                            _ImmediateExecutor):
+                generate_candidates(["A", "B"], "test", workers=4,
+                                    df_by_ticker=df_by_ticker, use_persistent_cache=False)
+
+        assert received["A"] is fixture_df
+        assert received["B"] is fixture_df
 
 
 class TestTickerRankingScore:

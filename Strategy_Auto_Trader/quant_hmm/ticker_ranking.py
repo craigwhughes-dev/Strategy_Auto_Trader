@@ -142,9 +142,39 @@ def filter_candidates_by_top_tickers(
     return filtered, ticker_median_score
 
 
+def _filter_candidates_by_daily_trend_quality(
+    candidates: list[Candidate],
+    trend_quality_by_ticker: dict[str, pd.Series],
+    min_trend_quality: float,
+    wants_low: bool,
+) -> list[Candidate]:
+    """Keep only candidates whose ticker's trend_quality, as of their own
+    entry day, passes the threshold — the daily-rescreen equivalent of
+    overnight_scope.py's stage-1 vol screen (screen_market(), which re-runs
+    every night in real trading), applied per candidate instead of once per
+    ticker up front. wants_low inverts the direction for choppy-seeking
+    strategies (wants_low_trend_quality()), mirroring
+    overnight_scope.py:106-135's stage-1 logic exactly. No score yet
+    (insufficient trailing history) is permissive, matching
+    resolve_strategy()'s documented default with no ticker context.
+    """
+    kept = []
+    for c in candidates:
+        score = trend_quality_asof(c.ticker, c.date_opened, trend_quality_by_ticker)
+        if score is None:
+            kept.append(c)
+            continue
+        passes = (score < min_trend_quality) if wants_low else (score >= min_trend_quality)
+        if passes:
+            kept.append(c)
+    return kept
+
+
 def run_ticker_backtest(
     ticker: str, strategy_name: str, vol_filter_ok: bool = True,
     use_seasonal_volume: bool = False, source: str = "yfinance",
+    df: pd.DataFrame | None = None,
+    use_persistent_cache: bool = True,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """Fetch data and run one ticker's full-history backtest.
 
@@ -159,11 +189,21 @@ def run_ticker_backtest(
     pass source="ibkr" to revalidate against the same data the live daemon
     actually trades on.
 
+    df: when provided, skip fetch_hourly_cached entirely and use this frame
+    instead. source is moot when df is supplied.
+
+    use_persistent_cache: when False, pass regime_model=None to
+    consolidated_backtest and skip regime_model.save() — required for Monte
+    Carlo synthetic paths to avoid corrupting the real ticker's on-disk HMM
+    cache. position_sizer is also kept None (engine builds fresh per-call) so
+    KellySizer state never leaks across synthetic paths.
+
     Returns (detail_df, hourly_ohlc_df), or (None, None) on missing/insufficient
     data. The full OHLC frame (not just Close) is returned so callers needing
     High/Low (e.g. for rolling_trend_quality) don't have to re-fetch.
     """
-    df = fetch_hourly_cached(ticker, period="730d", source=source)
+    if df is None:
+        df = fetch_hourly_cached(ticker, period="730d", source=source)
     if df is None or df.empty:
         return None, None
     if isinstance(df.columns, pd.MultiIndex):
@@ -171,12 +211,15 @@ def run_ticker_backtest(
 
     entry_s, exit_s = resolve_strategy(strategy_name, vol_filter_ok=vol_filter_ok)
 
-    safe_ticker = ticker.replace("/", "-").replace("\\", "-")
-    regime_model = PersistentHMMRegimeModel(
-        _HMM_CACHE_DIR / f"{safe_ticker}.pkl",
-        dates=df.index,
-        closes=df["Close"].values,
-    )
+    if use_persistent_cache:
+        safe_ticker = ticker.replace("/", "-").replace("\\", "-")
+        regime_model = PersistentHMMRegimeModel(
+            _HMM_CACHE_DIR / f"{safe_ticker}.pkl",
+            dates=df.index,
+            closes=df["Close"].values,
+        )
+    else:
+        regime_model = None
 
     bt = consolidated_backtest(
         df,
@@ -186,7 +229,8 @@ def run_ticker_backtest(
         exit_strategy=exit_s,
         use_seasonal_volume=use_seasonal_volume,
     )
-    regime_model.save()
+    if use_persistent_cache and regime_model is not None:
+        regime_model.save()
     detail = bt.get("detail", pd.DataFrame())
     if detail.empty:
         return None, None
@@ -230,15 +274,20 @@ def candidates_from_detail(
 def fetch_and_extract(
     ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True,
     use_seasonal_volume: bool = False, source: str = "yfinance",
+    df: pd.DataFrame | None = None,
+    use_persistent_cache: bool = True,
 ) -> list[Candidate]:
     """Run one ticker's full-history backtest and extract its round-trip trades.
 
     vol_filter_ok is passed straight into the strategy's own built-in veto
     (baked into every Entry class) — this is a bool, not a re-lookup, since
     the caller has usually already screened the ticker once (efficiency).
+
+    df / use_persistent_cache: see run_ticker_backtest's docstring.
     """
     detail, _df = run_ticker_backtest(ticker, strategy_name, vol_filter_ok,
-                                      use_seasonal_volume=use_seasonal_volume, source=source)
+                                      use_seasonal_volume=use_seasonal_volume, source=source,
+                                      df=df, use_persistent_cache=use_persistent_cache)
     if detail is None:
         print(f"  {ticker}: no data or insufficient data, skipping")
         return []
@@ -248,19 +297,25 @@ def fetch_and_extract(
 def fetch_extract_and_prices(
     ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True,
     use_seasonal_volume: bool = False, source: str = "yfinance",
+    df: pd.DataFrame | None = None,
+    use_persistent_cache: bool = True,
 ) -> tuple[list[Candidate], pd.Series | None, pd.Series | None]:
     """Like fetch_and_extract, but also returns the ticker's close-price series
     (for mark-to-market valuation) and its rolling trend_quality series (for
     daily vol-filter rescreening — see rolling_trend_quality()'s docstring for
     why a single "as of today" snapshot can't be used across a historical
-    backtest). Top-level function so it's picklable for ProcessPoolExecutor."""
-    detail, df = run_ticker_backtest(ticker, strategy_name, vol_filter_ok,
-                                     use_seasonal_volume=use_seasonal_volume, source=source)
+    backtest). Top-level function so it's picklable for ProcessPoolExecutor.
+
+    df / use_persistent_cache: see run_ticker_backtest's docstring.
+    """
+    detail, df_out = run_ticker_backtest(ticker, strategy_name, vol_filter_ok,
+                                         use_seasonal_volume=use_seasonal_volume, source=source,
+                                         df=df, use_persistent_cache=use_persistent_cache)
     if detail is None:
         return [], None, None
     candidates = candidates_from_detail(ticker, detail, strategy_name, vol_filter_tag)
-    trend_quality = rolling_trend_quality(daily_ohlc_from_hourly(df))
-    return candidates, df["Close"], trend_quality
+    trend_quality = rolling_trend_quality(daily_ohlc_from_hourly(df_out))
+    return candidates, df_out["Close"], trend_quality
 
 
 def generate_candidates(
@@ -271,6 +326,8 @@ def generate_candidates(
     workers: int = 1,
     use_seasonal_volume: bool = False,
     source: str = "yfinance",
+    df_by_ticker: dict[str, pd.DataFrame] | None = None,
+    use_persistent_cache: bool = True,
 ) -> tuple[list[Candidate], dict[str, pd.Series], dict[str, pd.Series]]:
     """Generate one strategy's candidate trades across a ticker list, optionally
     in parallel, retaining each ticker's close-price series (mark-to-market)
@@ -282,7 +339,15 @@ def generate_candidates(
     source="ibkr" opts every ticker in this run onto the local incremental
     IBKR-backed cache instead of yfinance — day-to-day research sweeps stay
     on the yfinance default; pass source="ibkr" for a full-universe live_sim
-    revalidation against the data the live daemon actually trades on."""
+    revalidation against the data the live daemon actually trades on.
+
+    df_by_ticker: when provided, each ticker reads df_by_ticker.get(ticker)
+    instead of calling fetch_hourly_cached — required for Monte Carlo synthetic
+    paths (plain DataFrames, picklable across ProcessPoolExecutor without
+    closure serialisation issues).
+
+    use_persistent_cache: passed through to run_ticker_backtest — set False for
+    Monte Carlo paths to avoid corrupting real on-disk HMM caches."""
     all_candidates: list[Candidate] = []
     price_by_ticker: dict[str, pd.Series] = {}
     trend_quality_by_ticker: dict[str, pd.Series] = {}
@@ -290,8 +355,12 @@ def generate_candidates(
     if workers > 1 and len(tickers) > 1:
         with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(fetch_extract_and_prices, t, strategy_name, vol_filter_tag,
-                                vol_filter_ok, use_seasonal_volume, source): t
+                executor.submit(
+                    fetch_extract_and_prices, t, strategy_name, vol_filter_tag,
+                    vol_filter_ok, use_seasonal_volume, source,
+                    df_by_ticker.get(t) if df_by_ticker else None,
+                    use_persistent_cache,
+                ): t
                 for t in tickers
             }
             for future in as_completed(futures):
@@ -305,7 +374,9 @@ def generate_candidates(
     else:
         for ticker in tickers:
             cands, close, trend_quality = fetch_extract_and_prices(
-                ticker, strategy_name, vol_filter_tag, vol_filter_ok, use_seasonal_volume, source)
+                ticker, strategy_name, vol_filter_tag, vol_filter_ok, use_seasonal_volume, source,
+                df_by_ticker.get(ticker) if df_by_ticker else None,
+                use_persistent_cache)
             all_candidates.extend(cands)
             if close is not None:
                 price_by_ticker[ticker] = close

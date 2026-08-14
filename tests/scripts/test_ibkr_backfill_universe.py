@@ -83,6 +83,76 @@ class TestBackfillUniverse:
 
         assert mock_fetch.call_count == 1
 
+    def test_reconnects_after_mid_run_disconnect(self, tmp_path, monkeypatch):
+        """A Gateway drop mid-run (e.g. its nightly restart window) must
+        trigger a reconnect before the next ticker, not silently produce
+        "no data" for every remaining ticker — this is exactly what happened
+        in the first live run (dropped at ticker 391/603, no reconnect,
+        213 tickers wasted)."""
+        from scripts import ibkr_backfill_universe as backfill
+        from Strategy_Auto_Trader.broker import ibkr_data
+
+        universe = _universe_file(tmp_path, ["AAPL", "MSFT"])
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
+        idx = pd.date_range("2024-01-01", periods=10, freq="h", tz="UTC")
+        fake_df = pd.DataFrame(
+            {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 100}, index=idx)
+
+        state = {"connected": True}
+        connect_calls = {"n": 0}
+
+        def fake_connect(self):
+            connect_calls["n"] += 1
+            state["connected"] = True
+            self._ib = mock.MagicMock()
+            self._ib.isConnected.side_effect = lambda: state["connected"]
+            return True
+
+        def fake_fetch(self, ticker, period="730d"):
+            if ticker == "AAPL":
+                # Simulate the socket dying right after this ticker's fetch.
+                state["connected"] = False
+            return fake_df
+
+        with mock.patch.object(backfill.IBKRDataClient, "connect", fake_connect), \
+             mock.patch.object(backfill.IBKRDataClient, "disconnect"), \
+             mock.patch.object(backfill.IBKRDataClient, "fetch_hourly", fake_fetch), \
+             mock.patch("time.sleep"):
+            rc = backfill.main(["--universe", str(universe)])
+
+        assert rc == 0
+        assert connect_calls["n"] == 2  # initial connect + one reconnect before MSFT
+
+    def test_aborts_after_three_consecutive_reconnect_failures(self, tmp_path, monkeypatch):
+        """A genuinely dead Gateway must abort the run (clear message, no
+        wasted "no data" churn through the rest of the universe) rather than
+        retry forever or silently limp through every remaining ticker."""
+        from scripts import ibkr_backfill_universe as backfill
+        from Strategy_Auto_Trader.broker import ibkr_data
+
+        universe = _universe_file(tmp_path, ["A", "B", "C", "D", "E"])
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
+
+        connect_calls = {"n": 0}
+
+        def fake_connect(self):
+            connect_calls["n"] += 1
+            if connect_calls["n"] == 1:
+                self._ib = mock.MagicMock()
+                self._ib.isConnected.return_value = False
+                return True
+            return False  # every reconnect attempt fails
+
+        with mock.patch.object(backfill.IBKRDataClient, "connect", fake_connect), \
+             mock.patch.object(backfill.IBKRDataClient, "disconnect"), \
+             mock.patch.object(backfill.IBKRDataClient, "fetch_hourly") as mock_fetch, \
+             mock.patch("time.sleep"):
+            rc = backfill.main(["--universe", str(universe)])
+
+        assert rc == 1
+        mock_fetch.assert_not_called()
+        assert connect_calls["n"] == 4  # initial + 3 failed reconnect attempts
+
     def test_sets_backfill_pacing_on_module(self, tmp_path, monkeypatch):
         """The wider inter-request pacing must actually be applied, not just
         computed — this is what keeps a full-universe run under IBKR's

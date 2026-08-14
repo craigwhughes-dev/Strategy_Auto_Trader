@@ -49,6 +49,22 @@ def _load_universe(path: Path) -> list[str]:
     return data["tickers"]
 
 
+def _ensure_connected(client: IBKRDataClient) -> bool:
+    """Reconnect if Gateway dropped the socket mid-run.
+
+    A ~9-hour run crosses Gateway's own nightly restart/logoff window, which
+    silently kills the connection — without this check, every subsequent
+    ticker's fetch_hourly() call fails on the dead socket and is swallowed by
+    its own broad except (returns cached/None), so the run just burns through
+    the remaining tickers producing "no data" with no indication anything
+    went wrong until the summary line."""
+    if client._ib is not None and client._ib.isConnected():
+        return True
+    print("    connection lost — reconnecting...")
+    client.disconnect()
+    return client.connect()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -82,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
           f"(~{_BACKFILL_PAGE_SLEEP_S}s/request pacing)...")
 
     skipped = done = failed = 0
+    consecutive_reconnect_failures = 0
     try:
         for i, ticker in enumerate(tickers, 1):
             cached = ibkr_data._load_cache(ticker)
@@ -91,6 +108,17 @@ def main(argv: list[str] | None = None) -> int:
                     skipped += 1
                     print(f"[{i}/{len(tickers)}] {ticker}: already {span_days}d cached, skipping")
                     continue
+
+            if not _ensure_connected(client):
+                consecutive_reconnect_failures += 1
+                print(f"    reconnect failed ({consecutive_reconnect_failures} in a row)")
+                if consecutive_reconnect_failures >= 3:
+                    print("\nGateway unreachable after 3 reconnect attempts — aborting. "
+                          "Re-run once it's back up; already-bootstrapped tickers are skipped.")
+                    return 1
+                time.sleep(_BACKFILL_PAGE_SLEEP_S)
+                continue
+            consecutive_reconnect_failures = 0
 
             print(f"[{i}/{len(tickers)}] {ticker}: bootstrapping to {args.period}...", flush=True)
             try:

@@ -489,7 +489,7 @@ def main(argv: list[str] | None = None) -> int:
         cur_reason = str(last_row.get("sell_reason", "signal"))
     elif last_pos > 0:
         cur_flag = "HOLD"
-        cur_reason = "in position"
+        cur_reason = "no clear buy or sell signal"
     else:
         cur_flag = "HOLD"
         cur_reason = "flat"

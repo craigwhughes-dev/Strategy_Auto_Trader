@@ -48,6 +48,7 @@ from ..plugins.costs import COST_MODEL_CHOICES, make_cost_model
 from ..plugins.interest import IbkrTieredInterest
 from ..quant_hmm.ticker_ranking import (
     Candidate,
+    _filter_candidates_by_daily_trend_quality,
     fetch_and_extract,
     filter_candidates_by_top_tickers,
     generate_candidates,
@@ -312,33 +313,6 @@ def simulate_strategy(
 
     return executed
 
-
-def _filter_candidates_by_daily_trend_quality(
-    candidates: list[Candidate],
-    trend_quality_by_ticker: dict[str, pd.Series],
-    min_trend_quality: float,
-    wants_low: bool,
-) -> list[Candidate]:
-    """Keep only candidates whose ticker's trend_quality, as of their own
-    entry day, passes the threshold — the daily-rescreen equivalent of
-    overnight_scope.py's stage-1 vol screen (screen_market(), which re-runs
-    every night in real trading), applied per candidate instead of once per
-    ticker up front. wants_low inverts the direction for choppy-seeking
-    strategies (wants_low_trend_quality()), mirroring
-    overnight_scope.py:106-135's stage-1 logic exactly. No score yet
-    (insufficient trailing history) is permissive, matching
-    resolve_strategy()'s documented default with no ticker context.
-    """
-    kept = []
-    for c in candidates:
-        score = trend_quality_asof(c.ticker, c.date_opened, trend_quality_by_ticker)
-        if score is None:
-            kept.append(c)
-            continue
-        passes = (score < min_trend_quality) if wants_low else (score >= min_trend_quality)
-        if passes:
-            kept.append(c)
-    return kept
 
 
 def _write_position_summary(rows: list[dict], path: Path) -> None:
