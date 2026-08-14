@@ -34,17 +34,20 @@ LOGS_DIR = ROOT / "logs"
 
 
 class _DailyFileHandler(logging.Handler):
-    """FileHandler that swaps to a fresh daemon_<date>.log at local midnight.
+    """FileHandler that swaps to a fresh daemon_<date>_<pid>.log at local midnight.
 
     Daemon runs for weeks between restarts (Task Scheduler auto-restart), so a
     date computed once at setup_logging() call time goes stale — every line
     after midnight would land in yesterday's file. Date is rechecked per emit
     instead of relying on rollover-on-interval like TimedRotatingFileHandler,
-    so the naming stays daemon_<date>.log rather than a numbered/suffixed file.
+    so the naming stays daemon_<date>_<pid>.log rather than a numbered/suffixed
+    file. PID is fixed for the process lifetime, so a restart always starts a
+    clean file and it's obvious from the filename which process wrote it.
     """
 
     def __init__(self):
         super().__init__()
+        self._pid = os.getpid()
         self._current_date = None
         self._stream = None
 
@@ -53,7 +56,7 @@ class _DailyFileHandler(logging.Handler):
         if today != self._current_date:
             if self._stream is not None:
                 self._stream.close()
-            log_path = LOGS_DIR / f"daemon_{today}.log"
+            log_path = LOGS_DIR / f"daemon_{today}_{self._pid}.log"
             self._stream = open(log_path, "a", encoding="utf-8")
             self._current_date = today
 
