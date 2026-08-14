@@ -29,6 +29,8 @@ Limitations:
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -382,6 +384,38 @@ def assemble_synthetic_ohlcv(
     )
 
 
+def sample_daily_tiled_states(
+    model,
+    order: np.ndarray,
+    n_bars: int,
+    seed: int,
+    bars_per_day: int = 6,
+    transmat_noise: float = 0.0,
+    market_states: np.ndarray | None = None,
+    market_coupling: float = 0.0,
+) -> np.ndarray:
+    """Sample daily regime labels and tile to hourly resolution.
+
+    Samples ceil(n_bars / bars_per_day) daily state labels from model, then
+    tiles each label bars_per_day times so that one calendar day maps to
+    bars_per_day consecutive hourly bars. Returns semantic labels
+    (Bear=0 / Sideways=1 / Bull=2) of length exactly n_bars.
+
+    Use when model was fitted on daily closes (20+ yr history) to get better
+    regime transition probabilities, while the block bootstrap pool remains the
+    real 2yr hourly data — preserving authentic intraday microstructure.
+    """
+    n_daily = math.ceil(n_bars / bars_per_day)
+    mstates = market_states[:n_daily] if market_states is not None else None
+    _, daily_labels = sample_synthetic_path(
+        model, order, n_daily, seed,
+        transmat_noise=transmat_noise,
+        market_states=mstates,
+        market_coupling=market_coupling,
+    )
+    return np.repeat(daily_labels, bars_per_day)[:n_bars]
+
+
 def generate_synthetic_df(
     real_df: pd.DataFrame,
     model,
@@ -394,6 +428,7 @@ def generate_synthetic_df(
     transmat_noise: float = 0.0,
     market_states: np.ndarray | None = None,
     market_coupling: float = 0.0,
+    precomputed_state_labels: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Convenience wrapper: sample one synthetic path and assemble OHLCV.
 
@@ -415,11 +450,21 @@ def generate_synthetic_df(
 
     market_states/market_coupling: passed through to sample_synthetic_path.
     See that function's docstring. Default None/0.0 = no cross-ticker coupling.
+
+    precomputed_state_labels: optional pre-generated regime label sequence of
+    length >= n_bars (e.g. from sample_daily_tiled_states). When provided,
+    sample_synthetic_path is skipped entirely and these labels guide the block
+    bootstrap directly. The model/order args are ignored for state generation
+    but still required for the function signature.
     """
-    iid_log_returns, state_labels = sample_synthetic_path(
-        model, order, n_bars, seed, transmat_noise=transmat_noise,
-        market_states=market_states, market_coupling=market_coupling,
-    )
+    if precomputed_state_labels is not None:
+        state_labels = precomputed_state_labels[:n_bars]
+        iid_log_returns = np.zeros(n_bars)  # unused when block_size > 1
+    else:
+        iid_log_returns, state_labels = sample_synthetic_path(
+            model, order, n_bars, seed, transmat_noise=transmat_noise,
+            market_states=market_states, market_coupling=market_coupling,
+        )
 
     hist_volume = real_df["Volume"].values[1:]
     hist_range = ((real_df["High"] - real_df["Low"]) / real_df["Close"]).values[1:]

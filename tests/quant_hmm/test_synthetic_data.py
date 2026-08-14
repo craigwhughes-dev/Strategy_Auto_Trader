@@ -18,6 +18,7 @@ from Strategy_Auto_Trader.quant_hmm.synthetic_data import (
     generate_synthetic_df,
     label_hidden_states,
     sample_coupled_state_sequence,
+    sample_daily_tiled_states,
     sample_synthetic_path,
 )
 
@@ -589,3 +590,84 @@ class TestIntegration:
         for key in ["sharpe_strategy", "sortino_strategy", "max_drawdown_strategy",
                     "total_return_strategy", "final_portfolio"]:
             assert key in bt
+
+
+class TestSampleDailyTiledStates:
+    def setup_method(self):
+        df = make_fixture_ohlcv(600)
+        self.model, self.order = fit_generating_hmm(df["Close"])
+
+    def test_output_length_exact(self):
+        for n_bars in [100, 101, 144, 145, 999]:
+            out = sample_daily_tiled_states(self.model, self.order, n_bars=n_bars, seed=0)
+            assert len(out) == n_bars, f"n_bars={n_bars}: got {len(out)}"
+
+    def test_values_in_valid_range(self):
+        out = sample_daily_tiled_states(self.model, self.order, n_bars=300, seed=7)
+        assert set(np.unique(out)) <= {0, 1, 2}
+
+    def test_tiling_structure(self):
+        # With bars_per_day=6 each group of 6 consecutive bars should be identical
+        out = sample_daily_tiled_states(
+            self.model, self.order, n_bars=60, seed=3, bars_per_day=6
+        )
+        for i in range(0, 60, 6):
+            block = out[i : i + 6]
+            assert np.all(block == block[0]), f"block at {i} not uniform: {block}"
+
+    def test_reproducible_same_seed(self):
+        a = sample_daily_tiled_states(self.model, self.order, n_bars=200, seed=42)
+        b = sample_daily_tiled_states(self.model, self.order, n_bars=200, seed=42)
+        np.testing.assert_array_equal(a, b)
+
+
+class TestGenerateSyntheticDfPrecomputedLabels:
+    def setup_method(self):
+        self.real_df = make_fixture_ohlcv(600)
+        self.model, self.order = fit_generating_hmm(self.real_df["Close"])
+        log_ret = np.log(
+            self.real_df["Close"].values[1:] / self.real_df["Close"].values[:-1]
+        )
+        self.log_ret = log_ret
+        self.hist_labels = label_hidden_states(self.model, self.order, log_ret)
+
+    def test_precomputed_labels_used_not_model(self):
+        fixed_labels = np.zeros(300, dtype=np.intp)  # all-Bear
+        with mock.patch(
+            "Strategy_Auto_Trader.quant_hmm.synthetic_data.sample_synthetic_path"
+        ) as mock_ssp:
+            generate_synthetic_df(
+                self.real_df, self.model, self.order,
+                self.log_ret, self.hist_labels,
+                n_bars=300, seed=0,
+                precomputed_state_labels=fixed_labels,
+            )
+        mock_ssp.assert_not_called()
+
+    def test_output_shape_unchanged(self):
+        precomputed = sample_daily_tiled_states(
+            self.model, self.order, n_bars=300, seed=5
+        )
+        df = generate_synthetic_df(
+            self.real_df, self.model, self.order,
+            self.log_ret, self.hist_labels,
+            n_bars=300, seed=5,
+            precomputed_state_labels=precomputed,
+        )
+        assert len(df) == 300
+        assert list(df.columns) == ["Open", "High", "Low", "Close", "Volume"]
+
+    def test_without_precomputed_unchanged(self):
+        # Passing None must produce same result as omitting the arg entirely
+        df_omit = generate_synthetic_df(
+            self.real_df, self.model, self.order,
+            self.log_ret, self.hist_labels,
+            n_bars=200, seed=99,
+        )
+        df_none = generate_synthetic_df(
+            self.real_df, self.model, self.order,
+            self.log_ret, self.hist_labels,
+            n_bars=200, seed=99,
+            precomputed_state_labels=None,
+        )
+        pd.testing.assert_frame_equal(df_omit, df_none)

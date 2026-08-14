@@ -46,10 +46,12 @@ from .live_sim import _max_drawdown, arbitrate
 from ..core.cli_logging import setup_cli_logger
 from ..plugins.costs import COST_MODEL_CHOICES
 from ..quant_hmm.data_cache import fetch_hourly_cached
+from ..quant_hmm.quant_engine import fetch_daily
 from ..quant_hmm.synthetic_data import (
     fit_generating_hmm,
     generate_synthetic_df,
     label_hidden_states,
+    sample_daily_tiled_states,
     sample_synthetic_path,
 )
 from ..quant_hmm.ticker_ranking import (
@@ -117,6 +119,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                              "toward the shared market state per path. 0.3 is a realistic starting "
                              "point; 1.0 = fully correlated. Stresses simultaneous co-crash risk "
                              "that independent per-ticker HMMs cannot generate.")
+    parser.add_argument("--daily-hmm", action="store_true", default=False,
+                        help="Fit per-ticker generating HMMs on long daily history (20+ yr). "
+                             "Regime sequences use multi-cycle transition probabilities; block "
+                             "bootstrap still draws from each ticker's 2yr real hourly pool.")
     return parser
 
 
@@ -278,6 +284,23 @@ def main(argv: list[str] | None = None) -> int:
         final_tickers = [t for t in fixed_tickers if t in real_dfs]
         logger.info(f"  {len(final_tickers)} tickers with fitted HMMs")
 
+        # --- Daily long-history HMMs (optional) ---
+        daily_hmm_models: dict[str, tuple] = {}
+        if args.daily_hmm:
+            logger.info("  fitting daily long-history HMMs per ticker (20+ yr)...")
+            daily_ok = 0
+            for ticker in final_tickers:
+                d_df = fetch_daily(ticker)
+                if d_df is None or len(d_df) < 252 * 5:
+                    continue
+                try:
+                    dm, do = fit_generating_hmm(d_df["Close"])
+                    daily_hmm_models[ticker] = (dm, do)
+                    daily_ok += 1
+                except ValueError:
+                    pass  # fall back to hourly HMM for this ticker
+            logger.info(f"  daily HMMs fitted for {daily_ok}/{len(final_tickers)} tickers")
+
         # --- Market HMM for cross-ticker coupling (finding C) ---
         market_model = market_order = None
         market_max_n = 0
@@ -322,6 +345,12 @@ def main(argv: list[str] | None = None) -> int:
                 # Slice market states to this ticker's path length (all tickers share
                 # the same market state at each synthetic bar index).
                 mstates = market_state_seq[:len(df)] if market_state_seq is not None else None
+                precomputed = None
+                if ticker in daily_hmm_models:
+                    dm, do = daily_hmm_models[ticker]
+                    precomputed = sample_daily_tiled_states(
+                        dm, do, len(df), seed=ticker_seed,
+                    )
                 result[ticker] = generate_synthetic_df(
                     df, model, order, log_ret, labels,
                     n_bars=len(df), seed=ticker_seed,
@@ -329,6 +358,7 @@ def main(argv: list[str] | None = None) -> int:
                     transmat_noise=args.transmat_noise,
                     market_states=mstates,
                     market_coupling=args.market_coupling,
+                    precomputed_state_labels=precomputed,
                 )
             return result
 

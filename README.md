@@ -55,6 +55,8 @@ Each run writes a timestamped directory under `data/` containing the input data,
 | `... markov_cli.execute --dry-run` | Read latest signals, print the orders that *would* be placed |
 | `... markov_cli.execute` | Place paper orders via IBKR TWS (port 7497) |
 | `... markov_cli.live_daemon` | Continuous hourly trading loop with overnight screening |
+| `... markov_cli.monte_carlo --ticker SPY` | Single-ticker Monte Carlo stress test on synthetic price paths |
+| `... markov_cli.monte_carlo_live_sim --universe` | Portfolio-level Monte Carlo, capital-arbitrated across many synthetic tickers |
 
 (All invoked as `uv run python -m Strategy_Auto_Trader.<module>`.) IBKR setup — TWS configuration, capital pot, position limits — is covered in [USERGUIDE.md](USERGUIDE.md#ibkr-paper-trading-execution-engine); daemon deployment (Windows Task Scheduler) in [README_DAEMON.md](README_DAEMON.md).
 
@@ -91,6 +93,25 @@ This repo doubles as a Claude Code skill: open it in Claude Code and drive the w
 **Auto trading daemon**
 - *"start the daemon for ftse100. use the optimised strategy. unlimited buy and sell. 10k original stake. record all results in a clean journal. use ibkr for paper trades"*
 
+## Monte Carlo stress testing
+
+A single backtest shows one realised history — it can't separate luck from skill or surface tail risk. The Monte Carlo module fits a 3-state Gaussian HMM (Bear/Sideways/Bull) to a ticker's real returns, then generates many synthetic price paths that share that ticker's regime structure and block-bootstrapped return dynamics (24-bar blocks, preserving the intraday autocorrelation the composite signal needs) but differ in the specific sequence of events. Running the strategy across hundreds of these paths gives a *distribution* of outcomes (Sharpe, drawdown, return) instead of one number.
+
+Two tracks:
+- **Track A** (`monte_carlo.py`) — single ticker, isolated capital.
+- **Track B** (`monte_carlo_live_sim.py`) — full portfolio, capital-arbitrated across a fixed top-K ticker universe, exercising the same shared-pot admission/Kelly-sizing logic as `live_sim.py`. Supports an optional `--market-coupling` factor that biases all tickers' synthetic paths toward a shared market regime (fit from SPY), to stress simultaneous co-crash scenarios that fully independent per-ticker paths can't produce.
+
+```bash
+uv run python -m Strategy_Auto_Trader.markov_cli.monte_carlo \
+    --ticker SPY --strategy default --n-paths 300 --workers 4
+
+uv run python -m Strategy_Auto_Trader.markov_cli.monte_carlo_live_sim \
+    --universe --strategies optimised_new --n-paths 50 \
+    --workers 4 --pot-sizes 25000 --top-k 70 --market-coupling 0.3
+```
+
+Output lands in `data/monte_carlo/<label>_<timestamp>/` as `mc_summary.json` (percentile bands + `prob_of_loss`) and `mc_paths.csv` (one row per path). Full design, invariants, and known limitations: **[MONTE_CARLO_DESIGN.md](MONTE_CARLO_DESIGN.md)**; the review-driven fidelity improvements (block-aligned volume/range, transition-matrix noise, market coupling) are tracked in **[MONTE_CARLO_IMPROVEMENTS_PLAN.md](MONTE_CARLO_IMPROVEMENTS_PLAN.md)**.
+
 ## Testing
 
 ```bash
@@ -120,6 +141,8 @@ tests/           # pytest suite (mirrors the package structure)
 - **[USERGUIDE.md](USERGUIDE.md)** — every CLI option, signal weighting, exit rule, output file, watchlist format, email setup, and IBKR configuration
 - **[README_DAEMON.md](README_DAEMON.md)** — deploying the continuous trading daemon on Windows Task Scheduler
 - **[TASK_SCHEDULER_SETUP.md](TASK_SCHEDULER_SETUP.md)** — scheduled batch runs after LSE/NYSE close
+- **[MONTE_CARLO_DESIGN.md](MONTE_CARLO_DESIGN.md)** — synthetic-data stress test design: HMM generating model, block bootstrap, invariants, known limitations
+- **[MONTE_CARLO_IMPROVEMENTS_PLAN.md](MONTE_CARLO_IMPROVEMENTS_PLAN.md)** — external-review findings and the fidelity improvements shipped from them
 
 ## Example email
 

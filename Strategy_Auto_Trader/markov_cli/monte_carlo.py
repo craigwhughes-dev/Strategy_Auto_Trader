@@ -40,11 +40,12 @@ from .run import (
 from ..plugins.context_adjuster import SentimentAdjuster
 from ..plugins.costs import make_cost_model
 from ..quant_hmm.consolidated_engine import consolidated_backtest
-from ..quant_hmm.quant_engine import _HOURS_PER_YEAR, fetch_hourly
+from ..quant_hmm.quant_engine import _HOURS_PER_YEAR, fetch_daily, fetch_hourly
 from ..quant_hmm.synthetic_data import (
     fit_generating_hmm,
     generate_synthetic_df,
     label_hidden_states,
+    sample_daily_tiled_states,
 )
 from ..quant_hmm.vol_screen import volatility_profile
 from ..strategy.base.registry import resolve_strategy
@@ -80,6 +81,10 @@ def _build_arg_parser():
     mc.add_argument("--transmat-noise", type=float, default=0.0,
                     help="Dirichlet noise on HMM transition matrix per path (default: 0.0 = "
                          "off). Stresses parameter uncertainty. Try 0.05–0.2.")
+    mc.add_argument("--daily-hmm", action="store_true", default=False,
+                    help="Fit the generating HMM on long daily history (20+ yr) instead of "
+                         "2yr hourly. Regime sequences use multi-cycle transition probabilities; "
+                         "block bootstrap still draws from the 2yr real hourly pool.")
     return parser
 
 
@@ -167,6 +172,18 @@ def main(argv: list[str] | None = None) -> int:
     log_returns = np.log(real_df["Close"].values[1:] / real_df["Close"].values[:-1])
     historical_state_labels = label_hidden_states(model, order, log_returns)
 
+    daily_model = daily_order = None
+    if args.daily_hmm:
+        logger.info(f"  fetching {args.ticker} daily long-history data for generating HMM...")
+        daily_df = fetch_daily(args.ticker)
+        if daily_df is None or len(daily_df) < 252 * 5:
+            logger.warning("  daily data < 5yr — falling back to hourly HMM for regime sequences")
+        else:
+            logger.info(f"  {len(daily_df)} daily bars | "
+                        f"{daily_df.index.min().date()} -> {daily_df.index.max().date()}")
+            daily_model, daily_order = fit_generating_hmm(daily_df["Close"])
+            logger.info("  daily HMM fitted — regime sequences will use multi-cycle transitions")
+
     backtest_kwargs = dict(
         entry_prob=args.entry_prob,
         exit_prob=args.exit_prob,
@@ -204,16 +221,22 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = _MC_DIR / f"{safe_ticker}_{args.strategy}_{timestamp}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    hmm_label = "daily" if daily_model is not None else "hourly"
     logger.info(f"  generating {args.n_paths} synthetic paths ({n_bars} bars each, "
-          f"block_size={args.block_size})...")
-    synth_dfs = [
-        generate_synthetic_df(
+          f"block_size={args.block_size}, regime_source={hmm_label})...")
+    synth_dfs = []
+    for i in range(args.n_paths):
+        precomputed = None
+        if daily_model is not None:
+            precomputed = sample_daily_tiled_states(
+                daily_model, daily_order, n_bars, seed=args.seed + i,
+            )
+        synth_dfs.append(generate_synthetic_df(
             real_df, model, order, log_returns, historical_state_labels,
             n_bars, seed=args.seed + i, block_size=args.block_size,
             transmat_noise=args.transmat_noise,
-        )
-        for i in range(args.n_paths)
-    ]
+            precomputed_state_labels=precomputed,
+        ))
 
     if args.save_sample_paths > 0:
         sample_dir = out_dir / "sample_paths"
