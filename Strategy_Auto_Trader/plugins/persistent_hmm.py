@@ -27,11 +27,14 @@ is the more consistent walk-forward behaviour, not a compromise.
 
 from __future__ import annotations
 
+import logging
 import pickle
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+_log = logging.getLogger(__name__)
 
 from ..quant_hmm.quant_engine import discretize_p_bull
 from .hmm_regime import HMMRegimeModel
@@ -108,14 +111,20 @@ class PersistentHMMRegimeModel(HMMRegimeModel):
         }
 
     def _load_cache(self) -> None:
+        name = self._cache_path.stem
         if not self._cache_path.exists():
             return
         try:
             with open(self._cache_path, "rb") as fh:
                 cache = pickle.load(fh)
-        except Exception:
+        except Exception as exc:
+            _log.warning("%s: HMM cache unreadable (%s) — cold refit will run", name, exc)
             return
         if not isinstance(cache, dict) or cache.get("params") != self._params():
+            _log.warning(
+                "%s: HMM cache params mismatch (version/settings changed) — cold refit will run",
+                name,
+            )
             return
 
         c_dates = cache.get("dates")
@@ -128,16 +137,36 @@ class PersistentHMMRegimeModel(HMMRegimeModel):
         # have, so it invalidates.
         offset = int(np.searchsorted(c_dates, self._dates[0]))
         if offset >= len(c_dates) or c_dates[offset] != self._dates[0]:
+            _log.warning(
+                "%s: HMM cache date alignment failed (first bar %s not in cache) "
+                "— cold refit will run",
+                name, self._dates[0],
+            )
             return
         overlap = min(len(c_dates) - offset, len(self._dates))
         if overlap <= 0:
             return
         if not np.array_equal(c_dates[offset:offset + overlap], self._dates[:overlap]):
+            _log.warning("%s: HMM cache date sequence mismatch — cold refit will run", name)
             return
-        # Overlapping closes must match exactly — a data revision means every
-        # downstream probability would differ, so recompute from scratch.
+        # Overlapping closes must match within 0.001% relative tolerance.
+        # atol=1e-9 was too strict: yfinance auto_adjust=True can produce
+        # floating-point differences larger than 1e-9 on re-fetch even when no
+        # real price revision occurred, causing spurious cold refits and
+        # HMM state-label flips. rtol=1e-5 (0.001%) absorbs FP noise while
+        # still catching genuine dividend/split adjustments (which change
+        # prices by 0.1%+).
         if not np.allclose(c_closes[offset:offset + overlap],
-                           self._closes[:overlap], rtol=0.0, atol=1e-9):
+                           self._closes[:overlap], rtol=1e-5, atol=0.0):
+            max_diff_pct = float(
+                np.max(np.abs(c_closes[offset:offset + overlap] - self._closes[:overlap])
+                       / (np.abs(c_closes[offset:offset + overlap]) + 1e-12))
+            ) * 100
+            _log.warning(
+                "%s: HMM cache close prices differ by up to %.4f%% "
+                "(yfinance data revision?) — cold refit will run",
+                name, max_diff_pct,
+            )
             return
 
         last_step_cached = int(cache.get("last_step_idx", -1))
