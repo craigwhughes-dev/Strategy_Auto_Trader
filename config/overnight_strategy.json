@@ -30,6 +30,9 @@
     "lookback_days": 14,
     "client_id": 4
   },
+  "universe_refresh": {
+    "enabled": true
+  },
   "vol_screen": {
     "enabled": true,
     "min_trend_quality": 0.0,

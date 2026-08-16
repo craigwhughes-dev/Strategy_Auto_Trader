@@ -603,5 +603,75 @@ def test_main_calls_compute_global_top_k_once_not_per_market(tmp_path):
     mock_topk.assert_called_once()
 
 
+class TestRefreshUniverseAndWatchlists:
+    def test_disabled_by_default_is_a_noop(self):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.full_scan.build_sp_ftse_universe") as mock_build:
+            overnight_scope.refresh_universe_and_watchlists({})
+        mock_build.assert_not_called()
+
+    def test_enabled_refreshes_universe_and_regenerates_both_watchlists(self):
+        config = {"universe_refresh": {"enabled": True}}
+        with mock.patch("Strategy_Auto_Trader.markov_cli.full_scan.SP_FTSE_UNIVERSE_FILE") as mock_path:
+            mock_path.exists.return_value = True
+            with mock.patch("Strategy_Auto_Trader.markov_cli.full_scan.load_sp_ftse_universe",
+                             return_value=["AAPL", "EA", "SHEL.L"]):
+                with mock.patch("Strategy_Auto_Trader.markov_cli.full_scan.build_sp_ftse_universe",
+                                 return_value=["AAPL", "FERG", "SHEL.L"]) as mock_build:
+                    with mock.patch("Strategy_Auto_Trader.markov_cli.regen_watchlists.regen_watchlist",
+                                     return_value=(1, 1)) as mock_regen:
+                        overnight_scope.refresh_universe_and_watchlists(config)
+
+        mock_build.assert_called_once()
+        assert mock_regen.call_count == 2
+        calls = {c.args[0].name: c.args[1] for c in mock_regen.call_args_list}
+        assert calls["watchlist_ftse.json"] == ["SHEL.L"]
+        assert calls["watchlist_sp500.json"] == ["AAPL", "FERG"]
+
+    def test_no_prior_universe_file_treats_all_as_added(self):
+        config = {"universe_refresh": {"enabled": True}}
+        with mock.patch("Strategy_Auto_Trader.markov_cli.full_scan.SP_FTSE_UNIVERSE_FILE") as mock_path:
+            mock_path.exists.return_value = False
+            with mock.patch("Strategy_Auto_Trader.markov_cli.full_scan.build_sp_ftse_universe",
+                             return_value=["AAPL"]):
+                with mock.patch("Strategy_Auto_Trader.markov_cli.regen_watchlists.regen_watchlist",
+                                 return_value=(0, 1)) as mock_regen:
+                    overnight_scope.refresh_universe_and_watchlists(config)
+        assert mock_regen.call_count == 2
+
+    def test_fetch_failure_is_caught_and_watchlists_untouched(self):
+        config = {"universe_refresh": {"enabled": True}}
+        with mock.patch("Strategy_Auto_Trader.markov_cli.full_scan.SP_FTSE_UNIVERSE_FILE") as mock_path:
+            mock_path.exists.return_value = True
+            with mock.patch("Strategy_Auto_Trader.markov_cli.full_scan.load_sp_ftse_universe",
+                             return_value=["AAPL"]):
+                with mock.patch("Strategy_Auto_Trader.markov_cli.full_scan.build_sp_ftse_universe",
+                                 side_effect=RuntimeError("Wikipedia unreachable")):
+                    with mock.patch("Strategy_Auto_Trader.markov_cli.regen_watchlists.regen_watchlist") as mock_regen:
+                        overnight_scope.refresh_universe_and_watchlists(config)
+        mock_regen.assert_not_called()
+
+    def test_main_calls_refresh_before_top_k(self):
+        """Watchlists must be current before compute_global_top_k/screen_market
+        read them — see refresh_universe_and_watchlists' docstring."""
+        config = {
+            "markets": {"ftse": {"watchlist": "config/watchlist_ftse.json", "defaults": {}}},
+            "universe_refresh": {"enabled": True},
+        }
+        call_order = []
+        with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_config", return_value=config):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_execution_state", return_value={}):
+                with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.refresh_universe_and_watchlists",
+                                 side_effect=lambda c: call_order.append("refresh")):
+                    with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.compute_global_top_k",
+                                     side_effect=lambda *a, **k: call_order.append("top_k") or None):
+                        with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.screen_market",
+                                         return_value={"kept": [], "excluded": [], "open_positions": []}):
+                            with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.write_scope_result"):
+                                with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.generate_scoped_watchlist"):
+                                    overnight_scope.main()
+
+        assert call_order == ["refresh", "top_k"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

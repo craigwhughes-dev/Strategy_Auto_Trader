@@ -398,6 +398,55 @@ def _collect_vol_kept_combined(config: dict) -> set[str]:
     return combined
 
 
+def refresh_universe_and_watchlists(config: dict) -> None:
+    """Refresh config/universe_sp_ftse.json from live S&P 500 + FTSE 100
+    constituent tables (Wikipedia) and regenerate the master watchlists
+    (config/watchlist_ftse.json, config/watchlist_sp500.json) from it,
+    preserving any per-ticker overrides (see regen_watchlists.py).
+
+    Must run before _collect_vol_kept_combined/compute_global_top_k and the
+    per-market screen_market loop below — all three read the watchlist files
+    load_watchlist() loads, so a stale watchlist here means the whole night's
+    screening runs on yesterday's index membership (e.g. a delisted/acquired
+    ticker like EA still burning an IBKR fetch + top-k slot every night).
+
+    Gated by config["universe_refresh"]["enabled"] and never raises — a
+    Wikipedia fetch failure logs and leaves the existing universe/watchlists
+    untouched rather than aborting the whole nightly run."""
+    cfg = config.get("universe_refresh", {})
+    if not cfg.get("enabled", False):
+        return
+
+    from . import full_scan
+    from .regen_watchlists import regen_watchlist
+
+    logger.info(" Universe refresh")
+    try:
+        before = set(full_scan.load_sp_ftse_universe()) if full_scan.SP_FTSE_UNIVERSE_FILE.exists() else set()
+        after = set(full_scan.build_sp_ftse_universe())
+    except Exception as exc:
+        logger.info(f"  universe refresh failed ({exc}) — using existing "
+                     "config/universe_sp_ftse.json and watchlists unchanged")
+        return
+
+    added = sorted(after - before)
+    removed = sorted(before - after)
+    logger.info(f"  universe: {len(before)} -> {len(after)} tickers")
+    if added:
+        logger.info(f"  added ({len(added)}): {', '.join(added)}")
+    if removed:
+        logger.info(f"  removed ({len(removed)}): {', '.join(removed)}")
+    if not added and not removed:
+        logger.info("  no change")
+
+    ftse_tickers = sorted(t for t in after if t.endswith(".L"))
+    sp500_tickers = sorted(t for t in after if not t.endswith(".L"))
+    ftse_old, ftse_new = regen_watchlist(CONFIG_DIR / "watchlist_ftse.json", ftse_tickers)
+    sp500_old, sp500_new = regen_watchlist(CONFIG_DIR / "watchlist_sp500.json", sp500_tickers)
+    logger.info(f"  watchlist_ftse.json: {ftse_old} -> {ftse_new} tickers")
+    logger.info(f"  watchlist_sp500.json: {sp500_old} -> {sp500_new} tickers")
+
+
 def main() -> int:
     """Run overnight scope screening for all markets."""
     setup_cli_logger("overnight_scope")
@@ -408,6 +457,8 @@ def main() -> int:
     logger.info(f"\n{'='*64}")
     logger.info(f" Overnight scope screening")
     logger.info(f"{'='*64}\n")
+
+    refresh_universe_and_watchlists(config)
 
     # Pre-screen watchlists for TQ before ranking so rank_universe_cli ranks
     # only quality tickers (avoids wasting k slots on tickers Stage 1 vetoes).
