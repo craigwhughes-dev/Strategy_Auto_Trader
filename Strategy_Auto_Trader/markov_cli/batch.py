@@ -394,6 +394,7 @@ def process_ticker(
                         try:
                             from ..output.emailer import send_trade_alert
                             send_trade_alert(result)
+                            logger.info(f"BUY alert email sent for {ticker}")
                         except Exception as exc:
                             logger.warning(f"BUY alert email failed for {ticker}: {exc}")
                     record_buy(ticker, {
@@ -416,6 +417,7 @@ def process_ticker(
                         try:
                             from ..output.emailer import send_trade_alert
                             send_trade_alert(result)
+                            logger.info(f"SELL alert email sent for {ticker}")
                         except Exception as exc:
                             logger.warning(f"SELL alert email failed for {ticker}: {exc}")
                     record_sell(ticker, {
@@ -540,7 +542,7 @@ def main() -> int:
             from ..output.emailer import send_daily_roundup
             send_daily_roundup(collected, failed_list)
         except Exception as exc:
-            logger.info(f"  Roundup email error: {exc}")
+            logger.warning(f"  Roundup email error: {exc}")
 
     # ── portfolio status email (active trades with P&L since entry) ────────
     if send_email and args.portfolio_status:
@@ -554,7 +556,7 @@ def main() -> int:
                     from ..output.emailer import send_portfolio_status
                     send_portfolio_status(positions)
                 except Exception as exc:
-                    logger.info(f"  Portfolio email error: {exc}")
+                    logger.warning(f"  Portfolio email error: {exc}")
 
     return 0 if fail == 0 else 1
 

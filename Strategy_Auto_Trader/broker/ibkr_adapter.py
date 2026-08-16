@@ -64,8 +64,8 @@ class IBKRAdapter:
         if self._ib is not None:
             try:
                 self._ib.disconnect()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("disconnect() suppressed error: %s", e)
             self._ib = None
 
     def is_connected(self) -> bool:
@@ -74,7 +74,8 @@ class IBKRAdapter:
             return False
         try:
             return self._ib.isConnected()
-        except Exception:
+        except Exception as e:
+            logger.debug("is_connected() check failed (suppressed): %s", e)
             return False
 
     def get_last_price(self, ticker: str) -> float:
@@ -107,7 +108,16 @@ class IBKRAdapter:
             contract = Stock(*ibkr_contract_params(req.ticker))
             self._ib.qualifyContracts(contract)
             order = MarketOrder(req.action, req.quantity)
+            logger.info(
+                "About to place order: %s %s×%s @ market",
+                req.action, req.quantity, req.ticker,
+            )
             trade = self._ib.placeOrder(contract, order)
+            logger.info(
+                "Order placed (awaiting fill): %s %s×%s orderId=%s",
+                req.action, req.quantity, req.ticker,
+                getattr(trade.order, "orderId", "?"),
+            )
             self._ib.waitOnUpdate(timeout=self._timeout)
 
             # Check order status — only return FillResult if fully filled
@@ -134,6 +144,10 @@ class IBKRAdapter:
                     self._ib.waitOnUpdate(timeout=1.0)
                     fill_price = float(trade.orderStatus.avgFillPrice or fill_price)
 
+            logger.info(
+                "Order filled: %s %s×%s @ %.4f",
+                req.action, req.quantity, req.ticker, fill_price,
+            )
             return FillResult(
                 ticker=req.ticker,
                 action=req.action,
