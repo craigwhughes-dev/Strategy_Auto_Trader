@@ -135,7 +135,11 @@ class TestFetchHourly:
 
         assert client._ib.reqHistoricalData.call_count == 1
         assert len(out) == 4  # 1 cached + 3 new, nothing fabricated for the gap
-        assert out.index[0] == last_cached
+        # fetch_hourly's return contract is post-_resample_30min_aligned
+        # (see 018e1af): a raw :00-aligned IBKR bar shifts to the :30-aligned
+        # bin whose window contains it, so last_cached's 16:00 becomes 15:30
+        # here — not stale data, this is the bar-alignment fix doing its job.
+        assert out.index[0] == last_cached - pd.Timedelta(minutes=30)
 
     def test_stops_when_page_returns_no_bars(self, tmp_path, monkeypatch):
         pytest.importorskip("ib_async")
@@ -206,6 +210,168 @@ class TestPeriodToDays:
     def test_unrecognized_format_raises(self):
         with pytest.raises(ValueError):
             ibkr_data._period_to_days("bogus")
+
+
+class TestFetchRecentRaw:
+    def test_pages_back_to_lookback_cutoff(self, tmp_path, monkeypatch):
+        pytest.importorskip("ib_async")
+        from unittest.mock import MagicMock
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
+
+        client = IBKRDataClient()
+        client._ib = MagicMock()
+        # Page is recent (well inside the 14d cutoff), so paging only stops
+        # because the second page comes back empty (start of history) —
+        # avoids asserting on exact stop_at boundary arithmetic.
+        start = datetime.now(timezone.utc) - timedelta(days=1)
+        client._ib.reqHistoricalData.side_effect = [_make_page(start, 5), []]
+
+        out = client.fetch_recent_raw("AAPL", lookback_days=14)
+
+        assert client._ib.reqHistoricalData.call_count == 2
+        assert len(out) == 5
+
+    def test_ignores_existing_cache_entirely(self, tmp_path, monkeypatch):
+        """Unlike fetch_hourly, this must re-page even bars already cached —
+        that's the whole point (detecting a revision on an already-cached bar)."""
+        pytest.importorskip("ib_async")
+        from unittest.mock import MagicMock
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
+
+        idx = pd.date_range("2026-01-01", periods=5, freq="h", tz="UTC")
+        cached = pd.DataFrame(
+            {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 100}, index=idx)
+        ibkr_data._save_cache("AAPL", cached)
+
+        client = IBKRDataClient()
+        client._ib = MagicMock()
+        # cached ends 2026-01-01 04:00, but the page returned is recent
+        # (~now) — if fetch_recent_raw used cached.index[-1] as stop_at like
+        # fetch_hourly does, this page's oldest bar (~now) would be nowhere
+        # near that old cutoff and paging would run away; it terminates via
+        # the empty second page instead, proving stop_at is lookback-based.
+        start = datetime.now(timezone.utc) - timedelta(days=1)
+        client._ib.reqHistoricalData.side_effect = [_make_page(start, 3), []]
+
+        client.fetch_recent_raw("AAPL", lookback_days=14)
+
+        assert client._ib.reqHistoricalData.call_count == 2
+
+    def test_connection_failure_returns_none(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
+        client = IBKRDataClient()
+        client.connect = lambda: False
+        assert client.fetch_recent_raw("AAPL", lookback_days=14) is None
+
+
+class TestReconcileRecentBars:
+    def test_no_prior_cache_is_a_noop(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
+        from unittest.mock import MagicMock
+        client = MagicMock()
+        result = ibkr_data.reconcile_recent_bars("AAPL", client)
+        assert result == {"ticker": "AAPL", "checked": 0, "corrected": 0, "diffs": []}
+        client.fetch_recent_raw.assert_not_called()
+
+    def test_identical_refetch_finds_no_corrections(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
+        from unittest.mock import MagicMock
+        idx = pd.date_range("2026-01-01", periods=5, freq="h", tz="UTC")
+        cached = pd.DataFrame(
+            {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 100.0, "Volume": 1000}, index=idx)
+        ibkr_data._save_cache("AAPL", cached)
+
+        client = MagicMock()
+        client.fetch_recent_raw.return_value = cached.copy()
+
+        result = ibkr_data.reconcile_recent_bars("AAPL", client)
+        assert result["checked"] == 5
+        assert result["corrected"] == 0
+        assert result["diffs"] == []
+
+    def test_revised_close_is_detected_and_applied(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
+        from unittest.mock import MagicMock
+        idx = pd.date_range("2026-01-01", periods=5, freq="h", tz="UTC")
+        cached = pd.DataFrame(
+            {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 100.0, "Volume": 1000}, index=idx)
+        ibkr_data._save_cache("AAPL", cached)
+
+        fresh = cached.copy()
+        fresh.loc[idx[2], "Close"] = 105.0   # a "trade correction" on bar 2
+
+        client = MagicMock()
+        client.fetch_recent_raw.return_value = fresh
+
+        result = ibkr_data.reconcile_recent_bars("AAPL", client)
+        assert result["checked"] == 5
+        assert result["corrected"] == 1
+        assert result["diffs"] == [
+            {"date": idx[2], "field": "Close", "old": 100.0, "new": 105.0}
+        ]
+
+        reloaded = ibkr_data._load_cache("AAPL")
+        assert reloaded.loc[idx[2], "Close"] == 105.0
+        assert reloaded.loc[idx[0], "Close"] == 100.0   # untouched bars unaffected
+
+    def test_fp_noise_below_tolerance_is_not_a_correction(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
+        from unittest.mock import MagicMock
+        idx = pd.date_range("2026-01-01", periods=5, freq="h", tz="UTC")
+        cached = pd.DataFrame(
+            {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 100.0, "Volume": 1000}, index=idx)
+        ibkr_data._save_cache("AAPL", cached)
+        mtime_before = ibkr_data._cache_path("AAPL").stat().st_mtime_ns
+
+        fresh = cached.copy()
+        fresh.loc[idx[2], "Close"] = 100.0 + 1e-9
+
+        client = MagicMock()
+        client.fetch_recent_raw.return_value = fresh
+
+        result = ibkr_data.reconcile_recent_bars("AAPL", client)
+        assert result["corrected"] == 0
+        assert ibkr_data._cache_path("AAPL").stat().st_mtime_ns == mtime_before
+
+    def test_new_bars_not_yet_cached_are_ignored_not_flagged(self, tmp_path, monkeypatch):
+        """fetch_recent_raw returning bars newer than the cache (routine —
+        the daemon just hasn't gap-filled yet) must not be treated as
+        corrections; reconcile only diffs the overlap."""
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
+        from unittest.mock import MagicMock
+        idx = pd.date_range("2026-01-01", periods=5, freq="h", tz="UTC")
+        cached = pd.DataFrame(
+            {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 100.0, "Volume": 1000}, index=idx)
+        ibkr_data._save_cache("AAPL", cached)
+
+        extra_idx = pd.date_range(idx[-1] + pd.Timedelta(hours=1), periods=2, freq="h", tz="UTC")
+        fresh = pd.concat([cached, pd.DataFrame(
+            {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 101.0, "Volume": 1000},
+            index=extra_idx)])
+
+        client = MagicMock()
+        client.fetch_recent_raw.return_value = fresh
+
+        result = ibkr_data.reconcile_recent_bars("AAPL", client)
+        assert result["checked"] == 5   # only the overlap, not the 2 new bars
+        assert result["corrected"] == 0
+
+        reloaded = ibkr_data._load_cache("AAPL")
+        assert len(reloaded) == 5   # reconcile doesn't add new bars, only corrects existing ones
+
+    def test_empty_fetch_is_a_noop(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
+        from unittest.mock import MagicMock
+        idx = pd.date_range("2026-01-01", periods=5, freq="h", tz="UTC")
+        cached = pd.DataFrame(
+            {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 100.0, "Volume": 1000}, index=idx)
+        ibkr_data._save_cache("AAPL", cached)
+
+        client = MagicMock()
+        client.fetch_recent_raw.return_value = None
+
+        result = ibkr_data.reconcile_recent_bars("AAPL", client)
+        assert result == {"ticker": "AAPL", "checked": 0, "corrected": 0, "diffs": []}
 
 
 class TestCacheRoundTrip:

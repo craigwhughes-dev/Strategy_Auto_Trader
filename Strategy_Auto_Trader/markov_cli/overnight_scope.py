@@ -164,7 +164,8 @@ def compute_global_top_k(
     top_tickers |= open_positions  # never drop an open position for falling outside top-K
 
     from ..core.atomic_io import atomic_write_json
-    atomic_write_json(_top_k_state_path(), {
+    dest_path = _top_k_state_path()
+    atomic_write_json(dest_path, {
         "date": datetime.now(timezone.utc).date().isoformat(),
         "k": k,
         "strategy": strategy,
@@ -172,6 +173,7 @@ def compute_global_top_k(
         "scores": scores,
         "status": "ok",
     })
+    logger.info(f"  top_k_screen: copied {output_path} -> {dest_path}")
     return top_tickers
 
 

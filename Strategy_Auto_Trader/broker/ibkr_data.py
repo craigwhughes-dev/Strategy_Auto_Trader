@@ -246,3 +246,83 @@ class IBKRDataClient:
         if use_cache and not new_df.empty:
             _save_cache(ticker, merged)
         return _resample_30min_aligned(merged)
+
+    def fetch_recent_raw(self, ticker: str, lookback_days: int,
+                          what_to_show: str = "TRADES") -> pd.DataFrame | None:
+        """Fetch the last `lookback_days` of raw (un-resampled) bars fresh
+        from IBKR, bypassing the incremental cache entirely.
+
+        fetch_hourly()'s stop_at logic only ever pages the gap *since* the
+        last cached bar — a bar already on disk is never re-requested, so a
+        trade correction IBKR applies to an already-cached historical bar
+        would never be seen. This method re-pages the recent window from
+        scratch regardless of what's cached, for reconcile_recent_bars() to
+        diff against the stored copy. Returns None on any connection/fetch
+        failure (never falls back to cache — a diff against a fetch failure
+        would be meaningless)."""
+        owns_connection = self._ib is None
+        if owns_connection and not self.connect():
+            return None
+        try:
+            from ib_async import Stock
+            contract = Stock(*ibkr_contract_params(ticker))
+            self._ib.qualifyContracts(contract)
+            cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=lookback_days)
+            return self._fetch_pages(contract, what_to_show=what_to_show, stop_at=cutoff)
+        except Exception:
+            return None
+        finally:
+            if owns_connection:
+                self.disconnect()
+
+
+def reconcile_recent_bars(
+    ticker: str,
+    client: "IBKRDataClient",
+    lookback_days: int = 14,
+    tol_abs: float = 1e-6,
+) -> dict:
+    """Re-fetch the last `lookback_days` of raw IBKR bars and diff against
+    the stored cache, catching a trade correction IBKR revised on an
+    already-cached bar (see IBKRDataClient.fetch_recent_raw's docstring for
+    why the normal incremental path would never see this).
+
+    Any changed field on any overlapping bar overwrites the cached row in
+    place. The corrected closes then flow through PersistentHMMRegimeModel's
+    own rtol tolerance + relabel-warning logging (persistent_hmm.py) on the
+    next daemon cycle — no separate plumbing needed there.
+
+    Returns {"ticker", "checked", "corrected", "diffs"} — diffs is a list of
+    {"date", "field", "old", "new"} dicts, empty if nothing changed.
+    """
+    empty_result = {"ticker": ticker, "checked": 0, "corrected": 0, "diffs": []}
+    cached = _load_cache(ticker)
+    if cached is None:
+        return empty_result
+
+    fresh = client.fetch_recent_raw(ticker, lookback_days)
+    if fresh is None or fresh.empty:
+        return empty_result
+
+    common = cached.index.intersection(fresh.index)
+    if len(common) == 0:
+        return empty_result
+
+    diffs: list[dict] = []
+    updated = cached.copy()
+    for col in ("Open", "High", "Low", "Close", "Volume"):
+        old_vals = cached.loc[common, col]
+        new_vals = fresh.loc[common, col]
+        changed = old_vals[(new_vals - old_vals).abs() > tol_abs].index
+        for ts in changed:
+            diffs.append({
+                "date": ts, "field": col,
+                "old": float(old_vals.loc[ts]), "new": float(new_vals.loc[ts]),
+            })
+        if len(changed) > 0:
+            updated.loc[changed, col] = fresh.loc[changed, col]
+
+    if diffs:
+        _save_cache(ticker, updated)
+
+    return {"ticker": ticker, "checked": len(common), "corrected": len(diffs), "diffs": diffs}

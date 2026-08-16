@@ -92,6 +92,13 @@ class PersistentHMMRegimeModel(HMMRegimeModel):
         #: diagnostics — bars answered straight from the cache this run
         self.cache_hits = 0
 
+        # Set only when _load_cache invalidates on a close-price mismatch:
+        # holds the discarded cache's own date/p_smooth series so the first
+        # freshly-computed bar can be diffed against what the old model
+        # believed about that same calendar bar, to surface relabeling size
+        # (see _check_pending_relabel).
+        self._pending_relabel_check: dict | None = None
+
         self._load_cache()
 
     # ------------------------------------------------------------------
@@ -167,6 +174,11 @@ class PersistentHMMRegimeModel(HMMRegimeModel):
                 "(yfinance data revision?) — cold refit will run",
                 name, max_diff_pct,
             )
+            self._pending_relabel_check = {
+                "name": name,
+                "c_dates": c_dates,
+                "c_p_smooth": cache["p_smooth"],
+            }
             return
 
         last_step_cached = int(cache.get("last_step_idx", -1))
@@ -257,7 +269,36 @@ class PersistentHMMRegimeModel(HMMRegimeModel):
                 self._p_bear_arr[t] = state.p_bear
                 self._p_smooth_arr[t] = state.p_bull_smooth
                 self._last_step_idx = max(self._last_step_idx, t)
+            if self._pending_relabel_check is not None:
+                self._check_pending_relabel(t, state.p_bull_smooth)
         return state
+
+    def _check_pending_relabel(self, t: int, new_p_smooth: float) -> None:
+        """One-shot check, fired on the first freshly-computed bar after a
+        close-price-mismatch invalidation: if that bar's date also existed
+        in the discarded cache, diff the old vs new p_bull_smooth so a
+        relabeling incident (not just "cache invalidated", but "regime
+        classification actually changed") shows up in logs."""
+        pending = self._pending_relabel_check
+        self._pending_relabel_check = None
+        date = self._dates[t]
+        c_dates = pending["c_dates"]
+        idx = int(np.searchsorted(c_dates, date))
+        if idx >= len(c_dates) or c_dates[idx] != date:
+            return
+        old_p_smooth = float(pending["c_p_smooth"][idx])
+        if np.isnan(old_p_smooth):
+            return
+        delta = abs(new_p_smooth - old_p_smooth)
+        # 0.15 is large enough to plausibly flip a discretized regime vote
+        # given the default bull_edge=0.65/bear_edge=0.40 band width (0.25).
+        if delta > 0.15:
+            _log.warning(
+                "%s: regime relabeling detected after cache invalidation — "
+                "p_bull_smooth for %s was %.4f before, %.4f after cold refit "
+                "(delta=%.4f)",
+                pending["name"], pd.Timestamp(date), old_p_smooth, new_p_smooth, delta,
+            )
 
     def reset(self) -> None:
         super().reset()

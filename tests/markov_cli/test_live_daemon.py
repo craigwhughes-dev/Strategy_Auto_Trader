@@ -248,6 +248,100 @@ def test_check_overnight_screening_skips_if_already_run():
             assert not mock_overnight.called
 
 
+def _ibkr_reconcile(daemon_state, at_hour=1, at_minute=0, day=6, cfg_overrides=None):
+    config = {
+        "overnight_timezone": "Europe/London",
+        "ibkr_data_reconcile": {"enabled": True, "run_time": "01:00", **(cfg_overrides or {})},
+    }
+    run_mock = mock.Mock()
+    logger = mock.Mock()
+    with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(
+            2026, 7, day, at_hour, at_minute, tzinfo=ZoneInfo("Europe/London"))
+        live_daemon.check_ibkr_data_reconciliation(
+            config, daemon_state, logger, run_reconcile=run_mock, save_state=lambda s: None)
+    return run_mock, logger
+
+
+def test_ibkr_data_reconciliation_runs_at_configured_time():
+    daemon_state = {}
+    run_mock, _ = _ibkr_reconcile(daemon_state)
+    assert run_mock.called
+    assert daemon_state["last_ibkr_data_reconcile_date"] == "2026-07-06"
+
+
+def test_ibkr_data_reconciliation_skips_before_run_time():
+    daemon_state = {}
+    run_mock, _ = _ibkr_reconcile(daemon_state, at_hour=0, at_minute=30)
+    assert not run_mock.called
+    assert "last_ibkr_data_reconcile_date" not in daemon_state
+
+
+def test_ibkr_data_reconciliation_skips_if_already_run_today():
+    daemon_state = {"last_ibkr_data_reconcile_date": "2026-07-06"}
+    run_mock, _ = _ibkr_reconcile(daemon_state)
+    assert not run_mock.called
+
+
+def test_ibkr_data_reconciliation_skips_when_disabled():
+    daemon_state = {}
+    run_mock, _ = _ibkr_reconcile(daemon_state, cfg_overrides={"enabled": False})
+    assert not run_mock.called
+    assert "last_ibkr_data_reconcile_date" not in daemon_state
+
+
+def test_ibkr_data_reconciliation_error_does_not_mark_date_done():
+    """A failed reconcile run (subprocess error, TWS unreachable) must retry
+    on the next poll within the run window, not silently skip for the rest
+    of the day — mirrors check_nightly_reconciliation's error-retry contract."""
+    daemon_state = {}
+    config = {
+        "overnight_timezone": "Europe/London",
+        "ibkr_data_reconcile": {"enabled": True, "run_time": "01:00"},
+    }
+    run_mock = mock.Mock(side_effect=RuntimeError("ibkr_reconcile exited 1"))
+    logger = mock.Mock()
+    with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 7, 6, 1, 0, tzinfo=ZoneInfo("Europe/London"))
+        live_daemon.check_ibkr_data_reconciliation(
+            config, daemon_state, logger, run_reconcile=run_mock, save_state=lambda s: None)
+    assert "last_ibkr_data_reconcile_date" not in daemon_state
+    assert logger.error.called
+
+
+def test_run_ibkr_data_reconcile_subprocess_builds_expected_command(monkeypatch):
+    """Verifies the subprocess invocation shape (module path, host/port from
+    broker config, client_id distinct from execution/data-fetch/backfill)."""
+    captured = {}
+
+    def fake_run(cmd, cwd, timeout, capture_output, text):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        return mock.Mock(returncode=0, stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    config = {"broker": {"host": "127.0.0.1", "port": 4002, "client_id": 1}}
+    cfg = {"lookback_days": 14, "client_id": 4}
+
+    live_daemon._run_ibkr_data_reconcile_subprocess(config, cfg)
+
+    cmd = captured["cmd"]
+    assert "Strategy_Auto_Trader.markov_cli.ibkr_reconcile" in cmd
+    assert "--lookback-days" in cmd and "14" in cmd
+    assert "--client-id" in cmd and "4" in cmd
+    assert "--port" in cmd and "4002" in cmd
+
+
+def test_run_ibkr_data_reconcile_subprocess_raises_on_nonzero_exit(monkeypatch):
+    def fake_run(cmd, cwd, timeout, capture_output, text):
+        return mock.Mock(returncode=1, stderr="Could not connect to TWS/Gateway")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    with pytest.raises(RuntimeError, match="ibkr_reconcile exited 1"):
+        live_daemon._run_ibkr_data_reconcile_subprocess(
+            {"broker": {}}, {"lookback_days": 14, "client_id": 4})
+
+
 def test_top_k_screen_health_no_state_file_disabled_is_noop(monkeypatch, tmp_path):
     """Missing file is a noop when top_k_screen is disabled — no halt, no alert."""
     monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)

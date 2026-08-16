@@ -1108,6 +1108,76 @@ def check_overnight_screening(
         _check_orphaned_positions(config, logger)
 
 
+def _run_ibkr_data_reconcile_subprocess(config: dict, cfg: dict) -> None:
+    """Invoke ibkr_reconcile.py in a standalone subprocess (mirrors
+    compute_global_top_k's rank_universe_cli pattern) so its own IBKR
+    connection (client_id=4 by default) never touches this process's ib_async
+    event loop or execution connection (client_id=1)."""
+    import subprocess
+
+    broker_cfg = config.get("broker", {})
+    cmd = [
+        sys.executable, "-m", "Strategy_Auto_Trader.markov_cli.ibkr_reconcile",
+        "--lookback-days", str(cfg.get("lookback_days", 14)),
+        "--host", broker_cfg.get("host", "127.0.0.1"),
+        "--port", str(broker_cfg.get("port", 4002)),
+        "--client-id", str(cfg.get("client_id", 4)),
+    ]
+    timeout_seconds = cfg.get("timeout_seconds", 3600)
+    result = subprocess.run(cmd, cwd=ROOT, timeout=timeout_seconds,
+                             capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ibkr_reconcile exited {result.returncode}: {result.stderr[-500:]}")
+
+
+def check_ibkr_data_reconciliation(
+    config: dict,
+    daemon_state: dict,
+    logger: logging.Logger,
+    *,
+    run_reconcile: Callable | None = None,
+    save_state: Callable | None = None,
+) -> None:
+    """Run IBKR trade-correction reconciliation once per day at the
+    configured time — see markov_cli/ibkr_reconcile.py's module docstring
+    for why this exists (fetch_hourly()'s append-only cache never re-checks
+    an already-cached bar, so a post-hoc IBKR trade correction would
+    otherwise be silently missed forever).
+
+    Scheduled before overnight_scope's default 02:00 run (default 01:00) so
+    any corrected bars feed that night's vol/top-K screening and HMM refits,
+    not next night's."""
+    if run_reconcile is None:
+        run_reconcile = _run_ibkr_data_reconcile_subprocess
+    if save_state is None:
+        save_state = save_daemon_state
+
+    cfg = config.get("ibkr_data_reconcile", {})
+    if not cfg.get("enabled", True):
+        return
+
+    tz = ZoneInfo(config.get("overnight_timezone", "Europe/London"))
+    now = datetime.now(tz)
+    run_time_str = cfg.get("run_time", "01:00")
+    run_hour, run_minute = map(int, run_time_str.split(":"))
+
+    today = now.date().isoformat()
+    if daemon_state.get("last_ibkr_data_reconcile_date") == today:
+        return
+
+    if now.hour == run_hour and now.minute >= run_minute:
+        logger.info("Running IBKR data reconciliation...")
+        t0 = time.time()
+        try:
+            run_reconcile(config, cfg)
+            daemon_state["last_ibkr_data_reconcile_date"] = today
+            save_state(daemon_state)
+            logger.info(f"IBKR data reconciliation complete ({time.time() - t0:.0f}s)")
+        except Exception as e:
+            logger.error(f"Error in IBKR data reconciliation: {e}")
+
+
 def _check_orphaned_positions(config: dict, logger: logging.Logger) -> None:
     """After overnight_scope runs, check each market's in_scope_<market>.json
     for orphaned_positions (open positions whose ticker fell out of the
@@ -1692,6 +1762,10 @@ def main(argv: list[str] | None = None) -> int:
         while True:
             had_error = False
             try:
+                # Check IBKR data reconciliation (before overnight screening,
+                # so any corrected bars feed tonight's vol/top-K screening)
+                check_ibkr_data_reconciliation(config, daemon_state, logger)
+
                 # Check overnight screening
                 check_overnight_screening(config, daemon_state, logger)
 
