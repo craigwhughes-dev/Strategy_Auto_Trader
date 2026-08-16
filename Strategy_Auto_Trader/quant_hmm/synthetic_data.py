@@ -52,6 +52,16 @@ def fit_generating_hmm(
     Raises ValueError if fit fails for all seeds (no silent fallback).
     """
     log_returns = np.log(close.values[1:] / close.values[:-1])
+    finite_mask = np.isfinite(log_returns)
+    n_dropped = int((~finite_mask).sum())
+    if n_dropped:
+        import logging
+        logging.getLogger(__name__).debug(
+            "fit_generating_hmm: dropped %d non-finite log-returns (NaN/Inf) "
+            "before HMM fit — likely yfinance data artifact in old UK daily bars",
+            n_dropped,
+        )
+        log_returns = log_returns[finite_mask]
     result = fit_hmm_expanding(log_returns, n_components=n_components,
                                n_seeds=n_seeds, n_iter=n_iter)
     if result is None:

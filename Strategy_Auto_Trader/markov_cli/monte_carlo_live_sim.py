@@ -350,6 +350,9 @@ def main(argv: list[str] | None = None) -> int:
                     dm, do = daily_hmm_models[ticker]
                     precomputed = sample_daily_tiled_states(
                         dm, do, len(df), seed=ticker_seed,
+                        transmat_noise=args.transmat_noise,
+                        market_states=mstates,
+                        market_coupling=args.market_coupling,
                     )
                 result[ticker] = generate_synthetic_df(
                     df, model, order, log_ret, labels,

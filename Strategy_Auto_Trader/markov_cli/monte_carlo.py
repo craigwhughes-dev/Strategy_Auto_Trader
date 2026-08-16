@@ -230,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
         if daily_model is not None:
             precomputed = sample_daily_tiled_states(
                 daily_model, daily_order, n_bars, seed=args.seed + i,
+                transmat_noise=args.transmat_noise,
             )
         synth_dfs.append(generate_synthetic_df(
             real_df, model, order, log_returns, historical_state_labels,
