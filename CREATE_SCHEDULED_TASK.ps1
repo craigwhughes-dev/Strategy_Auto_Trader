@@ -1,26 +1,27 @@
 # Create Strategy Auto-Trader Daemon scheduled task
 # Run this in PowerShell (admin not required — see note below)
 #
-# Not elevated, and points straight at uv.exe (no cmd.exe /c "... && ..."
-# wrapper): both matter for clean shutdown. The daemon needs no admin
-# rights (all file I/O is under this repo, IBKR connection is a plain
-# localhost socket on a non-privileged port) — RunLevel=Highest was
-# previously set for no functional reason, and on Windows it makes Task
-# Scheduler launch the elevated process outside the Job Object it uses to
-# track/kill the task's descendants. Combined with the old cmd.exe wrapper
-# (cmd.exe -> uv.exe -> python.exe, 3 process generations), ending the task
-# only killed the outer cmd.exe — uv.exe and the actual daemon python.exe
-# survived as orphans, still holding open file handles (e.g. the daemon's
-# own log file). Non-elevated + a direct 2-hop action (uv.exe -> python.exe)
-# stays inside Task Scheduler's normal Job Object, so "End Task" now
-# terminates the whole tree.
-
+# Two things fixed here, both needed:
+#  1. Non-elevated (no RunLevel = defaults to LeastPrivilege). Nothing in
+#     this daemon needs admin rights (file I/O is all under this repo, the
+#     IBKR connection is a plain localhost socket on a non-privileged
+#     port) — RunLevel=Highest was previously set for no functional reason,
+#     and on Windows it makes Task Scheduler launch the real process
+#     outside the Job Object it uses to track/kill descendants.
+#  2. Task points directly at the venv's python.exe, NOT "uv run python".
+#     Even non-elevated, `uv run` still spawns the target interpreter as a
+#     child process that survived "End Task" in testing — uv is a
+#     standalone launcher, not a shell built for Job Object containment,
+#     and something in its Windows process hand-off (most likely a process-
+#     breakaway flag) let that child escape termination. A single directly-
+#     launched process has nothing to escape from: there's no child to
+#     orphan, so "End Task" simply ends it.
 $taskName = "StrategyAutoTraderDaemon"
-$uvPath = "$env:USERPROFILE\.local\bin\uv.exe"
 $workDir = "C:\Users\Craig\.claude\skills\Strategy_Auto_Trader"
+$pythonPath = "$workDir\.venv\Scripts\python.exe"
 
 Write-Output "Creating scheduled task: $taskName"
-Write-Output "Action: $uvPath run python -m Strategy_Auto_Trader.markov_cli.live_daemon --takeover"
+Write-Output "Action: $pythonPath -m Strategy_Auto_Trader.markov_cli.live_daemon --takeover"
 Write-Output ""
 
 # Check if task already exists
@@ -66,8 +67,8 @@ $userId = "$env:COMPUTERNAME\$env:USERNAME"
   </Triggers>
   <Actions Context="Author">
     <Exec>
-      <Command>$uvPath</Command>
-      <Arguments>run python -m Strategy_Auto_Trader.markov_cli.live_daemon --takeover</Arguments>
+      <Command>$pythonPath</Command>
+      <Arguments>-m Strategy_Auto_Trader.markov_cli.live_daemon --takeover</Arguments>
       <WorkingDirectory>$workDir</WorkingDirectory>
     </Exec>
   </Actions>

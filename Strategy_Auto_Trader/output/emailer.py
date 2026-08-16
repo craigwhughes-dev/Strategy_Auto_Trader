@@ -113,8 +113,9 @@ def send_daily_roundup(results: list[dict], failed: list[dict]) -> None:
     today_str = date.today().strftime("%Y%m%d")
     trade_events = [r for r in results if r.get("trade_event") and r.get("run_date", "") == today_str]
     profitable = sum(1 for r in results if r.get("portfolio_value", 20000) > 20000)
-    outperforming = sum(1 for r in results
-                        if r.get("strategy_return", 0) > r.get("bh_return", 0))
+
+    _HMM_LABEL = {0: "Bear", 1: "Side", 2: "Bull"}
+    _HMM_COLOUR = {0: "#ef9a9a", 1: "#888", 2: "#69f0ae"}
 
     rows_html = ""
     for r in sorted_results:
@@ -125,23 +126,41 @@ def send_daily_roundup(results: list[dict], failed: list[dict]) -> None:
         te_html = (f'<span style="color:{"#69f0ae" if te == "BUY" else "#ef9a9a"};'
                    f'font-weight:bold"> {te}</span>') if te else ""
         strat_pct = r.get("strategy_return", 0) * 100
-        bh_pct = r.get("bh_return", 0) * 100
         pl = r.get("portfolio_value", 20000) - 20000
         pl_colour = "#69f0ae" if pl >= 0 else "#ef9a9a"
-        outperf = strat_pct > bh_pct
+
+        p_bull = r.get("p_bull_smooth", 0) * 100
+        hmm_vote = r.get("hmm_vote")
+        hmm_label = _HMM_LABEL.get(hmm_vote, "?")
+        hmm_colour = _HMM_COLOUR.get(hmm_vote, "#888")
+        rsi = r.get("rsi", 0)
+
+        def _sma_flag(above):
+            if above is None:
+                return '<span style="color:#666">?</span>'
+            return (f'<span style="color:{"#69f0ae" if above else "#ef9a9a"}">'
+                    f'{"&#9650;" if above else "&#9660;"}</span>')
+        sma_html = (f"20{_sma_flag(r.get('above_sma20'))} "
+                    f"50{_sma_flag(r.get('above_sma50'))} "
+                    f"200{_sma_flag(r.get('above_sma200'))}")
+        vol_ratio = r.get("volume_ratio", 0)
 
         rows_html += f"""<tr style="border-top:1px solid #2a2d3e">
-          <td style="padding:6px 10px;color:#eee">{r['ticker']}</td>
-          <td style="padding:6px 10px;text-align:center">
+          <td style="padding:6px 8px;color:#eee">{r['ticker']}</td>
+          <td style="padding:6px 8px;text-align:center">
             <span style="background:{bg};color:{fg};padding:2px 8px;border-radius:4px;font-size:0.85em">{sig}</span>
             {te_html}</td>
-          <td style="padding:6px 10px;color:#ddd;text-align:right;white-space:nowrap">${r.get('close',0):,.2f}</td>
-          <td style="padding:6px 10px;color:#ddd;text-align:center">{r.get('score',0):+.1f}</td>
-          <td style="padding:6px 10px;color:{pl_colour};text-align:right;white-space:nowrap">
+          <td style="padding:6px 8px;color:#ddd;text-align:right;white-space:nowrap">${r.get('close',0):,.2f}</td>
+          <td style="padding:6px 8px;color:#ddd;text-align:center">{r.get('score',0):+.1f}</td>
+          <td style="padding:6px 8px;color:{pl_colour};text-align:right;white-space:nowrap" title="Isolated $20k sim, not real account P&amp;L">
             {"+" if pl >= 0 else ""}£{abs(pl):,.0f}</td>
-          <td style="padding:6px 10px;color:{'#69f0ae' if outperf else '#ef9a9a'};text-align:right;white-space:nowrap">
+          <td style="padding:6px 8px;color:{'#69f0ae' if strat_pct >= 0 else '#ef9a9a'};text-align:right;white-space:nowrap">
             {strat_pct:+.1f}%</td>
-          <td style="padding:6px 10px;color:#82b1ff;text-align:right;white-space:nowrap">{bh_pct:+.1f}%</td>
+          <td style="padding:6px 8px;color:#ddd;text-align:right;white-space:nowrap">{p_bull:.0f}%</td>
+          <td style="padding:6px 8px;color:{hmm_colour};text-align:center;white-space:nowrap">{hmm_label}</td>
+          <td style="padding:6px 8px;color:#ddd;text-align:right">{rsi:.0f}</td>
+          <td style="padding:6px 8px;color:#ddd;text-align:center;white-space:nowrap;font-size:0.85em">{sma_html}</td>
+          <td style="padding:6px 8px;color:#ddd;text-align:right;white-space:nowrap">{vol_ratio:.1f}x</td>
         </tr>"""
 
     failed_html = ""
@@ -190,23 +209,23 @@ def send_daily_roundup(results: list[dict], failed: list[dict]) -> None:
       <div style="color:#69f0ae;font-size:1.4em;font-weight:bold">{profitable}</div>
       <div style="color:#888;font-size:0.8em">Profitable</div>
     </div>
-    <div style="background:#1e2130;padding:10px 16px;border-radius:8px;flex:1;min-width:100px;text-align:center">
-      <div style="color:#82b1ff;font-size:1.4em;font-weight:bold">{outperforming}</div>
-      <div style="color:#888;font-size:0.8em">Beating B&amp;H</div>
-    </div>
   </div>
 
   {trade_event_summary}
 
-  <table style="width:100%;border-collapse:collapse;background:#1e2130;border-radius:8px;overflow:hidden;font-size:0.88em;margin:16px 0">
+  <table style="width:100%;border-collapse:collapse;background:#1e2130;border-radius:8px;overflow:hidden;font-size:0.82em;margin:16px 0">
     <tr style="color:#888;font-size:0.85em">
-      <th style="padding:8px 10px;text-align:left">Ticker</th>
-      <th style="padding:8px 10px;text-align:center">Signal</th>
-      <th style="padding:8px 10px;text-align:right">Price</th>
-      <th style="padding:8px 10px;text-align:center">Score</th>
-      <th style="padding:8px 10px;text-align:right">Strategy P&amp;L</th>
-      <th style="padding:8px 10px;text-align:right">Strategy %</th>
-      <th style="padding:8px 10px;text-align:right">B&amp;H %</th>
+      <th style="padding:8px 8px;text-align:left">Ticker</th>
+      <th style="padding:8px 8px;text-align:center">Signal</th>
+      <th style="padding:8px 8px;text-align:right">Price</th>
+      <th style="padding:8px 8px;text-align:center">Score</th>
+      <th style="padding:8px 8px;text-align:right" title="Isolated $20k sim, not real account P&amp;L">Sim P&amp;L</th>
+      <th style="padding:8px 8px;text-align:right">Strategy %</th>
+      <th style="padding:8px 8px;text-align:right">P(Bull)</th>
+      <th style="padding:8px 8px;text-align:center">HMM</th>
+      <th style="padding:8px 8px;text-align:right">RSI</th>
+      <th style="padding:8px 8px;text-align:center">SMA 20/50/200</th>
+      <th style="padding:8px 8px;text-align:right">Vol</th>
     </tr>
     {rows_html}
   </table>
