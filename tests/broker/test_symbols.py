@@ -31,6 +31,23 @@ class TestIbkrContractParams:
     def test_single_letter_lse_symbol(self):
         assert ibkr_contract_params("R.L") == ("R", "LSE", "GBP")
 
+    def test_us_dual_class_hyphen_becomes_space(self):
+        assert ibkr_contract_params("BRK-B") == ("BRK B", "SMART", "USD")
+
+    def test_us_dual_class_hyphen_becomes_space_bf(self):
+        assert ibkr_contract_params("BF-B") == ("BF B", "SMART", "USD")
+
+    @pytest.mark.parametrize("ticker,ibkr_symbol", [
+        ("AV.L", "AV."), ("BA.L", "BA."), ("BP.L", "BP."), ("JD.L", "JD."),
+        ("NG.L", "NG."), ("RR.L", "RR."), ("SN.L", "SN."), ("UU.L", "UU."),
+    ])
+    def test_lse_trailing_dot_symbols(self, ticker, ibkr_symbol):
+        assert ibkr_contract_params(ticker) == (ibkr_symbol, "LSE", "GBP")
+
+    def test_lse_dot_symbol_not_confused_with_similar_prefix(self):
+        """"BAE" isn't in the trailing-dot set — must not get a dot appended."""
+        assert ibkr_contract_params("BAE.L") == ("BAE", "LSE", "GBP")
+
 
 class TestYfinanceTicker:
     def test_lse_gbp_contract_maps_back_to_lse_ticker(self):
@@ -63,6 +80,20 @@ class TestYfinanceTicker:
     def test_round_trip_brk_b(self):
         symbol, exchange, currency = ibkr_contract_params("BRK.B")
         assert yfinance_ticker(symbol, currency) == "BRK.B"
+
+    def test_us_dual_class_space_becomes_hyphen(self):
+        assert yfinance_ticker("BRK B", "USD") == "BRK-B"
+
+    def test_round_trip_brk_b_hyphen(self):
+        symbol, exchange, currency = ibkr_contract_params("BRK-B")
+        assert yfinance_ticker(symbol, currency) == "BRK-B"
+
+    @pytest.mark.parametrize("ticker", [
+        "AV.L", "BA.L", "BP.L", "JD.L", "NG.L", "RR.L", "SN.L", "UU.L",
+    ])
+    def test_round_trip_lse_trailing_dot_symbols(self, ticker):
+        symbol, exchange, currency = ibkr_contract_params(ticker)
+        assert yfinance_ticker(symbol, currency) == ticker
 
     def test_cross_listed_collision_prevention(self):
         us_bp = yfinance_ticker("BP", "USD")

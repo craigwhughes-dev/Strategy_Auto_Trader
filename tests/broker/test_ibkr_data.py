@@ -175,6 +175,27 @@ class TestFetchHourly:
         assert out is not None
         assert len(out) == 5
 
+    def test_unqualified_contract_falls_back_and_logs(self, monkeypatch, tmp_path, caplog):
+        """IBKR's qualifyContracts doesn't raise on an unknown/ambiguous
+        symbol — it returns None in the result slot and only warns to its
+        own logger. fetch_hourly must check that return value itself
+        (rather than paging a never-matched contract) and log why."""
+        pytest.importorskip("ib_async")
+        from unittest.mock import MagicMock
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
+
+        client = IBKRDataClient()
+        client._ib = MagicMock()
+        client._ib.qualifyContracts.return_value = [None]
+
+        with caplog.at_level("WARNING"):
+            out = client.fetch_hourly("BP.L", period="30d", use_cache=False)
+
+        assert out is None
+        assert client._ib.reqHistoricalData.call_count == 0
+        assert "BP.L" in caplog.text
+        assert "could not qualify" in caplog.text
+
     def test_no_new_bars_leaves_cache_file_untouched(self, monkeypatch, tmp_path):
         """If IBKR has nothing newer than the cache (e.g. called again within
         the same hour), the merge is a no-op and the cache file isn't

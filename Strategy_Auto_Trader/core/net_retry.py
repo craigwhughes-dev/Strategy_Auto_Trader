@@ -11,8 +11,11 @@ regardless of what yfinance does internally underneath.
 from __future__ import annotations
 
 import concurrent.futures
+import logging
 import time
 from typing import Callable, TypeVar
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -40,8 +43,12 @@ def call_with_timeout_retry(
             result = future.result(timeout=timeout)
             pool.shutdown(wait=False)
             return result
-        except Exception:
+        except Exception as e:
             pool.shutdown(wait=False)
+            logger.warning(
+                f"call_with_timeout_retry: attempt {attempt + 1}/{retries + 1} "
+                f"failed ({type(e).__name__}: {e})"
+            )
             if attempt < retries:
                 time.sleep(backoff * (attempt + 1))
     return None

@@ -25,12 +25,15 @@ covered or a page returns no further/older bars.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pandas as pd
 
 from ..core.atomic_io import atomic_write_csv
 from .symbols import ibkr_contract_params
+
+logger = logging.getLogger(__name__)
 
 CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "cache" / "ibkr_hourly"
 
@@ -198,6 +201,23 @@ class IBKRDataClient:
             out = out[out.index > stop_at]
         return out
 
+    def _qualify(self, ticker: str, contract) -> bool:
+        """Qualify contract in place; log and return False if IBKR couldn't
+        resolve it (unknown or ambiguous symbol) — ib_async.qualifyContracts
+        does not raise on this, it only warns to its own logger and returns
+        None in the corresponding result slot, so a caller that doesn't
+        check the return value ends up paging historical data for a
+        contract IBKR never actually matched."""
+        result = self._ib.qualifyContracts(contract)
+        if not result or result[0] is None:
+            logger.warning(
+                "IBKR could not qualify %s (mapped to %s on %s/%s) — "
+                "unknown or ambiguous symbol",
+                ticker, contract.symbol, contract.exchange, contract.currency,
+            )
+            return False
+        return True
+
     def fetch_hourly(self, ticker: str, period: str = "730d", use_cache: bool = True,
                       what_to_show: str = "TRADES") -> pd.DataFrame | None:
         """Fetch hourly OHLCV, same return contract as quant_engine's
@@ -222,7 +242,8 @@ class IBKRDataClient:
         try:
             from ib_async import Stock
             contract = Stock(*ibkr_contract_params(ticker))
-            self._ib.qualifyContracts(contract)
+            if not self._qualify(ticker, contract):
+                return _resample_30min_aligned(cached)
             if cached is not None:
                 new_df = self._fetch_pages(contract, what_to_show=what_to_show,
                                             stop_at=cached.index[-1])
@@ -230,6 +251,7 @@ class IBKRDataClient:
                 new_df = self._fetch_pages(contract, what_to_show=what_to_show,
                                             min_days=_period_to_days(period))
         except Exception:
+            logger.warning("fetch_hourly(%s) failed", ticker, exc_info=True)
             return _resample_30min_aligned(cached)
         finally:
             if owns_connection:
@@ -266,10 +288,12 @@ class IBKRDataClient:
         try:
             from ib_async import Stock
             contract = Stock(*ibkr_contract_params(ticker))
-            self._ib.qualifyContracts(contract)
+            if not self._qualify(ticker, contract):
+                return None
             cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=lookback_days)
             return self._fetch_pages(contract, what_to_show=what_to_show, stop_at=cutoff)
         except Exception:
+            logger.warning("fetch_recent_raw(%s) failed", ticker, exc_info=True)
             return None
         finally:
             if owns_connection:

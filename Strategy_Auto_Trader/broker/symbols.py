@@ -9,27 +9,45 @@ from __future__ import annotations
 
 PENCE_PER_POUND = 100.0
 
+# A handful of short LSE codes are registered on IBKR with a literal trailing
+# "." as part of the symbol itself (disambiguation against common English
+# abbreviations: AV./BA./BP./JD./NG./RR./SN./UU.) — yfinance's own ".L"
+# country suffix hides this, so the generic strip-and-pass-through below
+# resolves to a bare symbol IBKR has no listing for ("No security definition
+# has been found", verified live 2026-08-16). Confirmed via reqContractDetails
+# against the live paper Gateway; all eight still GBP as expected.
+_LSE_DOT_SYMBOLS = {"AV", "BA", "BP", "JD", "NG", "RR", "SN", "UU"}
+
 
 def ibkr_contract_params(ticker: str) -> tuple[str, str, str]:
     """Map a yfinance ticker to (symbol, exchange, currency) for an IBKR Stock.
 
-    ".L" suffix → LSE/GBP with the suffix stripped; everything else is treated
-    as a US equity on SMART/USD.
+    ".L" suffix → LSE/GBP with the suffix stripped and share-class hyphen
+    turned into IBKR's dot (plus the _LSE_DOT_SYMBOLS trailing-dot fixups
+    above). Everything else is treated as a US equity on SMART/USD; US
+    dual-class tickers use yfinance's hyphen (e.g. "BRK-B", "BF-B") where
+    IBKR wants a space ("BRK B", "BF B").
     """
     if ticker.upper().endswith(".L"):
-        return ticker[:-2].replace("-", "."), "LSE", "GBP"
-    return ticker, "SMART", "USD"
+        base = ticker[:-2].replace("-", ".")
+        if base.upper() in _LSE_DOT_SYMBOLS:
+            base = base + "."
+        return base, "LSE", "GBP"
+    return ticker.replace("-", " "), "SMART", "USD"
 
 
 def yfinance_ticker(symbol: str, currency: str) -> str:
     """Map an IBKR contract's (symbol, currency) back to a yfinance ticker.
 
-    Inverse of ibkr_contract_params: GBP contracts are LSE-listed, so append
-    ".L" and turn share-class dots back into yfinance's hyphen.
+    Inverse of ibkr_contract_params: GBP contracts are LSE-listed, so strip
+    the _LSE_DOT_SYMBOLS trailing dot (if present), append ".L", and turn
+    share-class dots back into yfinance's hyphen. USD contracts turn IBKR's
+    dual-class space back into yfinance's hyphen.
     """
     if currency.upper() == "GBP":
-        return symbol.replace(".", "-") + ".L"
-    return symbol
+        base = symbol[:-1] if symbol.upper().rstrip(".") in _LSE_DOT_SYMBOLS and symbol.endswith(".") else symbol
+        return base.replace(".", "-") + ".L"
+    return symbol.replace(" ", "-")
 
 
 def sizing_price(ticker: str, price: float) -> float:

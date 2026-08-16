@@ -241,8 +241,11 @@ class IBKRAdapter:
                             "action": trade.order.action,
                             "status": trade.orderStatus.status,
                         })
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(
+                            f"Skipping malformed open order for "
+                            f"{getattr(trade.contract, 'symbol', '?')}: {e}"
+                        )
             return orders
         except ConnectionError:
             raise
@@ -285,8 +288,11 @@ class IBKRAdapter:
                             stop_price=stop_price,
                             perm_id=trade.order.permId,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(
+                            f"Skipping malformed open stop order for "
+                            f"{getattr(trade.contract, 'symbol', '?')}: {e}"
+                        )
             return result
         except ConnectionError:
             raise

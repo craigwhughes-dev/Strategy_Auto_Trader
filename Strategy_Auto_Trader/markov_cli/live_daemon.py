@@ -1250,8 +1250,8 @@ def _check_top_k_screen_health(
         try:
             age_days = (datetime.now(timezone.utc).date() - datetime.fromisoformat(state_date).date()).days
             is_stale = age_days > 1
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"  Could not parse top_k_universe.json date {state_date!r}: {e}")
 
     if status != "ok" or is_stale:
         effective_status = "stale" if is_stale else (status or "unknown")

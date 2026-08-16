@@ -330,6 +330,7 @@ def _execute_sell_all(
             portfolio.record_exit(ticker, fill, exit_type="strategy_exit")
             fills.append(fill)
         except Exception as e:
+            logger.warning(f"{ticker}: manual sell failed: {e}")
             errors.append(f"{ticker}: {str(e)}")
 
     if errors and not fills:
