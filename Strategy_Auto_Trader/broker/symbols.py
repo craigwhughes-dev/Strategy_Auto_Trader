@@ -9,6 +9,23 @@ from __future__ import annotations
 
 PENCE_PER_POUND = 100.0
 
+# Tickers confirmed unresolvable by IBKR in the GBP/pence currency the sizing
+# pipeline requires.  Each entry explains what IBKR actually returns and the
+# date it was verified live against the paper TWS gateway.
+#
+# build_sp_ftse_universe() filters this set out so a nightly Wikipedia refresh
+# cannot silently reintroduce a ticker known to be broken on the IBKR side.
+#
+# If a Phase-1 reqContractDetails diagnostic later confirms a GBP line exists
+# for one of these (e.g. a tradingClass or primaryExchange tweak missed by the
+# generic lookup), remove the entry here and add an explicit override to
+# _IBKR_EXPLICIT_OVERRIDES instead (see ibkr_contract_params below).
+IBKR_UNRESOLVABLE: frozenset[str] = frozenset({
+    "CPG.L",   # Compass Group: IBKR resolves as CPG/LSE/USD only — confirmed 2026-08-16
+    "IHG.L",   # InterContinental Hotels: IBKR resolves as IHGL/LSE/USD only — confirmed 2026-08-16
+    "MTLN.L",  # Metlen Energy (ex-Mytilineos): IBKR resolves as MTLN/LSE/EUR only — confirmed 2026-08-16
+})
+
 # A handful of short LSE codes are registered on IBKR with a literal trailing
 # "." as part of the symbol itself (disambiguation against common English
 # abbreviations: AV./BA./BP./JD./NG./RR./SN./UU.) — yfinance's own ".L"

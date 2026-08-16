@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from Strategy_Auto_Trader.broker.symbols import (
+    IBKR_UNRESOLVABLE,
     ibkr_contract_params,
     normalize_fill_price,
     yfinance_ticker,
@@ -125,6 +126,19 @@ class TestSizingPrice:
         pm = PortfolioManager(10_000, Path("nonexistent_state.json"))
         qty = pm.compute_quantity(0.1, sizing_price("HSBA.L", 700.0))
         assert qty == 142
+
+
+class TestIbkrUnresolvable:
+    @pytest.mark.parametrize("ticker", ["CPG.L", "IHG.L", "MTLN.L"])
+    def test_confirmed_unresolvable_tickers_present(self, ticker):
+        assert ticker in IBKR_UNRESOLVABLE
+
+    def test_is_frozenset(self):
+        assert isinstance(IBKR_UNRESOLVABLE, frozenset)
+
+    def test_normal_lse_tickers_not_excluded(self):
+        assert "HSBA.L" not in IBKR_UNRESOLVABLE
+        assert "SHEL.L" not in IBKR_UNRESOLVABLE
 
 
 class TestNormalizeFillPrice:

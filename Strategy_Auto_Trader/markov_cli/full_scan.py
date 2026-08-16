@@ -113,6 +113,7 @@ from ..quant_hmm.data_cache import fetch_hourly_cached, volatility_profile_cache
 from ..quant_hmm.ticker_ranking import _HMM_CACHE_DIR as HMM_CACHE_DIR
 from ..strategy.base.registry import resolve_strategy
 from ..core.cli_logging import setup_cli_logger
+from ..broker.symbols import IBKR_UNRESOLVABLE
 
 logger = logging.getLogger(__name__)
 
@@ -424,7 +425,11 @@ def build_sp_ftse_universe(out_path: Path = SP_FTSE_UNIVERSE_FILE) -> list[str]:
         sources[name] = fn()
         logger.info(f"  {name}: {len(sources[name])} tickers from Wikipedia")
 
-    all_tickers = set(sources["ftse100"]) | set(sources["sp500"])
+    raw = set(sources["ftse100"]) | set(sources["sp500"])
+    excluded = raw & IBKR_UNRESOLVABLE
+    if excluded:
+        logger.info(f"  excluded (IBKR_UNRESOLVABLE): {sorted(excluded)}")
+    all_tickers = raw - IBKR_UNRESOLVABLE
     uk = sorted(t for t in all_tickers if t.endswith(".L"))
     us = sorted(t for t in all_tickers if not t.endswith(".L"))
     universe = uk + us

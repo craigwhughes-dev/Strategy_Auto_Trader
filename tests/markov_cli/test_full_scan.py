@@ -208,6 +208,17 @@ class TestUniverse:
         assert tickers == ["SHEL.L", "AAPL", "MSFT"]
         assert out_path.exists()
 
+    def test_build_sp_ftse_universe_excludes_ibkr_unresolvable(self, tmp_path, monkeypatch):
+        """IBKR_UNRESOLVABLE tickers must not appear in output even when Wikipedia lists them."""
+        from Strategy_Auto_Trader.broker.symbols import IBKR_UNRESOLVABLE
+        unresolvable = next(iter(IBKR_UNRESOLVABLE))  # pick any confirmed entry
+        monkeypatch.setattr(full_scan, "_sp500_tickers", lambda: ["AAPL"])
+        monkeypatch.setattr(full_scan, "_ftse100_tickers", lambda: ["SHEL.L", unresolvable])
+        out_path = tmp_path / "universe_sp_ftse.json"
+        tickers = full_scan.build_sp_ftse_universe(out_path)
+        assert unresolvable not in tickers
+        assert "SHEL.L" in tickers
+
     def test_load_sp_ftse_universe(self, tmp_path, monkeypatch):
         out_path = tmp_path / "universe_sp_ftse.json"
         monkeypatch.setattr(full_scan, "SP_FTSE_UNIVERSE_FILE", out_path)
