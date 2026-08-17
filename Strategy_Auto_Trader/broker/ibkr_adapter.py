@@ -11,12 +11,23 @@ set Trusted IP to 127.0.0.1, port 7497 for paper.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 
 from .symbols import PENCE_PER_POUND, ibkr_contract_params, yfinance_ticker
-from .types import FillResult, OrderRequest
+from .types import FillResult, OrderRequest, PendingCancelEvent
 
 logger = logging.getLogger(__name__)
+
+# Statuses IBKR reports for an order still resting/working (not yet a
+# terminal fill/cancel outcome).
+_WORKING_STATUSES = ("PendingSubmit", "PreSubmitted", "Submitted", "ApiPending", "Acknowledged")
+_TERMINAL_NON_FILL_STATUSES = ("Cancelled", "ApiCancelled", "Inactive")
+
+# How long a cancel can stay unconfirmed before we send one alert about it.
+# Non-blocking: checked once per daemon cycle via check_pending_cancels(),
+# never waited-for synchronously inside place_order().
+PENDING_CANCEL_ALERT_SECONDS = 30 * 60
 
 
 class IBKRAdapter:
@@ -42,6 +53,9 @@ class IBKRAdapter:
         # TWS; its handshake is also known to time out transiently.
         self._connect_timeout = connect_timeout
         self._ib = None
+        # Orders where our cancel request wasn't confirmed within the short
+        # in-call poll — resolved later, once per cycle, by check_pending_cancels().
+        self._pending_cancels: list[dict] = []
 
     def connect(self) -> None:
         """Connect to TWS / IB Gateway. Raises RuntimeError if ib_async is missing."""
@@ -107,7 +121,7 @@ class IBKRAdapter:
             from ib_async import Stock, MarketOrder
             contract = Stock(*ibkr_contract_params(req.ticker))
             self._ib.qualifyContracts(contract)
-            order = MarketOrder(req.action, req.quantity)
+            order = MarketOrder(req.action, req.quantity, tif="GTC")
             logger.info(
                 "About to place order: %s %s×%s @ market",
                 req.action, req.quantity, req.ticker,
@@ -123,11 +137,52 @@ class IBKRAdapter:
             # Check order status — only return FillResult if fully filled
             order_status = trade.orderStatus.status
             if order_status != "Filled":
-                logger.warning(
-                    f"Order not filled for {req.ticker}: status={order_status}, "
-                    f"requested_qty={req.quantity}"
-                )
-                return None
+                # Account TIF preset is GTC, so an unfilled order rests on
+                # IBKR's books indefinitely instead of auto-expiring at end
+                # of day — cancel it ourselves so it can't fill unattended
+                # after this call returns and the in-flight marker clears.
+                if order_status in _WORKING_STATUSES:
+                    self._ib.cancelOrder(trade.order)
+                    for _ in range(10):
+                        self._ib.waitOnUpdate(timeout=0.5)
+                        if trade.orderStatus.status in (*_TERMINAL_NON_FILL_STATUSES, "Filled"):
+                            break
+                    order_status = trade.orderStatus.status
+                    if order_status == "Filled":
+                        # Filled while the cancel request was in flight — fall
+                        # through to the normal fill-price handling below.
+                        pass
+                    elif order_status in _TERMINAL_NON_FILL_STATUSES:
+                        logger.warning(
+                            f"Order not filled for {req.ticker}: cancelled resting "
+                            f"order (was {order_status}), requested_qty={req.quantity}"
+                        )
+                        return None
+                    else:
+                        # Cancel not confirmed within the short poll. Don't block
+                        # the daemon cycle waiting further — hand it off to
+                        # check_pending_cancels(), which resolves it (or alerts
+                        # once, non-blockingly) on subsequent cycles.
+                        logger.warning(
+                            f"Order not filled for {req.ticker}: cancel requested but "
+                            f"unconfirmed (status={order_status}), requested_qty={req.quantity} "
+                            f"— will keep checking each cycle"
+                        )
+                        self._pending_cancels.append({
+                            "trade": trade,
+                            "ticker": req.ticker,
+                            "action": req.action,
+                            "quantity": req.quantity,
+                            "requested_at": time.monotonic(),
+                            "alerted": False,
+                        })
+                        return None
+                else:
+                    logger.warning(
+                        f"Order not filled for {req.ticker}: status={order_status}, "
+                        f"requested_qty={req.quantity}"
+                    )
+                    return None
 
             fill_price = float(trade.orderStatus.avgFillPrice or 0.0)
             if fill_price <= 0:
@@ -313,6 +368,61 @@ class IBKRAdapter:
         except Exception as e:
             logger.warning(f"Error retrieving open stop orders: {e}")
             raise
+
+    def check_pending_cancels(self) -> list[PendingCancelEvent]:
+        """Resolve entry orders whose cancel request wasn't confirmed in-call.
+
+        Called once per daemon cycle (non-blocking) rather than waiting
+        synchronously inside place_order() — a stuck cancel can take a long
+        time to confirm and must never stall the trading loop. Each pending
+        order is checked against its live Trade object (already updating in
+        the background as long as the connection stays open); resolved
+        entries are dropped, still-working ones are alerted once after
+        PENDING_CANCEL_ALERT_SECONDS and then left for the next cycle.
+        """
+        if not self._pending_cancels:
+            return []
+        if self.is_connected():
+            try:
+                self._ib.waitOnUpdate(timeout=0.5)
+            except Exception as e:
+                logger.debug(f"check_pending_cancels: waitOnUpdate failed (suppressed): {e}")
+
+        events: list[PendingCancelEvent] = []
+        survivors: list[dict] = []
+        for record in self._pending_cancels:
+            status = record["trade"].orderStatus.status
+            if status == "Filled":
+                fill_price = float(record["trade"].orderStatus.avgFillPrice or 0.0)
+                events.append(PendingCancelEvent(
+                    ticker=record["ticker"], action=record["action"],
+                    quantity=record["quantity"], outcome="filled",
+                    fill=FillResult(
+                        ticker=record["ticker"], action=record["action"],
+                        fill_price=fill_price, quantity=record["quantity"],
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                    ),
+                ))
+                continue
+            if status in _TERMINAL_NON_FILL_STATUSES:
+                events.append(PendingCancelEvent(
+                    ticker=record["ticker"], action=record["action"],
+                    quantity=record["quantity"], outcome="cancelled",
+                ))
+                continue
+
+            elapsed = time.monotonic() - record["requested_at"]
+            if elapsed >= PENDING_CANCEL_ALERT_SECONDS and not record["alerted"]:
+                record["alerted"] = True
+                events.append(PendingCancelEvent(
+                    ticker=record["ticker"], action=record["action"],
+                    quantity=record["quantity"], outcome="timeout_alert",
+                    elapsed_minutes=elapsed / 60.0,
+                ))
+            survivors.append(record)
+
+        self._pending_cancels = survivors
+        return events
 
     def cancel_stop_order(self, perm_id: int) -> str:
         """Cancel a stop order by permId. Returns 'Cancelled' | 'Filled' | 'NotFound' | 'Error'."""

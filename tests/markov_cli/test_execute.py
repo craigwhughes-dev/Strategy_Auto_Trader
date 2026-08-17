@@ -441,3 +441,82 @@ class TestInFlightMarkerIntegration:
         assert marker["ticker"] == "AAPL"
         assert marker["action"] == "BUY"
         assert marker["quantity"] == 10
+
+
+class TestPlaceOrderRetry:
+    """Retry-on-socket-disconnect logic in _place_order_with_retry()."""
+
+    def test_retries_on_connection_error_then_succeeds(self, monkeypatch):
+        from Strategy_Auto_Trader.markov_cli.execute import _place_order_with_retry
+        from Strategy_Auto_Trader.broker.types import FillResult
+
+        broker = mock.Mock()
+        broker.is_connected.return_value = False
+        fill = FillResult("AAPL", "BUY", 150.0, 10, "2026-07-01T00:00:00Z")
+        broker.place_order.side_effect = [
+            ConnectionError("Socket disconnect during order placement: boom"),
+            ConnectionError("Socket disconnect during order placement: boom"),
+            fill,
+        ]
+        sleeps = []
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.markov_cli.execute.time.sleep",
+            lambda s: sleeps.append(s),
+        )
+
+        result = _place_order_with_retry(broker, mock.Mock(), "AAPL")
+
+        assert result is fill
+        assert broker.place_order.call_count == 3
+        assert sleeps == [30.0, 30.0]
+        assert broker.connect.call_count == 2
+
+    def test_gives_up_after_max_retries(self, monkeypatch):
+        from Strategy_Auto_Trader.markov_cli.execute import _place_order_with_retry
+
+        broker = mock.Mock()
+        broker.is_connected.return_value = False
+        broker.place_order.side_effect = ConnectionError("Socket disconnect: still down")
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.markov_cli.execute.time.sleep", lambda s: None
+        )
+
+        with pytest.raises(ConnectionError):
+            _place_order_with_retry(broker, mock.Mock(), "AAPL")
+
+        assert broker.place_order.call_count == 5
+
+    def test_does_not_retry_non_connection_errors(self, monkeypatch):
+        from Strategy_Auto_Trader.markov_cli.execute import _place_order_with_retry
+
+        broker = mock.Mock()
+        broker.place_order.side_effect = RuntimeError("order rejected")
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.markov_cli.execute.time.sleep",
+            lambda s: pytest.fail("should not sleep/retry on non-connection errors"),
+        )
+
+        with pytest.raises(RuntimeError):
+            _place_order_with_retry(broker, mock.Mock(), "AAPL")
+
+        assert broker.place_order.call_count == 1
+
+    def test_does_not_reconnect_if_already_connected(self, monkeypatch):
+        from Strategy_Auto_Trader.markov_cli.execute import _place_order_with_retry
+        from Strategy_Auto_Trader.broker.types import FillResult
+
+        broker = mock.Mock()
+        broker.is_connected.return_value = True
+        fill = FillResult("AAPL", "BUY", 150.0, 10, "2026-07-01T00:00:00Z")
+        broker.place_order.side_effect = [
+            ConnectionError("Socket disconnect during order placement: blip"),
+            fill,
+        ]
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.markov_cli.execute.time.sleep", lambda s: None
+        )
+
+        result = _place_order_with_retry(broker, mock.Mock(), "AAPL")
+
+        assert result is fill
+        broker.connect.assert_not_called()

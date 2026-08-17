@@ -349,6 +349,15 @@ def _print_backtest_summary(bt: dict) -> None:
         logger.info(f"  {'Buy & Hold P&L':30s}  {bh_sign}{cur}{bh_pl:,.2f}  ({bh_sign}{bh_tr*100:.1f}%)")
     logger.info(f"  {'Kelly fraction (final)':30s}  {bt['final_kelly']*100:.1f}%")
 
+    if not detail.empty and "strategy_return" in detail.columns and "bar_return" in detail.columns:
+        logger.info(f"\n  -- Yearly P&L --")
+        logger.info(f"  {'Year':6s}  {'Strategy':>10s}  {'Buy&Hold':>10s}  {'Trades':>7s}")
+        for year, grp in detail.groupby(detail.index.year):
+            yr_strat = float((1 + grp["strategy_return"]).prod() - 1)
+            yr_bh = float((1 + grp["bar_return"]).prod() - 1)
+            n_yr_trades = int((grp["trade_event"] == "BUY").sum())
+            logger.info(f"  {year:6d}  {_pct(yr_strat):>10s}  {_pct(yr_bh):>10s}  {n_yr_trades:>7d}")
+
 
 def main(argv: list[str] | None = None) -> int:
     setup_cli_logger("run")

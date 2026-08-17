@@ -16,6 +16,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from pathlib import Path
 
 from ..core.cli_logging import setup_cli_logger
@@ -56,6 +57,43 @@ class ExecutionInterrupted(Exception):
 def _load_watchlist(path: Path) -> dict:
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def _place_order_with_retry(
+    broker: object,
+    req: object,
+    ticker: str,
+    max_retries: int = 5,
+    retry_delay: float = 30.0,
+):
+    """Place an order, retrying on a dropped socket only (not on order rejects).
+
+    A ConnectionError here means the TCP session to TWS/Gateway died before
+    the broker call could confirm anything reached IBKR — the caller's
+    in-flight marker is still set, so it's safe to reconnect and resubmit.
+    Any other exception (bad contract, order reject, etc.) is not a
+    connectivity issue and is raised immediately without retrying.
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            return broker.place_order(req)
+        except ConnectionError as e:
+            if attempt >= max_retries:
+                logger.warning(
+                    f"Order call for {ticker} raised before returning — "
+                    f"in-flight marker left in place after {attempt} attempt(s): {e}"
+                )
+                raise
+            logger.warning(
+                f"Order call for {ticker} raised before returning "
+                f"(attempt {attempt}/{max_retries}) — retrying in {retry_delay:.0f}s: {e}"
+            )
+            time.sleep(retry_delay)
+            if not broker.is_connected():
+                try:
+                    broker.connect()
+                except Exception as connect_err:
+                    logger.warning(f"Reconnect attempt for {ticker} failed: {connect_err}")
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -190,11 +228,7 @@ def execute_signals(
                 continue
             logger.info(f"About to place order: BUY {qty}x {ticker} — marker written")
             write_marker(marker_path, ticker, "BUY", qty)
-            try:
-                fill = broker.place_order(OrderRequest(ticker, "BUY", qty))
-            except Exception as e:
-                logger.warning(f"Order call for {ticker} raised before returning — in-flight marker left in place: {e}")
-                raise
+            fill = _place_order_with_retry(broker, OrderRequest(ticker, "BUY", qty), ticker)
             try:
                 clear_marker(marker_path)
             except Exception as e:
@@ -335,11 +369,7 @@ def execute_signals(
 
             logger.info(f"About to place order: SELL {qty}x {ticker} — marker written")
             write_marker(marker_path, ticker, "SELL", qty)
-            try:
-                fill = broker.place_order(OrderRequest(ticker, "SELL", qty))
-            except Exception as e:
-                logger.warning(f"Order call for {ticker} raised before returning — in-flight marker left in place: {e}")
-                raise
+            fill = _place_order_with_retry(broker, OrderRequest(ticker, "SELL", qty), ticker)
             try:
                 clear_marker(marker_path)
             except Exception as e:

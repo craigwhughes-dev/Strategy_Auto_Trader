@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from .types import (
     FillResult,
     OrderRequest,
+    PendingCancelEvent,
     StopOrderRequest,
     StopOrderResult,
     OpenOrderInfo,
@@ -106,3 +107,8 @@ class NullBroker:
     def get_stop_fill(self, perm_id: int) -> FillResult | None:
         """Stub: no fills tracked for stops in dry-run."""
         return None
+
+    def check_pending_cancels(self) -> list[PendingCancelEvent]:
+        """Stub: place_order() always fills synchronously in dry-run, so
+        nothing is ever left pending a cancel confirmation."""
+        return []

@@ -131,7 +131,10 @@ def _read_holder_pid() -> int | None:
     pid_path = STATE_DIR / "daemon.pid"
     try:
         return int(pid_path.read_text(encoding="utf-8").split("|")[0])
-    except Exception:
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logging.getLogger("live_daemon").warning("daemon.pid unreadable: %s", e)
         return None
 
 
@@ -385,8 +388,11 @@ def load_daemon_state() -> dict:
         try:
             with open(state_path, encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger("live_daemon").warning(
+                "daemon_state.json unreadable (%s) — starting with empty state. "
+                "Halt flags and cursors reset.", e
+            )
     return {
         "last_overnight_date": None,
         "cursors": {},
@@ -890,7 +896,7 @@ def _execute_processed_tickers(
             logger.info(f"    SELL: {s}")
         portfolio.save()
     except Exception as e:
-        logger.error(f"  Error executing signals (unrecoverable): {e}")
+        logger.error(f"  Error executing signals (unrecoverable): {e}", exc_info=True)
 
 
 def retry_pending_tickers(
@@ -1330,6 +1336,60 @@ def check_protective_stops(
                 broker.cancel_stop_order(perm_id)
             except Exception as e:
                 logger.warning(f"Error cancelling orphan stop {perm_id}: {e}")
+
+
+def check_pending_order_cancels(
+    portfolio: object,
+    daemon_state: dict,
+    broker: object,
+    logger: logging.Logger,
+    *,
+    run_recon: Callable | None = None,
+    save_state: Callable | None = None,
+) -> None:
+    """Resolve entry orders whose cancel request wasn't confirmed in-call.
+
+    Account TIF preset is GTC, so an order the daemon couldn't confirm as
+    cancelled won't auto-expire — it can still fill unattended. Runs once per
+    cycle (non-blocking) rather than the adapter blocking the trading loop
+    waiting for IBKR to confirm. A late fill is a real, previously-untracked
+    position, so it triggers an immediate reconciliation pass (same halt +
+    alert path as any other broker/portfolio mismatch) instead of waiting
+    for the next nightly reconciliation to notice.
+    """
+    check_fn = getattr(broker, "check_pending_cancels", None)
+    if check_fn is None:
+        return
+    try:
+        events = check_fn()
+    except Exception as e:
+        logger.warning(f"check_pending_order_cancels: error: {e}")
+        return
+
+    for event in events:
+        if event.outcome == "cancelled":
+            logger.info(f"{event.ticker}: pending cancel confirmed — order no longer working")
+        elif event.outcome == "filled":
+            logger.warning(
+                f"{event.ticker}: order filled AFTER cancel was requested "
+                f"({event.quantity}x @ {event.fill.fill_price if event.fill else '?'}) "
+                f"— running immediate reconciliation"
+            )
+            (run_recon or run_reconciliation)(
+                portfolio, broker, daemon_state, logger, save_state=save_state,
+            )
+        elif event.outcome == "timeout_alert":
+            logger.warning(
+                f"{event.ticker}: cancel still unconfirmed after "
+                f"{event.elapsed_minutes:.0f} min — order may still be working at IBKR"
+            )
+            try:
+                from ..output.emailer import send_pending_cancel_timeout_alert
+                send_pending_cancel_timeout_alert(
+                    event.ticker, event.action, event.quantity, event.elapsed_minutes,
+                )
+            except Exception as e:
+                logger.error(f"check_pending_order_cancels: alert email failed: {e}")
 
 
 def run_reconciliation(
@@ -1798,6 +1858,10 @@ def main(argv: list[str] | None = None) -> int:
                 # Check protective stops (before ticker processing)
                 if args.protective_stops and not dry_run and startup_reconciliation_done:
                     check_protective_stops(portfolio, broker, logger, args.stop_buffer_pct)
+
+                # Resolve any entry-order cancels IBKR hasn't confirmed yet
+                if not dry_run and startup_reconciliation_done:
+                    check_pending_order_cancels(portfolio, daemon_state, broker, logger)
 
                 # Process manual sell commands from mobile app
                 process_manual_commands_wrapper(config, portfolio, broker, logger, daemon_state)

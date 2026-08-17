@@ -269,6 +269,27 @@ def main() -> int:
         ])
         stats.to_excel(writer, sheet_name="Stats", index=False)
 
+        closed_for_yearly = trades_df[trades_df["Status"] == "CLOSED"].copy()
+        if not closed_for_yearly.empty:
+            closed_for_yearly["Year"] = pd.to_datetime(closed_for_yearly["Exit Date"], errors="coerce").dt.year
+            yearly_grp = closed_for_yearly.groupby("Year")
+            yearly_rows = []
+            for year, grp in yearly_grp:
+                wins = int((grp["Net P&L"] > 0).sum())
+                losses = int((grp["Net P&L"] < 0).sum())
+                yearly_rows.append({
+                    "Year": int(year),
+                    "Trades": len(grp),
+                    "Wins": wins,
+                    "Losses": losses,
+                    "Win Rate": f"{wins/(wins+losses)*100:.1f}%" if (wins + losses) else "N/A",
+                    "Total Net P&L": round(grp["Net P&L"].sum(), 2),
+                    "Avg P&L": round(grp["Net P&L"].mean(), 2),
+                    "Best Trade": round(grp["Net P&L"].max(), 2),
+                    "Worst Trade": round(grp["Net P&L"].min(), 2),
+                })
+            pd.DataFrame(yearly_rows).to_excel(writer, sheet_name="Yearly P&L", index=False)
+
     logger.info(f"\n  Report saved: {args.output}")
 
     total_pl = trades_df["Net P&L"].sum()

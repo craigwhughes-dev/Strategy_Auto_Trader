@@ -120,6 +120,15 @@ def _run_one_path(
         cost_model=cost_model,
         **backtest_kwargs,
     )
+    yearly_strat: dict[int, float] = {}
+    yearly_bh: dict[int, float] = {}
+    yearly_trades: dict[int, int] = {}
+    detail = bt.get("detail", None)
+    if detail is not None and not detail.empty and "strategy_return" in detail.columns:
+        for year, grp in detail.groupby(detail.index.year):
+            yearly_strat[int(year)] = float((1 + grp["strategy_return"]).prod() - 1)
+            yearly_bh[int(year)] = float((1 + grp["bar_return"]).prod() - 1)
+            yearly_trades[int(year)] = int((grp["trade_event"] == "BUY").sum())
     return {
         "sharpe_strategy":       bt.get("sharpe_strategy", float("nan")),
         "sortino_strategy":      bt.get("sortino_strategy", float("nan")),
@@ -127,6 +136,9 @@ def _run_one_path(
         "total_return_strategy": bt.get("total_return_strategy", float("nan")),
         "final_portfolio":       bt.get("final_portfolio", float("nan")),
         "n_buys":                bt.get("n_buys", 0),
+        "yearly_strat":          yearly_strat,
+        "yearly_bh":             yearly_bh,
+        "yearly_trades":         yearly_trades,
     }
 
 
@@ -302,6 +314,32 @@ def main(argv: list[str] | None = None) -> int:
             s = summary[m]
             logger.info(f"  {m:35s}  p5={s['p5']:+.3f}  p50={s['p50']:+.3f}  p95={s['p95']:+.3f}")
     logger.info(f"  {'prob_of_loss':35s}  {summary['prob_of_loss']:.1%}")
+
+    all_years = sorted({y for r in results for y in r.get("yearly_strat", {})})
+    if all_years:
+        logger.info(f"\n  -- Yearly P&L (p5 / p50 / p95 across {len(results)} paths) --")
+        logger.info(f"  {'Year':6s}  {'p5':>8s}  {'p50':>8s}  {'p95':>8s}  {'B&H p50':>9s}  {'Trades':>7s}")
+        yearly_rows = []
+        for year in all_years:
+            sv = [r["yearly_strat"][year] for r in results if year in r.get("yearly_strat", {})]
+            bv = [r["yearly_bh"][year] for r in results if year in r.get("yearly_bh", {})]
+            tv = [r.get("yearly_trades", {}).get(year, 0) for r in results]
+            p5  = float(np.percentile(sv, 5))  if sv else float("nan")
+            p50 = float(np.percentile(sv, 50)) if sv else float("nan")
+            p95 = float(np.percentile(sv, 95)) if sv else float("nan")
+            bh_med = float(np.percentile(bv, 50)) if bv else float("nan")
+            med_trades = float(np.median(tv)) if tv else 0.0
+            logger.info(
+                f"  {year:6d}  {p5*100:+7.1f}%  {p50*100:+7.1f}%  {p95*100:+7.1f}%"
+                f"  {bh_med*100:+8.1f}%  {med_trades:>7.1f}"
+            )
+            yearly_rows.append({
+                "year": year, "strat_p5": round(p5, 6), "strat_p50": round(p50, 6),
+                "strat_p95": round(p95, 6), "bh_p50": round(bh_med, 6),
+                "median_trades": round(med_trades, 1),
+            })
+        pd.DataFrame(yearly_rows).to_csv(out_dir / "mc_yearly.csv", index=False)
+
     logger.info(f"\nOutputs: {out_dir}")
     return 0
 

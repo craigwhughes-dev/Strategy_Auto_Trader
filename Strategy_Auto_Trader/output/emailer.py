@@ -359,6 +359,32 @@ def send_execution_interrupted_alert(
     logger.info(f"  Execution-interrupted alert sent: {subject}")
 
 
+def send_pending_cancel_timeout_alert(
+    ticker: str, action: str, quantity: int, elapsed_minutes: float
+) -> None:
+    """Alert that a cancel request IBKR hasn't confirmed after 30+ minutes.
+
+    Not a halt — this is one stray order still resting at the broker, not
+    portfolio-wide ambiguity like ExecutionInterrupted. Daemon keeps polling
+    every cycle; this fires once per order (not repeated every cycle)."""
+    html = f"""<html><body style="margin:0;padding:20px;background:#0f1117;font-family:system-ui,sans-serif;color:#e0e0e0">
+<div style="max-width:700px;margin:0 auto">
+  <h1 style="color:#ffb74d;margin:0 0 4px">Cancel request unconfirmed</h1>
+  <div style="color:#888;margin-bottom:16px">{ticker} {action} {quantity}x — cancel requested {elapsed_minutes:.0f} min ago, IBKR still hasn't confirmed it</div>
+  <div style="background:#2a2410;border:1px solid #4a3a1a;border-radius:8px;padding:12px 16px;margin:16px 0">
+    <p style="color:#ddd;margin:0">Order didn't fill within the wait window, so the daemon asked IBKR to cancel it.
+    The account's TIF preset is GTC, so an uncancelled order won't auto-expire — it can still fill later if left alone.
+    Check TWS/Gateway manually to confirm the order's actual state.</p>
+  </div>
+  <p style="color:#ddd">New entries are NOT halted — the daemon keeps checking this order every cycle and will
+  reconcile automatically if it turns out to have filled.</p>
+</div></body></html>"""
+
+    subject = f"Cancel unconfirmed after {elapsed_minutes:.0f} min: {ticker} {action} {quantity}x"
+    _send(subject, html)
+    logger.info(f"  Pending-cancel timeout alert sent: {subject}")
+
+
 def send_portfolio_status(positions: list[dict]) -> None:
     """Send a portfolio status email showing all active trades with P&L since entry."""
     if not positions:

@@ -8,7 +8,14 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from .types import FillResult, OrderRequest, StopOrderRequest, StopOrderResult, OpenOrderInfo
+from .types import (
+    FillResult,
+    OrderRequest,
+    PendingCancelEvent,
+    StopOrderRequest,
+    StopOrderResult,
+    OpenOrderInfo,
+)
 
 
 @runtime_checkable
@@ -25,3 +32,4 @@ class BrokerAdapterProtocol(Protocol):
     def get_open_stop_orders(self) -> dict[int, OpenOrderInfo]: ...
     def cancel_stop_order(self, perm_id: int) -> str: ...
     def get_stop_fill(self, perm_id: int) -> FillResult | None: ...
+    def check_pending_cancels(self) -> list[PendingCancelEvent]: ...

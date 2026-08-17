@@ -233,6 +233,66 @@ class TestBroker:
         fill = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
         assert fill is None
 
+    def test_ibkr_adapter_place_order_requests_cancel_when_still_unfilled(self):
+        """Account TIF preset is GTC — a still-working order must be cancelled
+        explicitly rather than left resting on IBKR's books after we give up."""
+        pytest.importorskip("ib_async")
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        from Strategy_Auto_Trader.broker.types import OrderRequest
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+        adapter._ib.isConnected.return_value = True
+
+        mock_trade = MagicMock()
+        mock_trade.orderStatus.status = "Submitted"
+        mock_trade.orderStatus.avgFillPrice = 0.0
+        adapter._ib.placeOrder.return_value = mock_trade
+        adapter._ib.qualifyContracts = MagicMock()
+        adapter._ib.waitOnUpdate = MagicMock()
+
+        fill = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
+
+        assert fill is None
+        adapter._ib.cancelOrder.assert_called_once_with(mock_trade.order)
+        # Cancel not confirmed within the short in-call poll — must not be
+        # dropped; handed off to check_pending_cancels() for later cycles.
+        assert len(adapter._pending_cancels) == 1
+        assert adapter._pending_cancels[0]["ticker"] == "AAPL"
+
+    def test_ibkr_adapter_place_order_fills_while_cancel_in_flight(self):
+        """If the order fills in the window between us giving up and the
+        cancel request landing, the fill must still be honoured, not dropped."""
+        pytest.importorskip("ib_async")
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        from Strategy_Auto_Trader.broker.types import OrderRequest
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+        adapter._ib.isConnected.return_value = True
+
+        mock_trade = MagicMock()
+        mock_trade.orderStatus.status = "Submitted"
+        mock_trade.orderStatus.avgFillPrice = 0.0
+        adapter._ib.placeOrder.return_value = mock_trade
+        adapter._ib.qualifyContracts = MagicMock()
+
+        calls = {"n": 0}
+
+        def waitOnUpdate_side_effect(timeout=None):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                mock_trade.orderStatus.status = "Filled"
+                mock_trade.orderStatus.avgFillPrice = 195.5
+
+        adapter._ib.waitOnUpdate = MagicMock(side_effect=waitOnUpdate_side_effect)
+
+        fill = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
+
+        assert fill is not None
+        assert fill.fill_price == pytest.approx(195.5)
+        adapter._ib.cancelOrder.assert_called_once_with(mock_trade.order)
+
     def test_ibkr_adapter_place_order_avgfillprice_populated_skips_retry_loop(self):
         pytest.importorskip("ib_async")
         from unittest.mock import MagicMock
@@ -333,6 +393,102 @@ class TestBroker:
         assert fill.fill_price == 0.0
         # 1 initial wait + 5 bounded retries, no more.
         assert adapter._ib.waitOnUpdate.call_count == 6
+
+    # -- check_pending_cancels() --------------------------------------------
+
+    def test_check_pending_cancels_empty_returns_empty_list(self):
+        pytest.importorskip("ib_async")
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        adapter = IBKRAdapter()
+        assert adapter.check_pending_cancels() == []
+
+    def test_check_pending_cancels_resolves_confirmed_cancel(self):
+        pytest.importorskip("ib_async")
+        import time
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        adapter = IBKRAdapter()
+        mock_trade = MagicMock()
+        mock_trade.orderStatus.status = "Cancelled"
+        adapter._pending_cancels = [{
+            "trade": mock_trade, "ticker": "AAPL", "action": "BUY",
+            "quantity": 10, "requested_at": time.monotonic(), "alerted": False,
+        }]
+
+        events = adapter.check_pending_cancels()
+
+        assert len(events) == 1
+        assert events[0].outcome == "cancelled"
+        assert events[0].ticker == "AAPL"
+        assert adapter._pending_cancels == []
+
+    def test_check_pending_cancels_resolves_late_fill(self):
+        pytest.importorskip("ib_async")
+        import time
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        adapter = IBKRAdapter()
+        mock_trade = MagicMock()
+        mock_trade.orderStatus.status = "Filled"
+        mock_trade.orderStatus.avgFillPrice = 195.5
+        adapter._pending_cancels = [{
+            "trade": mock_trade, "ticker": "AAPL", "action": "BUY",
+            "quantity": 10, "requested_at": time.monotonic(), "alerted": False,
+        }]
+
+        events = adapter.check_pending_cancels()
+
+        assert len(events) == 1
+        assert events[0].outcome == "filled"
+        assert events[0].fill.fill_price == pytest.approx(195.5)
+        assert events[0].fill.quantity == 10
+        assert adapter._pending_cancels == []
+
+    def test_check_pending_cancels_still_working_before_threshold_no_event(self):
+        pytest.importorskip("ib_async")
+        import time
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        adapter = IBKRAdapter()
+        mock_trade = MagicMock()
+        mock_trade.orderStatus.status = "Submitted"
+        adapter._pending_cancels = [{
+            "trade": mock_trade, "ticker": "AAPL", "action": "BUY",
+            "quantity": 10, "requested_at": time.monotonic(), "alerted": False,
+        }]
+
+        events = adapter.check_pending_cancels()
+
+        assert events == []
+        assert len(adapter._pending_cancels) == 1
+
+    def test_check_pending_cancels_alerts_once_after_threshold(self):
+        pytest.importorskip("ib_async")
+        import time
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter, PENDING_CANCEL_ALERT_SECONDS
+        adapter = IBKRAdapter()
+        mock_trade = MagicMock()
+        mock_trade.orderStatus.status = "Submitted"
+        adapter._pending_cancels = [{
+            "trade": mock_trade, "ticker": "AAPL", "action": "BUY",
+            "quantity": 10,
+            "requested_at": time.monotonic() - PENDING_CANCEL_ALERT_SECONDS - 1,
+            "alerted": False,
+        }]
+
+        events = adapter.check_pending_cancels()
+        assert len(events) == 1
+        assert events[0].outcome == "timeout_alert"
+        assert events[0].elapsed_minutes >= 30.0
+        # Still tracked — not filled or cancelled, just alerted once.
+        assert len(adapter._pending_cancels) == 1
+        assert adapter._pending_cancels[0]["alerted"] is True
+
+        # Second check within the same still-working state must not re-alert.
+        events2 = adapter.check_pending_cancels()
+        assert events2 == []
+        assert len(adapter._pending_cancels) == 1
 
     def test_ibkr_adapter_get_open_positions_single_us_position(self):
         pytest.importorskip("ib_async")

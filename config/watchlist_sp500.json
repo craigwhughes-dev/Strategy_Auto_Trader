@@ -459,9 +459,6 @@
       "ticker": "DXCM"
     },
     {
-      "ticker": "EA"
-    },
-    {
       "ticker": "EBAY"
     },
     {
@@ -565,6 +562,9 @@
     },
     {
       "ticker": "FE"
+    },
+    {
+      "ticker": "FERG"
     },
     {
       "ticker": "FFIV"
