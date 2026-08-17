@@ -235,12 +235,13 @@ class TestBroker:
 
     def test_ibkr_adapter_place_order_requests_cancel_when_still_unfilled(self):
         """Account TIF preset is GTC — a still-working order must be cancelled
-        explicitly rather than left resting on IBKR's books after we give up."""
+        explicitly rather than left resting on IBKR's books after we give up
+        (only once the full wait-for-fill budget is genuinely exhausted)."""
         pytest.importorskip("ib_async")
         from unittest.mock import MagicMock
         from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
         from Strategy_Auto_Trader.broker.types import OrderRequest
-        adapter = IBKRAdapter()
+        adapter = IBKRAdapter(timeout=0.05)
         adapter._ib = MagicMock()
         adapter._ib.isConnected.return_value = True
 
@@ -260,14 +261,57 @@ class TestBroker:
         assert len(adapter._pending_cancels) == 1
         assert adapter._pending_cancels[0]["ticker"] == "AAPL"
 
-    def test_ibkr_adapter_place_order_fills_while_cancel_in_flight(self):
-        """If the order fills in the window between us giving up and the
-        cancel request landing, the fill must still be honoured, not dropped."""
+    def test_ibkr_adapter_place_order_fills_on_later_update_not_cancelled(self):
+        """Regression test for the SMT.L incident: waitOnUpdate() returns on
+        the first event (typically just the submission ack), not after the
+        full timeout — a fill that lands on a later event must still be
+        honoured, and the order must never be cancelled out from under it."""
         pytest.importorskip("ib_async")
         from unittest.mock import MagicMock
         from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
         from Strategy_Auto_Trader.broker.types import OrderRequest
-        adapter = IBKRAdapter()
+        adapter = IBKRAdapter(timeout=5.0)
+        adapter._ib = MagicMock()
+        adapter._ib.isConnected.return_value = True
+
+        mock_trade = MagicMock()
+        mock_trade.orderStatus.status = "Submitted"
+        mock_trade.orderStatus.avgFillPrice = 0.0
+        adapter._ib.placeOrder.return_value = mock_trade
+        adapter._ib.qualifyContracts = MagicMock()
+
+        calls = {"n": 0}
+
+        def waitOnUpdate_side_effect(timeout=None):
+            calls["n"] += 1
+            if calls["n"] >= 3:
+                mock_trade.orderStatus.status = "Filled"
+                mock_trade.orderStatus.avgFillPrice = 14.43
+
+        adapter._ib.waitOnUpdate = MagicMock(side_effect=waitOnUpdate_side_effect)
+
+        fill = adapter.place_order(OrderRequest("SMT.L", "BUY", 598))
+
+        assert fill is not None
+        assert fill.fill_price == pytest.approx(14.43)
+        assert fill.quantity == 598
+        adapter._ib.cancelOrder.assert_not_called()
+        assert calls["n"] == 3
+
+    def test_ibkr_adapter_place_order_fills_while_cancel_in_flight(self):
+        """If the order fills in the window between us giving up and the
+        cancel request landing, the fill must still be honoured, not dropped.
+
+        timeout=0.0 makes the pre-cancel wait-for-fill loop exit immediately
+        (deadline already elapsed), reaching the cancel branch with the
+        order still "Submitted" — same starting point the old single-shot
+        wait produced, isolating this test to the post-cancel poll behavior
+        it's actually about."""
+        pytest.importorskip("ib_async")
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        from Strategy_Auto_Trader.broker.types import OrderRequest
+        adapter = IBKRAdapter(timeout=0.0)
         adapter._ib = MagicMock()
         adapter._ib.isConnected.return_value = True
 
@@ -311,8 +355,9 @@ class TestBroker:
 
         fill = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
         assert fill.fill_price == pytest.approx(195.5)
-        # Only the initial wait — avgFillPrice was already populated, no retries.
-        assert adapter._ib.waitOnUpdate.call_count == 1
+        # Already Filled when checked and avgFillPrice was already populated —
+        # no wait-for-fill loop, no retries.
+        assert adapter._ib.waitOnUpdate.call_count == 0
 
     def test_ibkr_adapter_place_order_falls_back_to_fills_execution_price(self):
         pytest.importorskip("ib_async")
@@ -336,8 +381,9 @@ class TestBroker:
 
         fill = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
         assert fill.fill_price == pytest.approx(123.45)
-        # fills was already populated on the first check — no extra polling.
-        assert adapter._ib.waitOnUpdate.call_count == 1
+        # Already Filled, and fills was already populated on the first
+        # check — no wait-for-fill loop, no extra polling.
+        assert adapter._ib.waitOnUpdate.call_count == 0
 
     def test_ibkr_adapter_place_order_recovers_price_after_late_fill_event(self):
         pytest.importorskip("ib_async")
@@ -391,8 +437,8 @@ class TestBroker:
         fill = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
         # Never resolves a real price — returns what it has instead of hanging.
         assert fill.fill_price == 0.0
-        # 1 initial wait + 5 bounded retries, no more.
-        assert adapter._ib.waitOnUpdate.call_count == 6
+        # Already Filled (no wait-for-fill loop) + 5 bounded price-retries, no more.
+        assert adapter._ib.waitOnUpdate.call_count == 5
 
     # -- check_pending_cancels() --------------------------------------------
 

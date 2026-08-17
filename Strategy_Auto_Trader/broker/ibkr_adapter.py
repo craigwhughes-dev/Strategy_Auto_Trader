@@ -132,10 +132,21 @@ class IBKRAdapter:
                 req.action, req.quantity, req.ticker,
                 getattr(trade.order, "orderId", "?"),
             )
-            self._ib.waitOnUpdate(timeout=self._timeout)
+            # waitOnUpdate() returns on the *first* incoming update event
+            # (typically just the PendingSubmit/Submitted ack), not after
+            # self._timeout elapses — so a single call badly undershoots the
+            # intended wait-for-fill window. Loop until Filled, a terminal
+            # non-fill status, or the cumulative deadline is actually spent.
+            deadline = time.monotonic() + self._timeout
+            order_status = trade.orderStatus.status
+            while order_status in _WORKING_STATUSES:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._ib.waitOnUpdate(timeout=remaining)
+                order_status = trade.orderStatus.status
 
             # Check order status — only return FillResult if fully filled
-            order_status = trade.orderStatus.status
             if order_status != "Filled":
                 # Account TIF preset is GTC, so an unfilled order rests on
                 # IBKR's books indefinitely instead of auto-expiring at end
