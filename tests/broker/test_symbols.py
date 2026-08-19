@@ -129,7 +129,7 @@ class TestSizingPrice:
 
 
 class TestIbkrUnresolvable:
-    @pytest.mark.parametrize("ticker", ["CPG.L", "IHG.L", "MTLN.L"])
+    @pytest.mark.parametrize("ticker", ["CPG.L", "IHG.L", "MTLN.L", "AVB", "EQR"])
     def test_confirmed_unresolvable_tickers_present(self, ticker):
         assert ticker in IBKR_UNRESOLVABLE
 

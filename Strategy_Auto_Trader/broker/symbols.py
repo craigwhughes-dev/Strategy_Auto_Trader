@@ -24,6 +24,8 @@ IBKR_UNRESOLVABLE: frozenset[str] = frozenset({
     "CPG.L",   # Compass Group: IBKR resolves as CPG/LSE/USD only — confirmed 2026-08-16
     "IHG.L",   # InterContinental Hotels: IBKR resolves as IHGL/LSE/USD only — confirmed 2026-08-16
     "MTLN.L",  # Metlen Energy (ex-Mytilineos): IBKR resolves as MTLN/LSE/EUR only — confirmed 2026-08-16
+    "AVB",     # AvalonBay Communities (REIT): IBKR returns Error 200 "No security definition" — confirmed 2026-08-19
+    "EQR",     # Equity Residential (REIT): IBKR returns Error 200 "No security definition" — confirmed 2026-08-19
 })
 
 # A handful of short LSE codes are registered on IBKR with a literal trailing

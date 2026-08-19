@@ -1943,7 +1943,7 @@ class TestExecuteSignalsWithRetry:
         )
         assert daemon_state["pending_retry_tickers"] == {"ftse": ["MSFT", "GOOG"]}
 
-    def test_execution_interrupted_no_orders_still_halts_and_alerts(self, monkeypatch):
+    def test_execution_interrupted_no_orders_still_halts(self, monkeypatch):
         """ExecutionInterrupted with empty buys/sells still halts — unresolved's
         broker-call outcome is unknown even when no confirmed fill exists yet.
         Regression test for the VOD incident: a socket disconnect mid
@@ -1988,17 +1988,16 @@ class TestExecuteSignalsWithRetry:
         assert not broker.disconnect.called  # Should not retry
         assert logger.critical.called
         assert saved_state  # daemon_state was persisted
-        assert alerts  # alert email was sent
+        assert not alerts  # no immediate email — reconciliation decides
 
-    def test_execution_interrupted_alert_includes_unresolved_when_no_orders(self, monkeypatch):
-        """Alert call carries the unresolved ticker(s) even when buys/sells are empty —
-        guards against a regression where alerting only fires for confirmed fills."""
+    def test_execution_interrupted_pending_retry_set_when_no_orders(self, monkeypatch):
+        """ExecutionInterrupted with empty buys/sells still populates pending_retry_tickers
+        so reconciliation can retry the unresolved ticker once it clears."""
         from Strategy_Auto_Trader.markov_cli import execute as execute_mod
 
         broker = mock.Mock()
         logger = mock.Mock()
         daemon_state = {"halt_new_entries": False}
-        alert_calls = []
 
         def fake_execute(*args, **kwargs):
             raise execute_mod.ExecutionInterrupted(
@@ -2009,22 +2008,15 @@ class TestExecuteSignalsWithRetry:
                 unresolved=["VOD.L"],
             )
 
-        def mock_send_alert(*args, **kwargs):
-            alert_calls.append(args)
-
         live_daemon.execute_signals_with_retry(
             "ftse", ["VOD.L"], None, None, None, broker,
             True, logger, daemon_state=daemon_state,
             execute_signals=fake_execute,
             save_state=lambda s: None,
-            send_interrupt_alert=mock_send_alert,
         )
 
-        assert len(alert_calls) == 1
-        market_name, error, buys, sells, unresolved = alert_calls[0]
-        assert buys == []
-        assert sells == []
-        assert unresolved == ["VOD.L"]
+        assert daemon_state["halt_new_entries"] is True
+        assert daemon_state["pending_retry_tickers"] == {"ftse": ["VOD.L"]}
 
     def test_execution_interrupted_single_unresolved_ticker_matches_incident(self, monkeypatch):
         """Shape of the real VOD incident: one ticker in the batch, socket disconnect

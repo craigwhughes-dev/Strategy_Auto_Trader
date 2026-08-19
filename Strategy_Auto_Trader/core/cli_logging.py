@@ -21,6 +21,41 @@ from pathlib import Path
 _LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
 _configured = False
 
+# ib_async messages that indicate a transient socket drop the daemon recovers
+# from automatically. ib_async logs these at ERROR; we downgrade to WARNING so
+# LogSentinel doesn't alert on recoveries.
+_IBKR_TRANSIENT_PATTERNS = (
+    "WinError 10054",
+    "forcibly closed",
+    "ConnectionReset",
+    "Connection reset",
+)
+
+
+class _IbkrTransientFilter(logging.Filter):
+    """Downgrade ib_async transient socket errors from ERROR to WARNING."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno == logging.ERROR:
+            msg = record.getMessage()
+            if any(p in msg for p in _IBKR_TRANSIENT_PATTERNS):
+                record.levelno = logging.WARNING
+                record.levelname = "WARNING"
+        return True
+
+
+def install_ibkr_transient_filter(*handlers: logging.Handler) -> None:
+    """Add _IbkrTransientFilter to each handler so propagated ib_async records are downgraded.
+
+    Logger-level filters only fire for records originating at that logger, not
+    for propagated ones — so the filter must live on the handlers that actually
+    emit output.
+    """
+    f = _IbkrTransientFilter()
+    for h in handlers:
+        if not any(isinstance(x, _IbkrTransientFilter) for x in h.filters):
+            h.addFilter(f)
+
 
 def setup_cli_logger(cli_name: str) -> Path | None:
     """Attach a per-invocation file handler + console handler to the root logger.
@@ -49,5 +84,6 @@ def setup_cli_logger(cli_name: str) -> Path | None:
     root.addHandler(console_handler)
 
     _configured = True
+    install_ibkr_transient_filter(file_handler, console_handler)
     logging.getLogger(cli_name).info(f"Logging to {log_path}")
     return log_path

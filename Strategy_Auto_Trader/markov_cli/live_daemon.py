@@ -77,6 +77,7 @@ class _DailyFileHandler(logging.Handler):
 
 def setup_logging() -> logging.Logger:
     """Set up daily log that rolls over to a new file at local midnight."""
+    from ..core.cli_logging import install_ibkr_transient_filter
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
     logger = logging.getLogger("live_daemon")
@@ -93,6 +94,7 @@ def setup_logging() -> logging.Logger:
     console.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
     logger.addHandler(console)
 
+    install_ibkr_transient_filter(handler, console)
     return logger
 
 
@@ -707,15 +709,10 @@ def execute_signals_with_retry(
                 # set is the authoritative one.
                 daemon_state.setdefault("pending_retry_tickers", {})[market_name] = exc.unresolved
                 save_state(daemon_state)
-            try:
-                if send_interrupt_alert is None:
-                    from ..output.emailer import send_execution_interrupted_alert
-                    send_interrupt_alert = send_execution_interrupted_alert
-                send_interrupt_alert(
-                    market_name, exc.original, exc.buys, exc.sells, exc.unresolved
-                )
-            except Exception as email_err:
-                logger.error(f"[{market_name}] Execution-interrupted alert email failed: {email_err}")
+            # No immediate email here — run_startup_reconciliation fires within
+            # one poll cycle (~60s) and emails only if recovery fails (broker
+            # unreachable or stale order still live). Recovered interrupts are
+            # silent: log is the record, inbox stays clean.
             return exc.buys, exc.sells, exc.skipped + exc.unresolved
         except (ConnectionError, OSError, TimeoutError) as e:
             if attempt < max_retries - 1:
@@ -1578,10 +1575,33 @@ def run_startup_reconciliation(
     return True
 
 
+def _load_today_trade_events() -> dict[str, str]:
+    """Return {ticker: last_action} for trades executed today from execution_state.json.
+
+    Last action wins so buy+sell same day shows the final state (SELL).
+    """
+    today = datetime.now().date().isoformat()
+    state_path = STATE_DIR / "execution_state.json"
+    if not state_path.exists():
+        return {}
+    try:
+        with open(state_path, encoding="utf-8") as f:
+            exec_state = json.load(f)
+        events: dict[str, str] = {}
+        for entry in exec_state.get("trade_log", []):
+            if entry.get("date") == today and entry.get("action") in ("BUY", "SELL"):
+                events[entry["ticker"]] = entry["action"]
+        return events
+    except Exception:
+        return {}
+
+
 def _send_nightly_roundup(config: dict, logger: logging.Logger) -> None:
     """Collect day's ticker results and send daily roundup email."""
     from .batch import _collect_results
     from ..output.emailer import send_daily_roundup
+
+    today_events = _load_today_trade_events()
 
     results = []
     failed = []
@@ -1596,6 +1616,10 @@ def _send_nightly_roundup(config: dict, logger: logging.Logger) -> None:
             try:
                 result = _collect_results(ticker)
                 if result:
+                    # If the latest backtest re-ran after a trade (showing HOLD),
+                    # restore the actual trade event from execution_state.json.
+                    if not result.get("trade_event") and ticker in today_events:
+                        result["trade_event"] = today_events[ticker]
                     results.append(result)
                 else:
                     failed.append({"ticker": ticker, "error": "No result data"})
