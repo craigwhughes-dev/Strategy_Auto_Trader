@@ -138,9 +138,6 @@
       "ticker": "ATO"
     },
     {
-      "ticker": "AVB"
-    },
-    {
       "ticker": "AVGO"
     },
     {
@@ -496,9 +493,6 @@
     },
     {
       "ticker": "EQIX"
-    },
-    {
-      "ticker": "EQR"
     },
     {
       "ticker": "EQT"
@@ -1167,6 +1161,9 @@
       "ticker": "RCL"
     },
     {
+      "ticker": "RDDT"
+    },
+    {
       "ticker": "REG"
     },
     {
@@ -1414,6 +1411,9 @@
     },
     {
       "ticker": "VMC"
+    },
+    {
+      "ticker": "VMRK"
     },
     {
       "ticker": "VRSK"

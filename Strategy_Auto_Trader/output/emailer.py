@@ -325,6 +325,9 @@ def send_execution_interrupted_alert(
     market_name: str, error: Exception, buys: list[str], sells: list[str], unresolved: list[str]
 ) -> None:
     """Alert when execution is interrupted mid-batch with orders potentially placed."""
+    from datetime import datetime, timezone
+    sent_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
     buys_html = "".join(f'<li style="color:#b9f6ca;padding:4px 0">{b}</li>' for b in buys)
     sells_html = "".join(f'<li style="color:#ffcdd2;padding:4px 0">{s}</li>' for s in sells)
     unresolved_html = "".join(f'<li style="color:#ffb74d;padding:4px 0">{u}</li>' for u in unresolved)
@@ -339,6 +342,7 @@ def send_execution_interrupted_alert(
 <div style="max-width:700px;margin:0 auto">
   <h1 style="color:#ef9a9a;margin:0 0 4px">Execution interrupted</h1>
   <div style="color:#888;margin-bottom:16px">[{market_name}] Connection lost during order execution — some outcomes unknown</div>
+  <div style="color:#555;font-size:0.85em;margin-bottom:12px">Sent: {sent_at}</div>
   <div style="background:#2a1a1a;border:1px solid #4a2a2a;border-radius:8px;padding:12px 16px;margin:16px 0">
     <p style="color:#ddd;margin:0 0 8px"><strong>Error:</strong> {error}</p>
     {orders_section}

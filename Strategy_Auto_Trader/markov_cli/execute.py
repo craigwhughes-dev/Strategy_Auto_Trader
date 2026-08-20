@@ -73,8 +73,26 @@ def _place_order_with_retry(
     in-flight marker is still set, so it's safe to reconnect and resubmit.
     Any other exception (bad contract, order reject, etc.) is not a
     connectivity issue and is raised immediately without retrying.
+
+    Before each retry, check the broker's still-working orders for this
+    ticker: if the first attempt's packet reached IBKR but the ack was lost
+    to the same socket drop, a blind resubmit would create a live duplicate.
     """
     for attempt in range(1, max_retries + 1):
+        if attempt > 1:
+            try:
+                if any(o["ticker"] == ticker for o in broker.get_open_orders()):
+                    logger.warning(
+                        f"Order call for {ticker} found an existing open order at the "
+                        f"broker before retry {attempt}/{max_retries} — skipping "
+                        f"re-placement, treating as submitted."
+                    )
+                    return None
+            except Exception as check_err:
+                logger.warning(
+                    f"Duplicate-order check for {ticker} failed — proceeding with "
+                    f"retry {attempt}/{max_retries}: {check_err}"
+                )
         try:
             return broker.place_order(req)
         except ConnectionError as e:

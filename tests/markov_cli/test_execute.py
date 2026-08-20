@@ -520,3 +520,42 @@ class TestPlaceOrderRetry:
 
         assert result is fill
         broker.connect.assert_not_called()
+
+    def test_skips_retry_if_open_order_found_for_ticker(self, monkeypatch):
+        from Strategy_Auto_Trader.markov_cli.execute import _place_order_with_retry
+
+        broker = mock.Mock()
+        broker.is_connected.return_value = True
+        broker.place_order.side_effect = ConnectionError("Socket disconnect: dropped after send")
+        broker.get_open_orders.return_value = [
+            {"ticker": "AAPL", "action": "BUY", "status": "Submitted"}
+        ]
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.markov_cli.execute.time.sleep", lambda s: None
+        )
+
+        result = _place_order_with_retry(broker, mock.Mock(), "AAPL")
+
+        assert result is None
+        assert broker.place_order.call_count == 1
+
+    def test_ignores_open_order_check_failure_and_retries(self, monkeypatch):
+        from Strategy_Auto_Trader.markov_cli.execute import _place_order_with_retry
+        from Strategy_Auto_Trader.broker.types import FillResult
+
+        broker = mock.Mock()
+        broker.is_connected.return_value = True
+        fill = FillResult("AAPL", "BUY", 150.0, 10, "2026-07-01T00:00:00Z")
+        broker.place_order.side_effect = [
+            ConnectionError("Socket disconnect during order placement: blip"),
+            fill,
+        ]
+        broker.get_open_orders.side_effect = ConnectionError("still down")
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.markov_cli.execute.time.sleep", lambda s: None
+        )
+
+        result = _place_order_with_retry(broker, mock.Mock(), "AAPL")
+
+        assert result is fill
+        assert broker.place_order.call_count == 2

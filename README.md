@@ -101,16 +101,22 @@ Two tracks:
 - **Track A** (`monte_carlo.py`) — single ticker, isolated capital.
 - **Track B** (`monte_carlo_live_sim.py`) — full portfolio, capital-arbitrated across a fixed top-K ticker universe, exercising the same shared-pot admission/Kelly-sizing logic as `live_sim.py`. Supports an optional `--market-coupling` factor that biases all tickers' synthetic paths toward a shared market regime (fit from SPY), to stress simultaneous co-crash scenarios that fully independent per-ticker paths can't produce.
 
+Fidelity knobs on both tracks:
+- `--block-size` (default 24 = 1 trading day) — contiguous-block bootstrap length for returns; volume and intrabar range are drawn from the *same* block starts as returns (block-aligned, not independent iid draws), so liquidity clusters with the return moves that produced it.
+- `--transmat-noise` (default 0.0 = off) — Dirichlet-perturbs a copy of the fitted HMM's transition matrix per path (never mutates the shared fitted model), stressing regime-duration/parameter uncertainty instead of treating the fitted transition matrix as ground truth. Try 0.05–0.2.
+- `--daily-hmm` — fits the generating HMM on long daily history (20+ years) instead of ~2yr hourly, so regime *sequences* reflect multi-cycle transition probabilities; the block bootstrap still draws real return blocks from the 2yr hourly pool.
+- `--market-coupling` (Track B only, default 0.0) — shared-regime bias from a SPY-fitted HMM, layered on top of each ticker's independent HMM rather than replacing it.
+
 ```bash
 uv run python -m Strategy_Auto_Trader.markov_cli.monte_carlo \
-    --ticker SPY --strategy default --n-paths 300 --workers 4
+    --ticker SPY --strategy default --n-paths 300 --workers 4 --transmat-noise 0.1
 
 uv run python -m Strategy_Auto_Trader.markov_cli.monte_carlo_live_sim \
     --universe --strategies optimised_new --n-paths 50 \
     --workers 4 --pot-sizes 25000 --top-k 70 --market-coupling 0.3
 ```
 
-Output lands in `data/monte_carlo/<label>_<timestamp>/` as `mc_summary.json` (percentile bands + `prob_of_loss`) and `mc_paths.csv` (one row per path). Full design, invariants, and known limitations: **[MONTE_CARLO_DESIGN.md](MONTE_CARLO_DESIGN.md)**; the review-driven fidelity improvements (block-aligned volume/range, transition-matrix noise, market coupling) are tracked in **[MONTE_CARLO_IMPROVEMENTS_PLAN.md](MONTE_CARLO_IMPROVEMENTS_PLAN.md)**.
+Output lands in `data/monte_carlo/<label>_<timestamp>/` as `mc_summary.json` (percentile bands + `prob_of_loss`) and `mc_paths.csv` (one row per path). Full design, invariants, and known limitations: **[MONTE_CARLO_DESIGN.md](MONTE_CARLO_DESIGN.md)**. An external AI review of that design (**[montecarlo_review.md](montecarlo_review.md)**) flagged four fidelity gaps; **[MONTE_CARLO_IMPROVEMENTS_PLAN.md](MONTE_CARLO_IMPROVEMENTS_PLAN.md)** assessed each claim and tracked the fixes — block-aligned volume/range, transition-matrix noise, and market coupling have since shipped (all three flags above); the "block-junction shock" claim was found to be a misread of already-correct behaviour (`Open[i] = Close[i-1]` was already unconditional).
 
 ## Testing
 
@@ -143,6 +149,7 @@ tests/           # pytest suite (mirrors the package structure)
 - **[TASK_SCHEDULER_SETUP.md](TASK_SCHEDULER_SETUP.md)** — scheduled batch runs after LSE/NYSE close
 - **[MONTE_CARLO_DESIGN.md](MONTE_CARLO_DESIGN.md)** — synthetic-data stress test design: HMM generating model, block bootstrap, invariants, known limitations
 - **[MONTE_CARLO_IMPROVEMENTS_PLAN.md](MONTE_CARLO_IMPROVEMENTS_PLAN.md)** — external-review findings and the fidelity improvements shipped from them
+- **[montecarlo_review.md](montecarlo_review.md)** — the external AI review that prompted the improvements plan
 
 ## Example email
 

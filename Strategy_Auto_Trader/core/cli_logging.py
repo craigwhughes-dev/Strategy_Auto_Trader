@@ -33,7 +33,12 @@ _IBKR_TRANSIENT_PATTERNS = (
 
 
 class _IbkrTransientFilter(logging.Filter):
-    """Downgrade ib_async transient socket errors from ERROR to WARNING."""
+    """Downgrade ib_async transient socket errors from ERROR to WARNING.
+
+    Also strips exc_info/exc_text so the formatter does not append the full
+    traceback — LogSentinel matches on 'Traceback'/'Exception' in the text
+    body, not just the level prefix.
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
         if record.levelno == logging.ERROR:
@@ -41,6 +46,8 @@ class _IbkrTransientFilter(logging.Filter):
             if any(p in msg for p in _IBKR_TRANSIENT_PATTERNS):
                 record.levelno = logging.WARNING
                 record.levelname = "WARNING"
+                record.exc_info = None
+                record.exc_text = None
         return True
 
 
