@@ -82,6 +82,12 @@ def setup_cli_logger(cli_name: str) -> Path | None:
     root = logging.getLogger()
     root.setLevel(logging.INFO)
 
+    # Suppress ib_async/ib_insync internal Trade/Fill repr spam (INFO-level
+    # placeOrder/orderStatus/execDetails callbacks). WARNING+ still propagates
+    # so genuine errors (WinError 10054 etc.) remain visible.
+    logging.getLogger("ib_async").setLevel(logging.WARNING)
+    logging.getLogger("ib_insync").setLevel(logging.WARNING)
+
     file_handler = logging.FileHandler(log_path, encoding="utf-8")
     file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     root.addHandler(file_handler)

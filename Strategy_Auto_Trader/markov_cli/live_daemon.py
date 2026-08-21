@@ -82,6 +82,15 @@ def setup_logging() -> logging.Logger:
 
     logger = logging.getLogger("live_daemon")
     logger.setLevel(logging.DEBUG)
+    # This logger's own records go straight to its handlers below; stop them
+    # also propagating to root (which gets the *same* handlers attached, for
+    # every other module's logging.getLogger(__name__) logger) or every
+    # live_daemon line would be written twice.
+    logger.propagate = False
+
+    # Suppress ib_async/ib_insync internal Trade/Fill repr spam.
+    logging.getLogger("ib_async").setLevel(logging.WARNING)
+    logging.getLogger("ib_insync").setLevel(logging.WARNING)
 
     handler = _DailyFileHandler()
     handler.setFormatter(logging.Formatter(
@@ -93,6 +102,15 @@ def setup_logging() -> logging.Logger:
     console = logging.StreamHandler()
     console.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
     logger.addHandler(console)
+
+    # broker/quant_hmm/strategy modules each use logging.getLogger(__name__),
+    # not "live_daemon" — attach the same handlers to root so their
+    # warnings/errors (e.g. ibkr_adapter's "Stop order not accepted") land in
+    # the daemon log file too, instead of vanishing to root's default
+    # stderr-only lastResort handler.
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.addHandler(console)
 
     install_ibkr_transient_filter(handler, console)
     return logger

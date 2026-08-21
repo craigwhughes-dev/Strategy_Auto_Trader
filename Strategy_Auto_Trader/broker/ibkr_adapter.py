@@ -236,6 +236,35 @@ class IBKRAdapter:
             if hasattr(pos.contract, "symbol") and pos.position != 0
         }
 
+    def _min_tick_for(self, contract, price: float) -> float:
+        """Tick size applicable at *price* (native contract currency).
+
+        Uses the exchange's price-band rule table (reqMarketRule), not the
+        flat ContractDetails.minTick — LSE stocks trade under the MiFID II
+        tick-size regime where the increment widens at higher price bands, so
+        a single global minTick is wrong for them (US SMART equities happen
+        to have a single flat band, so this also covers them correctly).
+        Falls back to 0.01 (cent/penny) if the lookup fails for any reason.
+        """
+        try:
+            details = self._ib.reqContractDetails(contract)
+            if details:
+                rule_ids = [r for r in details[0].marketRuleIds.split(",") if r]
+                if rule_ids:
+                    rules = self._ib.reqMarketRule(int(rule_ids[0]))
+                    if rules:
+                        increment = rules[0].increment
+                        for r in sorted(rules, key=lambda r: r.lowEdge):
+                            if price >= r.lowEdge:
+                                increment = r.increment
+                            else:
+                                break
+                        if increment > 0:
+                            return increment
+        except Exception as e:
+            logger.debug("_min_tick_for lookup failed, using 0.01 fallback: %s", e)
+        return 0.01
+
     def place_stop_order(self, req):
         """Place a resting GTC stop-sell order. Returns StopOrderResult with permId on acceptance, None if rejected."""
         if not self.is_connected():
@@ -247,16 +276,40 @@ class IBKRAdapter:
             from ib_async import Stock, StopOrder
             contract = Stock(*ibkr_contract_params(req.ticker))
             self._ib.qualifyContracts(contract)
+            # Stop price math (stop_level * (1 - buffer_pct)) produces floats
+            # with far more precision than the exchange accepts — IBKR rejects
+            # with Error 110 "does not conform to the minimum price variation"
+            # if not rounded to the contract's tick size. ContractDetails.minTick
+            # is a flat, instrument-wide value and is WRONG for LSE stocks: those
+            # trade under the MiFID II price-band tick regime (a table of
+            # increments that widens at higher prices), only obtainable via
+            # marketRuleIds -> reqMarketRule. That table is denominated in the
+            # contract's native currency (pounds for LSE, not pence), so find
+            # the tick and round in req.stop_price's own units (pot currency)
+            # before converting to pence below.
+            min_tick = self._min_tick_for(contract, req.stop_price)
+            native_stop = round(round(req.stop_price / min_tick) * min_tick, 8)
             # req.stop_price is pot currency (pounds); LSE orders quote in pence.
-            exchange_stop = req.stop_price
+            exchange_stop = native_stop
             if req.ticker.upper().endswith(".L"):
-                exchange_stop = req.stop_price * PENCE_PER_POUND
+                exchange_stop = native_stop * PENCE_PER_POUND
             order = StopOrder("SELL", req.quantity, exchange_stop, tif="GTC")
             trade = self._ib.placeOrder(contract, order)
-            self._ib.waitOnUpdate(timeout=self._timeout)
-
+            # waitOnUpdate() returns on the *first* incoming update event
+            # (typically just the PendingSubmit ack), not once the order has
+            # actually settled onto the book — same undershoot as place_order
+            # (see comment there). Poll until it leaves the transient
+            # pending states or the deadline is spent.
+            deadline = time.monotonic() + self._timeout
             order_status = trade.orderStatus.status
-            if order_status not in ("PreSubmitted", "Submitted"):
+            while order_status in ("PendingSubmit", "ApiPending"):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._ib.waitOnUpdate(timeout=remaining)
+                order_status = trade.orderStatus.status
+
+            if order_status not in ("PreSubmitted", "Submitted", "Acknowledged"):
                 logger.warning(
                     f"Stop order not accepted for {req.ticker}: status={order_status}"
                 )

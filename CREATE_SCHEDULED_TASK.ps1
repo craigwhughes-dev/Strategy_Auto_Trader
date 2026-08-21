@@ -68,7 +68,7 @@ $userId = "$env:COMPUTERNAME\$env:USERNAME"
   <Actions Context="Author">
     <Exec>
       <Command>$pythonPath</Command>
-      <Arguments>-m Strategy_Auto_Trader.markov_cli.live_daemon --takeover</Arguments>
+      <Arguments>-m Strategy_Auto_Trader.markov_cli.live_daemon --takeover --protective-stops</Arguments>
       <WorkingDirectory>$workDir</WorkingDirectory>
     </Exec>
   </Actions>

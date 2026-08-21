@@ -13,4 +13,4 @@
 :: (RunLevel must also be non-elevated, or Task Scheduler launches the
 :: process outside its own Job Object regardless of this).
 cd /d "%~dp0"
-".venv\Scripts\python.exe" -m Strategy_Auto_Trader.markov_cli.live_daemon --takeover >> logs\daemon.log 2>&1
+".venv\Scripts\python.exe" -m Strategy_Auto_Trader.markov_cli.live_daemon --takeover --protective-stops >> logs\daemon.log 2>&1
