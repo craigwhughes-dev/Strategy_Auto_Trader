@@ -374,6 +374,7 @@ def cleanup_incomplete_runs(data_dir: Path, logger: logging.Logger,
         return 0
 
     cleaned = 0
+    cleaned_names = []
     now = time.time()
     for run_dir in data_dir.glob("*_*"):
         if not run_dir.is_dir():
@@ -390,11 +391,18 @@ def cleanup_incomplete_runs(data_dir: Path, logger: logging.Logger,
                 import shutil
                 shutil.rmtree(run_dir)
                 cleaned += 1
+                cleaned_names.append(run_dir.name)
             except Exception as e:
                 logger.warning(f"Failed to remove incomplete run {run_dir.name}: {e}")
 
     if cleaned > 0:
-        logger.info(f"Cleaned up {cleaned} incomplete run director(y/ies)")
+        # Names logged (not just count) — these are orphaned runs, often left
+        # by a mid-cycle daemon kill, and are otherwise the only trace that a
+        # specific ticker's evaluation was interrupted rather than just slow.
+        logger.info(
+            f"Cleaned up {cleaned} incomplete run director(y/ies): "
+            f"{', '.join(cleaned_names)}"
+        )
     return cleaned
 
 
@@ -644,9 +652,11 @@ def advance_round_robin_cursor(
     n_attempted: int,
     daemon_state: dict,
     logger: logging.Logger,
-) -> None:
+) -> int:
     """Persist how far the round-robin actually got this cycle, so the next
     cycle resumes there instead of restarting from the top of the list.
+
+    Returns the new cursor position (for cycle-summary logging).
     """
     cursors = daemon_state.setdefault("cursors", {})
     today = datetime.now().date().isoformat()
@@ -657,6 +667,7 @@ def advance_round_robin_cursor(
         new_cursor = 0
         logger.debug(f"  {market_name}: round-robin wrapped")
     cursors[key] = new_cursor
+    return new_cursor
 
 
 def execute_signals_with_retry(
@@ -1042,9 +1053,11 @@ def process_cycle(
     # Stage 2: candidates (round-robin through rest)
     remaining_budget = max_seconds - (time.time() - cycle_start)
     buffer_secs = config.get("daytime", {}).get("cycle_buffer_minutes", 5) * 60
+    cursor_start = cursor_end = round_robin_universe_len = None
     if remaining_budget > buffer_secs:
         remaining_budget -= buffer_secs
         round_robin_universe = [t for t in in_scope if t not in must_run]
+        round_robin_universe_len = len(round_robin_universe)
         candidates, cursor_start = next_round_robin_slice(
             market_name,
             round_robin_universe,
@@ -1069,8 +1082,8 @@ def process_cycle(
             processed.append(result)
             n_attempted += 1
 
-        advance_round_robin_cursor(
-            market_name, len(round_robin_universe), cursor_start, n_attempted, daemon_state, logger
+        cursor_end = advance_round_robin_cursor(
+            market_name, round_robin_universe_len, cursor_start, n_attempted, daemon_state, logger
         )
 
     # Execute signals once for all processed tickers this cycle
@@ -1080,8 +1093,17 @@ def process_cycle(
     )
 
     elapsed = time.time() - cycle_start
+    n_timeouts = sum(
+        1 for p in processed
+        if "TIMEOUT" in str(p.get("status", ""))
+    )
+    cursor_summary = (
+        f"cursor {cursor_start}->{cursor_end} of {round_robin_universe_len}"
+        if cursor_start is not None else "cursor n/a (no budget for round-robin)"
+    )
     logger.info(f"[{market_name}] Cycle done: {len(processed)} tickers processed, "
-                f"{len(skipped_budget)} skipped (budget), {elapsed:.0f}s elapsed")
+                f"{len(skipped_budget)} skipped (budget), {n_timeouts} timeout(s), "
+                f"{cursor_summary}, {elapsed:.0f}s elapsed")
     return len(processed)
 
 
@@ -1815,6 +1837,19 @@ def main(argv: list[str] | None = None) -> int:
     daemon_state = load_daemon_state()
     exec_cfg = config.get("execution", {})
 
+    # A cycle_in_progress marker still set at startup means the previous
+    # process was killed mid-cycle (e.g. a manual --takeover restart) rather
+    # than exiting cleanly — that cycle's round-robin progress for whichever
+    # market it names was discarded (advance_round_robin_cursor never ran).
+    stale_cycle = daemon_state.get("cycle_in_progress")
+    if stale_cycle:
+        logger.warning(
+            f"Previous process was killed mid-cycle: market={stale_cycle.get('market')} "
+            f"started_at={stale_cycle.get('started_at')} — that cycle's round-robin "
+            f"progress was lost, cursor unchanged"
+        )
+        daemon_state["cycle_in_progress"] = None
+
     # Clean up incomplete runs from prior crashes
     cleanup_incomplete_runs(Path(__file__).resolve().parent.parent.parent / "data", logger)
     dry_run = exec_cfg.get("dry_run", True)
@@ -1940,6 +1975,15 @@ def main(argv: list[str] | None = None) -> int:
                         logger.info(f"[{market_name}] Starting cycle")
                         logger.info(f"{'='*64}")
 
+                        # Persisted immediately (not just held in memory) so a
+                        # mid-cycle kill leaves a marker the next startup can
+                        # see — see the stale_cycle check above.
+                        daemon_state["cycle_in_progress"] = {
+                            "market": market_name,
+                            "started_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        save_daemon_state(daemon_state)
+
                         process_cycle(
                             market_name, market_cfg, config,
                             daemon_state, portfolio, broker, logger,
@@ -1948,6 +1992,7 @@ def main(argv: list[str] | None = None) -> int:
                             stop_buffer_pct=args.stop_buffer_pct,
                         )
 
+                        daemon_state["cycle_in_progress"] = None
                         last_cycle_hour[market_name] = current_hour
                         save_daemon_state(daemon_state)
 

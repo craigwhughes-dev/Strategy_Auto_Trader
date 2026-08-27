@@ -66,6 +66,26 @@ def _top_k_state_path() -> Path:
     return STATE_DIR / "top_k_universe.json"
 
 
+def _top_k_history_path() -> Path:
+    return STATE_DIR / "top_k_universe_history.jsonl"
+
+
+def _append_top_k_history(record: dict) -> None:
+    """Append one line to the top-k history log.
+
+    top_k_universe.json is overwritten nightly — it can only ever answer "what
+    is in scope today", not "was ticker X in scope on date Y". That gap forced
+    a proxy reconstruction from data/<ticker>_<timestamp>/ directory existence
+    during the 2026-08-27 backtest-vs-live gap investigation. This makes the
+    scope-membership history directly queryable instead.
+    """
+    try:
+        with open(_top_k_history_path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception as e:
+        logger.warning(f"  top_k_screen: failed to append history: {e}")
+
+
 def _load_previous_top_k_set() -> set[str] | None:
     """Fallback source when a ranking run fails: reuse the last successful
     night's top-K ticker set rather than leaving markets unscreened by top-K
@@ -165,14 +185,16 @@ def compute_global_top_k(
 
     from ..core.atomic_io import atomic_write_json
     dest_path = _top_k_state_path()
-    atomic_write_json(dest_path, {
+    record = {
         "date": datetime.now(timezone.utc).date().isoformat(),
         "k": k,
         "strategy": strategy,
         "tickers": sorted(top_tickers),
         "scores": scores,
         "status": "ok",
-    })
+    }
+    atomic_write_json(dest_path, record)
+    _append_top_k_history(record)
     logger.info(f"  top_k_screen: copied {output_path} -> {dest_path}")
     return top_tickers
 

@@ -169,6 +169,14 @@ def _build_argv(ticker_cfg: dict, defaults: dict) -> list[str]:
             if key in plugins:
                 argv.extend([flag, str(plugins[key])])
 
+    # Runs in-process (before the run.py subprocess spawns), so this is the
+    # only place a resolved per-ticker config lands in the daemon's own log
+    # stream — run.py's internal logging never merges back into it.
+    logger.debug(
+        f"_build_argv: {ticker} strategy={strategy} source={source} "
+        f"seasonal_volume={merged.get('seasonal_volume', False)}"
+    )
+
     return argv
 
 

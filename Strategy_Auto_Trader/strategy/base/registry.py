@@ -13,6 +13,8 @@ To register a new strategy:
 
 from __future__ import annotations
 
+import logging
+
 from ..breakout_momentum import BreakoutMomentumEntry, BreakoutMomentumExit
 from ..choppy_vol import ChoppyVolEntry, ChoppyVolExit
 from ..conservative import ConservativeEntry, ConservativeExit
@@ -21,6 +23,8 @@ from ..mean_reversion import MeanReversionEntry, MeanReversionExit
 from ..optimised import OptimisedEntry, OptimisedExit
 from ..optimised_new import OptimisedNewEntry, OptimisedNewExit
 from ..trend_follow import TrendEntry, TrendExit
+
+logger = logging.getLogger(__name__)
 
 STRATEGY_REGISTRY: dict[str, dict[str, type]] = {
     "breakout_momentum": {
@@ -113,6 +117,11 @@ def resolve_strategy(
             prof = volatility_profile(ticker, source=source)
             if prof is not None:
                 vol_filter_ok = prof["trend_quality"] >= min_trend_quality
+                logger.debug(
+                    f"resolve_strategy: {ticker} trend_quality={prof['trend_quality']:.3f} "
+                    f"min_trend_quality={min_trend_quality} source={source} "
+                    f"-> vol_filter_ok={vol_filter_ok}"
+                )
 
     entry = cls_map["entry"](vol_filter_ok=vol_filter_ok, **(entry_overrides or {}))
     exit_ = cls_map["exit"](**(exit_overrides or {}))
