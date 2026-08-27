@@ -38,6 +38,9 @@ class NullBroker:
     def disconnect(self) -> None:
         pass
 
+    def is_connected(self) -> bool:
+        return True
+
     def get_last_price(self, ticker: str) -> float:
         return self._prices.get(ticker, 0.0)
 

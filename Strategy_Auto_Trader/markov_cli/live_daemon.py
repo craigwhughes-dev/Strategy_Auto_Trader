@@ -1311,6 +1311,13 @@ def check_protective_stops(
     Re-places missing stops, journals vanished-stop-with-fill as stop_loss,
     and cancels orphan stops with no matching position.
     """
+    if not broker.is_connected():
+        try:
+            broker.connect()
+        except Exception as e:
+            logger.warning(f"check_protective_stops: broker reconnect failed: {e}")
+            return
+
     try:
         open_stops = broker.get_open_stop_orders()
     except Exception as e:
