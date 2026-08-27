@@ -32,6 +32,11 @@ STATE_DIR = ROOT / "state"
 DATA_DIR = ROOT / "data"
 LOGS_DIR = ROOT / "logs"
 
+# How long to wait between failed ibkr_data_reconcile attempts before retrying.
+# Without this, every 60s poll re-enters the function when TWS is down during
+# the run window (last_ibkr_data_reconcile_date is only written on success).
+_RECONCILE_RETRY_INTERVAL_SECS = 600
+
 
 class _DailyFileHandler(logging.Handler):
     """FileHandler that swaps to a fresh daemon_<date>_<pid>.log at local midnight.
@@ -1178,6 +1183,10 @@ def check_ibkr_data_reconciliation(
     if not cfg.get("enabled", True):
         return
 
+    last_fail = daemon_state.get("last_ibkr_reconcile_fail_ts", 0)
+    if time.time() - last_fail < _RECONCILE_RETRY_INTERVAL_SECS:
+        return
+
     tz = ZoneInfo(config.get("overnight_timezone", "Europe/London"))
     now = datetime.now(tz)
     run_time_str = cfg.get("run_time", "01:00")
@@ -1197,6 +1206,8 @@ def check_ibkr_data_reconciliation(
             logger.info(f"IBKR data reconciliation complete ({time.time() - t0:.0f}s)")
         except Exception as e:
             logger.error(f"Error in IBKR data reconciliation: {e}")
+            daemon_state["last_ibkr_reconcile_fail_ts"] = time.time()
+            save_state(daemon_state)
 
 
 def _check_orphaned_positions(config: dict, logger: logging.Logger) -> None:

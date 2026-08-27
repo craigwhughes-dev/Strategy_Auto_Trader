@@ -306,7 +306,24 @@ def test_ibkr_data_reconciliation_error_does_not_mark_date_done():
         live_daemon.check_ibkr_data_reconciliation(
             config, daemon_state, logger, run_reconcile=run_mock, save_state=lambda s: None)
     assert "last_ibkr_data_reconcile_date" not in daemon_state
+    assert "last_ibkr_reconcile_fail_ts" in daemon_state
     assert logger.error.called
+
+
+def test_ibkr_data_reconciliation_backs_off_after_failure():
+    """Cooldown gate suppresses retry within 10 minutes of a failure."""
+    import time as _time
+    daemon_state = {"last_ibkr_reconcile_fail_ts": _time.time() - 30}
+    run_mock, _ = _ibkr_reconcile(daemon_state)
+    assert not run_mock.called
+
+
+def test_ibkr_data_reconciliation_retries_after_cooldown():
+    """Once the 10-minute cooldown expires, reconciliation is attempted again."""
+    import time as _time
+    daemon_state = {"last_ibkr_reconcile_fail_ts": _time.time() - 700}
+    run_mock, _ = _ibkr_reconcile(daemon_state)
+    assert run_mock.called
 
 
 def test_run_ibkr_data_reconcile_subprocess_builds_expected_command(monkeypatch):

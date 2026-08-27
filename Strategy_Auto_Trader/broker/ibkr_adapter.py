@@ -65,6 +65,10 @@ class IBKRAdapter:
             raise RuntimeError(
                 "ib_async is not installed. Run: uv add ib_async"
             ) from exc
+        # ib_async logs its own ERROR for transient socket events (e.g. weekend
+        # TWS restart) before raising — our adapter already catches and re-logs
+        # these as WARNING, so suppress the library's own noise.
+        logging.getLogger("ib_async").setLevel(logging.CRITICAL)
         self._ib = IB()
         self._ib.connect(self._host, self._port, clientId=self._client_id,
                          timeout=self._connect_timeout)
