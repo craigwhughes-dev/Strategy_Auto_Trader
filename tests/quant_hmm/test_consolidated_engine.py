@@ -450,7 +450,7 @@ class TestConsolidatedEngine:
         assert spy.step_calls == 0
         assert result["n_bars"] > 0
 
-    def test_consolidated_vol_filter_veto_skips_regime_model(self):
+    def test_consolidated_vol_filter_veto_suppresses_entries_not_hmm(self):
         from Strategy_Auto_Trader.quant_hmm.consolidated_engine import consolidated_backtest
         from Strategy_Auto_Trader.strategy.default import DefaultEntry, DefaultExit
         spy = self._spy_regime_model()
@@ -460,10 +460,11 @@ class TestConsolidatedEngine:
             entry_strategy=DefaultEntry(vol_filter_ok=False), exit_strategy=DefaultExit(),
             min_train_bars=50, hmm_refit_bars=50, regime_smooth=1,
         )
-        # Vetoed strategy returns permanent HOLD without reading the regime,
-        # so the HMM must be skipped for the whole run.
-        assert spy.step_calls == 0
-        assert spy.refit_calls == 0
+        # A vol-filter veto must only suppress entries (the strategy's own
+        # evaluate() returns permanent HOLD) — it must not also blind the HMM,
+        # or diagnostic output (p_bull/hmm_vote) goes fake-zero/NaN for every
+        # vetoed bar (BACKTEST_LIVE_PARITY_PLAN.md, decision 2, 2026-08-28).
+        assert spy.step_calls == 150
         assert result["n_buys"] == 0
 
     def test_consolidated_rsi_weight_zero_runs_without_rsi(self):

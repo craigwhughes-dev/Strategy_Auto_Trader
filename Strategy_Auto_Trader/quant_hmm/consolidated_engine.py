@@ -378,13 +378,14 @@ def consolidated_backtest(
 
     # Skip whole-run setup for indicators the active strategy weights at zero
     # (opt out with skip_unused_indicators=False, e.g. for strategy development).
-    # A vol-filter-vetoed strategy returns permanent HOLD without ever reading
-    # the regime, so the HMM can be skipped for the whole run in that case too.
+    # A vol-filter veto must only suppress entries (the strategy's own evaluate()
+    # already returns permanent HOLD without reading regime state) — it must not
+    # also skip HMM computation, or diagnostic output (p_bull/hmm_vote in
+    # compositeBacktest.csv) goes fake-zero/NaN for every vetoed bar, which is
+    # exactly what made Cause 2's gate-ablation analysis unreadable
+    # (BACKTEST_LIVE_PARITY_PLAN.md, decision 2, 2026-08-28).
     _active_weights = getattr(entry_strategy, "_weights", None) or effective_weights
-    _vol_filter_vetoed = getattr(entry_strategy, "_vol_filter_ok", True) is False
-    hmm_enabled = not skip_unused_indicators or (
-        _active_weights.get("hmm", 0) != 0 and not _vol_filter_vetoed
-    )
+    hmm_enabled = not skip_unused_indicators or _active_weights.get("hmm", 0) != 0
     rsi_enabled = not skip_unused_indicators or _active_weights.get("rsi", 0) != 0
 
     regime_plugin: RegimeModelProtocol = regime_model or HMMRegimeModel(

@@ -28,13 +28,17 @@ def _active_daemon_log() -> str | None:
     return daemon_logs[-1].name if daemon_logs else None
 
 
-def find_old_logs() -> list[Path]:
+def find_old_logs(retention_days: int) -> list[Path]:
     logs_dir = ROOT / "logs"
     if not logs_dir.exists():
         return []
     active = _active_daemon_log()
     keep = ACTIVE_LOG_NAMES | ({active} if active else set())
-    return [p for p in logs_dir.glob("*.log") if p.name not in keep]
+    cutoff = datetime.now() - timedelta(days=retention_days)
+    return [
+        p for p in logs_dir.glob("*.log")
+        if p.name not in keep and datetime.fromtimestamp(p.stat().st_mtime) < cutoff
+    ]
 
 
 def find_old_data_dirs(retention_days: int) -> list[Path]:
@@ -80,9 +84,9 @@ def _human(n: int) -> str:
     return f"{n:.1f}TB"
 
 
-def run(execute: bool, retention_days: int, purge_full_scan: bool) -> None:
+def run(execute: bool, retention_days: int, log_retention_days: int, purge_full_scan: bool) -> None:
     groups: list[tuple[str, list[Path]]] = [
-        ("old logs", find_old_logs()),
+        (f"old logs (>{log_retention_days}d)", find_old_logs(log_retention_days)),
         (f"data/ dirs older than {retention_days}d", find_old_data_dirs(retention_days)),
         ("caches (.pytest_cache, egg-info, __pycache__)", find_cache_dirs()),
     ]
@@ -123,7 +127,9 @@ if __name__ == "__main__":
     parser.add_argument("--execute", action="store_true", help="Actually delete (default: dry-run report only)")
     parser.add_argument("--data-retention-days", type=int, default=7, dest="retention_days",
                          help="Delete data/ run dirs older than this many days (default: 7)")
+    parser.add_argument("--log-retention-days", type=int, default=45, dest="log_retention_days",
+                         help="Delete logs/daemon_*.log older than this many days (default: 45)")
     parser.add_argument("--purge-full-scan", action="store_true",
                          help="Also delete reports/full_scan/ raw per-ticker detail CSVs (32GB)")
     args = parser.parse_args()
-    run(args.execute, args.retention_days, args.purge_full_scan)
+    run(args.execute, args.retention_days, args.log_retention_days, args.purge_full_scan)
