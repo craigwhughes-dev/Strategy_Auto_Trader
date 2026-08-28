@@ -81,7 +81,7 @@ class TestQuantEngine:
         fake_df = pd.DataFrame({"Open": 1.0, "High": 1.0, "Low": 1.0,
                                  "Close": np.linspace(100, 110, 10), "Volume": 1000.0}, index=idx)
         with mock.patch("yfinance.download", return_value=fake_df):
-            df = fetch_hourly("TEST")
+            df = fetch_hourly("TEST", source="yfinance")
         assert df is not None
         assert len(df) == 10
         assert "Close" in df.columns
@@ -89,12 +89,12 @@ class TestQuantEngine:
     def test_fetch_hourly_empty_returns_none(self):
         from Strategy_Auto_Trader.quant_hmm.quant_engine import fetch_hourly
         with mock.patch("yfinance.download", return_value=pd.DataFrame()):
-            assert fetch_hourly("TEST") is None
+            assert fetch_hourly("TEST", source="yfinance") is None
 
     def test_fetch_hourly_exception_returns_none(self):
         from Strategy_Auto_Trader.quant_hmm.quant_engine import fetch_hourly
         with mock.patch("yfinance.download", side_effect=Exception("network error")):
-            assert fetch_hourly("TEST") is None
+            assert fetch_hourly("TEST", source="yfinance") is None
 
     def test_fetch_hourly_flattens_multiindex_columns(self):
         from Strategy_Auto_Trader.quant_hmm.quant_engine import fetch_hourly
