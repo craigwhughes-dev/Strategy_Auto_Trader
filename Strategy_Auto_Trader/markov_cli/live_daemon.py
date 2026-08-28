@@ -970,6 +970,7 @@ def retry_pending_tickers(
         # ibkr_backfill_universe.py completed 2026-08-14 (589/603 tickers,
         # see HANDOFF.md) — back on the local IBKR-backed cache.
         defaults = {"signal_reports_only": True, "source": "ibkr", **market_cfg.get("defaults", {})}
+        defaults["backtest_timeout_seconds"] = config.get("daytime", {}).get("backtest_timeout_seconds", 600)
         retry_tickers = [t for t in tickers if t in in_scope]
         if not retry_tickers:
             save_daemon_state(daemon_state)
@@ -1028,6 +1029,7 @@ def process_cycle(
     # ibkr_backfill_universe.py completed 2026-08-14 (589/603 tickers,
     # see HANDOFF.md) — back on the local IBKR-backed cache.
     defaults = {"signal_reports_only": True, "source": "ibkr", **market_cfg.get("defaults", {})}
+    defaults["backtest_timeout_seconds"] = config.get("daytime", {}).get("backtest_timeout_seconds", 600)
     processed = []
     skipped_budget = []
 

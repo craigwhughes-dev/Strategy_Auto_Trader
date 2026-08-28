@@ -380,10 +380,14 @@ def process_ticker(
     """
     ticker = ticker_cfg.get("ticker", "???")
     argv = _build_argv(ticker_cfg, defaults)
+    timeout_seconds = int(defaults.get("backtest_timeout_seconds", 600))
+    slow_warn_seconds = max(60, timeout_seconds // 5)
     t0 = time.time()
     try:
-        run_single_with_timeout(argv, timeout_seconds=300)
+        run_single_with_timeout(argv, timeout_seconds=timeout_seconds)
         elapsed = time.time() - t0
+        if elapsed > slow_warn_seconds:
+            logger.warning(f"Slow backtest: {ticker} took {elapsed:.0f}s (timeout={timeout_seconds}s)")
 
         result = _collect_results(ticker)
         if result:

@@ -53,7 +53,8 @@
   "daytime": {
     "cycle_buffer_minutes": 5,
     "max_seconds_per_cycle": 2400,
-    "poll_interval_seconds": 60
+    "poll_interval_seconds": 60,
+    "backtest_timeout_seconds": 600
   },
   "execution": {
     "capital_pot": 100000,
