@@ -1243,6 +1243,11 @@ def check_ibkr_data_reconciliation(
     if daemon_state.get("last_ibkr_data_reconcile_date") == today:
         return
 
+    fail_date = daemon_state.get("ibkr_reconcile_fail_date")
+    fail_count = daemon_state.get("ibkr_reconcile_fail_count", 0) if fail_date == today else 0
+    if fail_count >= 3:
+        return
+
     if now.hour == run_hour and now.minute >= run_minute:
         logger.info("Running IBKR data reconciliation...")
         t0 = time.time()
@@ -1254,6 +1259,8 @@ def check_ibkr_data_reconciliation(
         except Exception as e:
             logger.error(f"Error in IBKR data reconciliation: {e}")
             daemon_state["last_ibkr_reconcile_fail_ts"] = time.time()
+            daemon_state["ibkr_reconcile_fail_date"] = today
+            daemon_state["ibkr_reconcile_fail_count"] = fail_count + 1
             save_state(daemon_state)
 
 
