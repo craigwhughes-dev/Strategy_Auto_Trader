@@ -337,6 +337,7 @@ def test_run_ibkr_data_reconcile_subprocess_builds_expected_command(monkeypatch)
         return mock.Mock(returncode=0, stderr="")
 
     monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("socket.create_connection", mock.MagicMock())
     config = {"broker": {"host": "127.0.0.1", "port": 4002, "client_id": 1}}
     cfg = {"lookback_days": 14, "client_id": 4}
 
@@ -354,9 +355,27 @@ def test_run_ibkr_data_reconcile_subprocess_raises_on_nonzero_exit(monkeypatch):
         return mock.Mock(returncode=1, stderr="Could not connect to TWS/Gateway")
 
     monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("socket.create_connection", mock.MagicMock())
     with pytest.raises(RuntimeError, match="ibkr_reconcile exited 1"):
         live_daemon._run_ibkr_data_reconcile_subprocess(
             {"broker": {}}, {"lookback_days": 14, "client_id": 4})
+
+
+def test_run_ibkr_data_reconcile_subprocess_pre_ping_failure(monkeypatch):
+    """ConnectionRefusedError on TCP pre-ping raises RuntimeError before
+    spawning the subprocess — clean log message, no process spawn overhead."""
+    monkeypatch.setattr("socket.create_connection",
+                        mock.Mock(side_effect=OSError("Connection refused")))
+    subprocess_called = []
+    monkeypatch.setattr("subprocess.run",
+                        lambda *a, **k: subprocess_called.append(1))
+
+    with pytest.raises(RuntimeError, match="TWS/Gateway not reachable"):
+        live_daemon._run_ibkr_data_reconcile_subprocess(
+            {"broker": {"host": "127.0.0.1", "port": 4002}},
+            {"lookback_days": 14, "client_id": 4})
+
+    assert not subprocess_called  # subprocess must NOT be spawned when ping fails
 
 
 def test_top_k_screen_health_no_state_file_disabled_is_noop(monkeypatch, tmp_path):

@@ -1223,14 +1223,26 @@ def _run_ibkr_data_reconcile_subprocess(config: dict, cfg: dict) -> None:
     compute_global_top_k's rank_universe_cli pattern) so its own IBKR
     connection (client_id=4 by default) never touches this process's ib_async
     event loop or execution connection (client_id=1)."""
+    import socket
     import subprocess
 
     broker_cfg = config.get("broker", {})
+    host = broker_cfg.get("host", "127.0.0.1")
+    port = int(broker_cfg.get("port", 4002))
+
+    # Pre-ping: fail fast with a clean message rather than spawning a subprocess
+    # that exits immediately with ConnectionRefusedError and a noisy stack trace.
+    try:
+        with socket.create_connection((host, port), timeout=5):
+            pass
+    except OSError as exc:
+        raise RuntimeError(f"TWS/Gateway not reachable at {host}:{port} — {exc}") from exc
+
     cmd = [
         sys.executable, "-m", "Strategy_Auto_Trader.markov_cli.ibkr_reconcile",
         "--lookback-days", str(cfg.get("lookback_days", 14)),
-        "--host", broker_cfg.get("host", "127.0.0.1"),
-        "--port", str(broker_cfg.get("port", 4002)),
+        "--host", host,
+        "--port", str(port),
         "--client-id", str(cfg.get("client_id", 4)),
     ]
     timeout_seconds = cfg.get("timeout_seconds", 3600)
