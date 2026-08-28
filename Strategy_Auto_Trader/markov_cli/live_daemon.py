@@ -886,6 +886,31 @@ def _execute_processed_tickers(
     if not ticker_list:
         return
 
+    # Gate new entries to top-k tickers; existing open positions always pass.
+    # top_k_universe.json is written nightly by compute_global_top_k() and is
+    # the canonical execution filter — vol-screened tickers not in top-k are
+    # evaluated during the cycle but blocked here at execution time.
+    top_k_path = STATE_DIR / "top_k_universe.json"
+    try:
+        top_k_data = json.loads(top_k_path.read_text(encoding="utf-8"))
+        top_k_set = set(top_k_data.get("tickers", []))
+    except Exception:
+        top_k_set = None
+
+    if top_k_set is not None:
+        open_pos = set(daemon_state.get("positions", {}).keys())
+        allowed = top_k_set | open_pos
+        filtered = [t for t in ticker_list if t in allowed]
+        n_gated = len(ticker_list) - len(filtered)
+        if n_gated:
+            logger.info(
+                f"[{market_name}] top_k gate: {n_gated}/{len(ticker_list)} evaluated tickers "
+                f"not in top_k — skipping execution"
+            )
+        ticker_list = filtered
+        if not ticker_list:
+            return
+
     # Dry-run broker fills at supplied prices — feed it this cycle's closes
     # so the trade log records real prices instead of 0.0.
     if hasattr(broker, "set_prices"):

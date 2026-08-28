@@ -2818,6 +2818,87 @@ def test_process_cycle_parallel_budget_cancels_pending(monkeypatch):
     assert "budget" in log_text.lower() or "skipped" in log_text.lower()
 
 
+class TestExecuteProcessedTickersTopKGate:
+    """_execute_processed_tickers top_k gate: non-top-k tickers are blocked at
+    execution time (not at scope time), so all vol-screened tickers run backtests
+    but only top-k ones place orders."""
+
+    def _processed(self, tickers):
+        return [{"ticker": t, "status": "OK", "result": {"close": 100.0}} for t in tickers]
+
+    def test_non_top_k_ticker_skipped(self, monkeypatch, tmp_path):
+        """Ticker not in top_k_universe.json and not an open position is blocked."""
+        top_k_path = tmp_path / "top_k_universe.json"
+        top_k_path.write_text(json.dumps({"tickers": ["AAPL"]}), encoding="utf-8")
+        monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+
+        executed = []
+        monkeypatch.setattr(live_daemon, "execute_signals_with_retry",
+                            lambda market, tickers, *a, **k: executed.extend(tickers) or ([], [], []))
+        mock_portfolio = mock.Mock()
+        mock_portfolio.get_limit_tracker.return_value = mock.Mock()
+
+        live_daemon._execute_processed_tickers(
+            "test_market",
+            self._processed(["AAPL", "GOOG"]),  # GOOG not in top_k
+            config={"execution": {}},
+            daemon_state={"positions": {}},
+            portfolio=mock_portfolio,
+            broker=mock.Mock(),
+            logger=mock.Mock(),
+        )
+
+        assert "AAPL" in executed
+        assert "GOOG" not in executed
+
+    def test_open_position_passes_even_if_not_in_top_k(self, monkeypatch, tmp_path):
+        """Open positions always pass — needed for exits and monitoring."""
+        top_k_path = tmp_path / "top_k_universe.json"
+        top_k_path.write_text(json.dumps({"tickers": ["AAPL"]}), encoding="utf-8")
+        monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+
+        executed = []
+        monkeypatch.setattr(live_daemon, "execute_signals_with_retry",
+                            lambda market, tickers, *a, **k: executed.extend(tickers) or ([], [], []))
+        mock_portfolio = mock.Mock()
+        mock_portfolio.get_limit_tracker.return_value = mock.Mock()
+
+        live_daemon._execute_processed_tickers(
+            "test_market",
+            self._processed(["GOOG"]),  # not in top_k but open position
+            config={"execution": {}},
+            daemon_state={"positions": {"GOOG": {}}},
+            portfolio=mock_portfolio,
+            broker=mock.Mock(),
+            logger=mock.Mock(),
+        )
+
+        assert "GOOG" in executed
+
+    def test_missing_top_k_file_allows_all(self, monkeypatch, tmp_path):
+        """If top_k_universe.json is missing, gate is a no-op (safe fallback)."""
+        monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)  # no top_k file
+
+        executed = []
+        monkeypatch.setattr(live_daemon, "execute_signals_with_retry",
+                            lambda market, tickers, *a, **k: executed.extend(tickers) or ([], [], []))
+        mock_portfolio = mock.Mock()
+        mock_portfolio.get_limit_tracker.return_value = mock.Mock()
+
+        live_daemon._execute_processed_tickers(
+            "test_market",
+            self._processed(["AAPL", "GOOG"]),
+            config={"execution": {}},
+            daemon_state={"positions": {}},
+            portfolio=mock_portfolio,
+            broker=mock.Mock(),
+            logger=mock.Mock(),
+        )
+
+        assert "AAPL" in executed
+        assert "GOOG" in executed
+
+
 class TestRetryPendingTickers:
     """retry_pending_tickers: immediate re-evaluation of interrupted trades,
     instead of waiting for that market's next hourly cycle."""
@@ -2839,11 +2920,12 @@ class TestRetryPendingTickers:
 
         assert not called  # never even looked at trading hours — nothing pending
 
-    def test_reevaluates_fresh_and_executes_via_execute_signals_with_retry(self, monkeypatch):
+    def test_reevaluates_fresh_and_executes_via_execute_signals_with_retry(self, monkeypatch, tmp_path):
         """Must re-run process_ticker (fresh signal), and go through
         execute_signals_with_retry — not a bespoke call to execute_signals."""
         from Strategy_Auto_Trader.markov_cli import batch
 
+        monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)  # no top_k file → gate disabled
         daemon_state = {"pending_retry_tickers": {"ftse": ["MNG.L"]}}
         process_ticker_calls = []
 
@@ -2959,12 +3041,13 @@ class TestRetryPendingTickers:
 
         assert daemon_state["pending_retry_tickers"] == {}
 
-    def test_reinterrupt_during_retry_rearms_without_infinite_loop(self, monkeypatch):
+    def test_reinterrupt_during_retry_rearms_without_infinite_loop(self, monkeypatch, tmp_path):
         """If the retry itself hits a fresh ExecutionInterrupted, halt/needs_reconciliation
         get re-armed with a fresh pending list — bounded by requiring reconciliation
         to clear again, not a runaway loop."""
         from Strategy_Auto_Trader.markov_cli import batch, execute as execute_mod
 
+        monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)  # no top_k file → gate disabled
         daemon_state = {"pending_retry_tickers": {"ftse": ["MNG.L"]}, "halt_new_entries": False}
         monkeypatch.setattr(batch, "process_ticker",
                             lambda ticker_cfg, defaults, send_email: {
@@ -2990,9 +3073,10 @@ class TestRetryPendingTickers:
         assert daemon_state["needs_reconciliation"] is True
         assert daemon_state["pending_retry_tickers"] == {"ftse": ["MNG.L"]}  # freshly re-set, not stuck
 
-    def test_batches_multiple_tickers_one_execute_call(self, monkeypatch):
+    def test_batches_multiple_tickers_one_execute_call(self, monkeypatch, tmp_path):
         from Strategy_Auto_Trader.markov_cli import batch
 
+        monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)  # no top_k file → gate disabled
         daemon_state = {"pending_retry_tickers": {"ftse": ["MNG.L", "AV.L"]}}
         monkeypatch.setattr(batch, "process_ticker",
                             lambda ticker_cfg, defaults, send_email: {

@@ -201,8 +201,7 @@ def compute_global_top_k(
     return top_tickers
 
 
-def screen_market(market_name: str, market_cfg: dict, exec_state: dict,
-                   global_top_k: set[str] | None = None) -> dict:
+def screen_market(market_name: str, market_cfg: dict, exec_state: dict) -> dict:
     """Screen tickers for a single market.
 
     Returns dict with:
@@ -292,21 +291,6 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict,
                 excluded.append({"ticker": ticker, "reason": reason})
     else:
         stage1_tickers = set(all_tickers)
-
-    # Stage 2: global top-K ranking intersection (computed once for both
-    # markets by main(), not per-market — see compute_global_top_k())
-    if global_top_k is not None:
-        before = len(stage1_tickers)
-        stage1_tickers = {
-            t for t in stage1_tickers
-            if t in global_top_k or t in open_positions
-        }
-        already_excluded = {e["ticker"] for e in excluded}
-        for ticker in all_tickers:
-            if ticker not in stage1_tickers and ticker not in open_positions and ticker not in already_excluded:
-                excluded.append({"ticker": ticker, "reason": "top_k_screen"})
-        logger.info(f"  top-K filter for {market_name}: {len(stage1_tickers)}/{before} survive "
-              f"(global top-{len(global_top_k)} intersected with market watchlist)")
 
     # Final kept list: stage1 plus every open position, unconditionally — a
     # position dropped from the watchlist file itself must still be kept in
@@ -496,7 +480,7 @@ def main() -> int:
     for market_name, raw_market_cfg in config.get("markets", {}).items():
         logger.info(f" {market_name}")
         market_cfg = _with_merged_defaults(raw_market_cfg, config)
-        result = screen_market(market_name, market_cfg, exec_state, global_top_k=global_top_k)
+        result = screen_market(market_name, market_cfg, exec_state)
 
         write_scope_result(market_name, result)
         generate_scoped_watchlist(
