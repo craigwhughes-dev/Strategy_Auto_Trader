@@ -400,6 +400,7 @@ def rank_universe(
     lookback_days: int = 60,
     workers: int = 4,
     use_seasonal_volume: bool = False,
+    source: str = "ibkr",
 ) -> dict[str, float]:
     """Backtest every ticker in `tickers` and return {ticker: hybrid_score} "as
     of today" (the median-of-candidate-day score across each ticker's own full
@@ -415,7 +416,7 @@ def rank_universe(
     """
     candidates, _price_by_ticker, trend_quality_by_ticker = generate_candidates(
         tickers, strategy_name, vol_filter_ok=True, workers=workers,
-        use_seasonal_volume=use_seasonal_volume,
+        use_seasonal_volume=use_seasonal_volume, source=source,
     )
     _, ticker_scores = filter_candidates_by_top_tickers(
         candidates, trend_quality_by_ticker, top_k=len(tickers),

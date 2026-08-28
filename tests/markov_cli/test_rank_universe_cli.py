@@ -45,7 +45,7 @@ def test_args_passed_through_to_rank_universe(tmp_path):
     mock_rank.assert_called_once_with(
         ["AAPL"], "conservative",
         vol_weight=0.5, win_rate_weight=0.5, lookback_days=30, workers=2,
-        use_seasonal_volume=True,
+        use_seasonal_volume=True, source="ibkr",
     )
 
 

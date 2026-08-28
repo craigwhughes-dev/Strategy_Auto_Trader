@@ -49,6 +49,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="Normalise volume ratio by same-hour-of-day trailing mean. On by "
                              "default, matching the daemon's overnight top-k ranking config "
                              "(BACKTEST_LIVE_PARITY_PLAN.md Step 3b, decided 2026-08-28).")
+    parser.add_argument("--source", choices=["yfinance", "ibkr"], default="ibkr",
+                        help="Hourly data source: local incremental IBKR-backed cache (default) "
+                             "or yfinance. IBKR falls back to yfinance if no cache exists.")
     args = parser.parse_args(argv)
 
     if args.tickers:
@@ -63,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         lookback_days=args.lookback_days,
         workers=args.workers,
         use_seasonal_volume=args.seasonal_volume,
+        source=args.source,
     )
 
     output_path = Path(args.output)

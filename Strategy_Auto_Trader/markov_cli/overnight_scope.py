@@ -152,6 +152,8 @@ def compute_global_top_k(
         ]
         if cfg.get("seasonal_volume", False):
             cmd.append("--seasonal-volume")
+        source = next(iter(config.get("markets", {}).values()), {}).get("defaults", {}).get("source", "ibkr")
+        cmd += ["--source", source]
         if vol_kept:
             cmd += ["--tickers", ",".join(sorted(vol_kept | open_positions))]
             logger.info(f"  top_k_screen: ranking {len(vol_kept)} TQ-screened tickers "
@@ -259,12 +261,14 @@ def screen_market(market_name: str, market_cfg: dict, exec_state: dict,
     do_vol_screen = vol_cfg.get("enabled", True) and not wants_screen_off
 
     if do_vol_screen:
+        source = market_cfg.get("defaults", {}).get("source", "ibkr")
         logger.info(f"  Vol-screening {len(all_tickers)} tickers for {market_name}...")
         vol_kept, vol_profiles = screen_tickers(
             all_tickers,
             min_trend_quality=min_trend_quality,
             max_downside_vol=max_downside_vol,
             period=vol_period,
+            source=source,
             verbose=False
         )
         if wants_choppy:
@@ -412,8 +416,9 @@ def _collect_vol_kept_combined(config: dict) -> set[str]:
         tickers = [t["ticker"] if isinstance(t, dict) else t for t in watchlist.get("tickers", [])]
         logger.info(f"  Pre-screening {len(tickers)} {market_cfg['watchlist'].split('_')[1].split('.')[0]} "
               f"tickers for ranking (min_trend_quality={min_tq})...")
+        source = market_cfg.get("defaults", {}).get("source", "ibkr")
         kept, _ = screen_tickers(tickers, min_trend_quality=min_tq, max_downside_vol=None,
-                                 period=period, verbose=False)
+                                 period=period, source=source, verbose=False)
         combined.update(kept)
 
     logger.info(f"  Pre-screen: {len(combined)} tickers pass TQ≥{min_tq} across all markets")

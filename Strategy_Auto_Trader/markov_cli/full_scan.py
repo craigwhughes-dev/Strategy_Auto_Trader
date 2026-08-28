@@ -563,7 +563,7 @@ def scan_ticker(
     vix_data: dict | None = None, data_cutoff: date | None = None,
     initial_cash: float = 20_000.0,
     fetch_fn=None, vol_profile_fn=None, backtest_fn=None,
-    source: str = "yfinance",
+    source: str = "ibkr",
 ) -> dict:
     """Run one ticker end-to-end; returns its summary row. Never skips on vol.
 
@@ -691,7 +691,7 @@ def scan_ticker(
 def _scan_ticker_worker(
     ticker: str, strategy_name: str, trade_cost: float, sentiment: bool,
     data_cutoff: date | None = None, cost_model_name: str = "flat",
-    initial_cash: float = 20_000.0, source: str = "yfinance",
+    initial_cash: float = 20_000.0, source: str = "ibkr",
 ) -> dict:
     """Top-level module worker function for ProcessPoolExecutor.
 
@@ -804,9 +804,9 @@ def main(argv: list[str] | None = None) -> int:
                              "'today' excludes the current (possibly still-forming) session "
                              "so comparison/reconciliation runs are immune to data drift. "
                              "Default: no cutoff.")
-    parser.add_argument("--source", choices=["yfinance", "ibkr"], default="yfinance",
-                        help="Hourly data source: yfinance (default, day-to-day research) or "
-                             "the local incremental IBKR-backed cache. Default: yfinance.")
+    parser.add_argument("--source", choices=["yfinance", "ibkr"], default="ibkr",
+                        help="Hourly data source: local incremental IBKR-backed cache (default) "
+                             "or yfinance. IBKR falls back to yfinance if no cache exists.")
     args = parser.parse_args(argv)
 
     if args.workers < 1:

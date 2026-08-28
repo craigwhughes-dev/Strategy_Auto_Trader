@@ -546,18 +546,18 @@ class TestScanTickerSource:
         assert fetch_calls == ["ibkr"]
         assert vol_calls == ["ibkr"]
 
-    def test_default_source_is_yfinance(self, monkeypatch):
+    def test_default_source_is_ibkr(self, monkeypatch):
         df = _price_df(72)
         fetch_calls = []
         monkeypatch.setattr(full_scan, "fetch_hourly_cached",
-                            lambda t, period="730d", source="yfinance":
+                            lambda t, period="730d", source="ibkr":
                                 fetch_calls.append(source) or df)
         monkeypatch.setattr(full_scan, "volatility_profile_cached",
-                            lambda t, source="yfinance": {"trend_quality": 0.5})
+                            lambda t, source="ibkr": {"trend_quality": 0.5})
 
         full_scan.scan_ticker("TEST", "default", sentiment=False)
 
-        assert fetch_calls == ["yfinance"]
+        assert fetch_calls == ["ibkr"]
 
     def test_di_seam_fetch_fn_bypasses_source(self):
         """A caller-supplied fetch_fn is called as-is — source is only baked

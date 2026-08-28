@@ -20,7 +20,7 @@ from ..plugins.interest import IbkrTieredInterest
 _log = logging.getLogger(__name__)
 
 
-def fetch_hourly(ticker: str, period: str = "730d", source: str = "yfinance") -> pd.DataFrame | None:
+def fetch_hourly(ticker: str, period: str = "730d", source: str = "ibkr") -> pd.DataFrame | None:
     """Fetch hourly OHLCV data.
 
     source="ibkr" tries the incremental IBKR-backed local cache first
@@ -28,8 +28,8 @@ def fetch_hourly(ticker: str, period: str = "730d", source: str = "yfinance") ->
     cached bar, connects lazily, disconnects after). On connect failure
     with no usable cache yet, falls through to the plain yfinance path
     below — same resilience shape as batch.py's timeout-and-continue
-    handling. Default stays "yfinance" everywhere except the live daemon's
-    batch.py argv builder."""
+    handling. Tests mock IBKRDataClient.connect to return False so they
+    fall through to yfinance without a real connection attempt."""
     if source == "ibkr":
         from ..broker.ibkr_data import IBKRDataClient
         df = IBKRDataClient().fetch_hourly(ticker, period=period)

@@ -94,7 +94,7 @@ class TestVolScreen:
     def test_screen_tickers_filters_by_trend_quality(self):
         from Strategy_Auto_Trader.quant_hmm import vol_screen as vs
 
-        def fake_profile(ticker, period="2y"):
+        def fake_profile(ticker, period="2y", source="ibkr"):
             scores = {"GOOD": 1.0, "BAD": -2.0, "BORDERLINE": 0.0}
             return {"ticker": ticker, "ann_vol": 0.2, "downside_vol": 0.15,
                     "efficiency_ratio": 0.1, "autocorr": 0.0, "choppiness_idx": 47.0,
@@ -109,7 +109,7 @@ class TestVolScreen:
     def test_screen_tickers_filters_by_downside_vol(self):
         from Strategy_Auto_Trader.quant_hmm import vol_screen as vs
 
-        def fake_profile(ticker, period="2y"):
+        def fake_profile(ticker, period="2y", source="ibkr"):
             vols = {"LOW": 0.15, "HIGH": 0.30, "MEDIUM": 0.22}
             return {"ticker": ticker, "ann_vol": 0.35, "downside_vol": vols[ticker],
                     "efficiency_ratio": 0.1, "autocorr": 0.0, "choppiness_idx": 47.0,
@@ -125,7 +125,7 @@ class TestVolScreen:
     def test_screen_tickers_skips_failed_fetches(self):
         from Strategy_Auto_Trader.quant_hmm import vol_screen as vs
 
-        def fake_profile(ticker, period="2y"):
+        def fake_profile(ticker, period="2y", source="ibkr"):
             if ticker == "DELISTED":
                 return None
             return {"ticker": ticker, "ann_vol": 0.2, "efficiency_ratio": 0.1,

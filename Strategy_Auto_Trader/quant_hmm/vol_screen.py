@@ -199,6 +199,7 @@ def screen_tickers(
     min_trend_quality: float = 0.0,
     max_downside_vol: float | None = None,
     period: str = "2y",
+    source: str = "ibkr",
     verbose: bool = True,
 ) -> tuple[list[str], list[dict]]:
     """Filter a ticker list down to those with acceptable trend quality and downside vol.
@@ -213,7 +214,7 @@ def screen_tickers(
         if verbose and (i == 1 or i % 20 == 0):
             logger.info(f"  [{i}/{len(tickers)}] screening {ticker}...")
 
-        prof = volatility_profile(ticker, period=period)
+        prof = volatility_profile(ticker, period=period, source=source)
         if prof is None:
             continue
         profiles.append(prof)

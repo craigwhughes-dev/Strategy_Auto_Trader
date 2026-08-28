@@ -386,11 +386,10 @@ def main(argv: list[str] | None = None) -> int:
                              "flat rolling-20 mean. On by default — backtested to improve results "
                              "and matches the live daemon's config "
                              "(BACKTEST_LIVE_PARITY_PLAN.md Step 3b, decided 2026-08-28).")
-    parser.add_argument("--source", choices=["yfinance", "ibkr"], default="yfinance",
-                        help="Hourly data source for every ticker in this run: yfinance (default, "
-                             "day-to-day research) or the local incremental IBKR-backed cache "
-                             "(use for a full-universe revalidation against the data the live "
-                             "daemon actually trades on — see the IBKR migration plan).")
+    parser.add_argument("--source", choices=["yfinance", "ibkr"], default="ibkr",
+                        help="Hourly data source for every ticker in this run: local incremental "
+                             "IBKR-backed cache (default) or yfinance. IBKR falls back to "
+                             "yfinance if no cache exists for a ticker.")
     args = parser.parse_args(argv)
 
     if bool(args.tickers) == bool(args.universe):

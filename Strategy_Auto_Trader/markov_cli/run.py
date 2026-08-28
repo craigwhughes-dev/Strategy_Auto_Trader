@@ -60,9 +60,9 @@ def _fetch_company_info(ticker: str) -> tuple[str, str]:
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="strategy-auto-trader")
     parser.add_argument("--ticker", default="SPY")
-    parser.add_argument("--source", choices=["yfinance", "ibkr"], default="yfinance",
-                        help="Hourly data source: yfinance (default) or the local "
-                             "incremental IBKR-backed cache (default: yfinance)")
+    parser.add_argument("--source", choices=["yfinance", "ibkr"], default="ibkr",
+                        help="Hourly data source: local incremental IBKR-backed cache (default) "
+                             "or yfinance. IBKR falls back to yfinance if no cache exists.")
 
     # HMM + composite-signal thresholds
     parser.add_argument("--entry-prob", type=float, default=0.65,

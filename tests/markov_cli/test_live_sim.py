@@ -704,7 +704,7 @@ class TestMainCLI:
 
         gen_kwargs = mock_gen.call_args_list[0][1]
         assert gen_kwargs["workers"] == 2
-        assert gen_kwargs["source"] == "yfinance"
+        assert gen_kwargs["source"] == "ibkr"
 
         arb_kwargs = mock_arb.call_args_list[0][1]
         assert arb_kwargs["initial_cash"] == 10_000.0

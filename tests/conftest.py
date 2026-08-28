@@ -2,6 +2,27 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _mock_ibkr_no_connection(request, monkeypatch):
+    """Prevent non-broker tests from making real IBKR TCP connections.
+
+    With source="ibkr" as the default, fetch_hourly attempts IBKRDataClient.connect()
+    on every call. If TWS isn't running, ib_async can hang for its full connect_timeout
+    (30s). Patching connect() to return False makes it fall through to yfinance
+    immediately — identical behaviour to the old source="yfinance" default.
+
+    Broker tests (tests/broker/) mock at the ib_async.IB level and manage their
+    own IBKR fixtures, so we skip this patch for them.
+    """
+    if "broker" in request.node.nodeid:
+        return
+    monkeypatch.setattr(
+        "Strategy_Auto_Trader.broker.ibkr_data.IBKRDataClient.connect",
+        lambda self: False,
+    )
 
 
 def _dates(n: int, start: str = "2020-01-01") -> pd.DatetimeIndex:
