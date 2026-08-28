@@ -12,7 +12,9 @@ import logging
 import multiprocessing
 import os
 import sys
+import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import pandas as pd
@@ -367,7 +369,8 @@ def _get_entry_price(ticker: str, buy_date_str: str) -> float | None:
 
 
 def process_ticker(
-    ticker_cfg: dict, defaults: dict, send_email: bool
+    ticker_cfg: dict, defaults: dict, send_email: bool,
+    state_lock: threading.Lock | None = None,
 ) -> dict:
     """Run model for a single ticker, collect results, journal trades, email if send_email and signal fires.
 
@@ -396,50 +399,52 @@ def process_ticker(
             strategy_name = str({**defaults, **ticker_cfg}.get("strategy", "default"))
             csv_path = Path(result["run_dir"]) / "compositeBacktest.csv"
             trades = extract_trades_from_csv(ticker, csv_path, strategy=strategy_name)
-            journal_trade_count = append_trades(BACKTEST_JOURNAL, trades)
 
-            if result["trade_event"] in ("BUY", "SELL"):
-                from ..output.trade_state import record_buy, record_sell, has_open_buy
+            with state_lock if state_lock is not None else nullcontext():
+                journal_trade_count = append_trades(BACKTEST_JOURNAL, trades)
 
-                if _should_send_buy_alert(result):
-                    if send_email:
-                        try:
-                            from ..output.emailer import send_trade_alert
-                            send_trade_alert(result)
-                            logger.info(f"BUY alert email sent for {ticker}")
-                        except Exception as exc:
-                            logger.warning(f"BUY alert email failed for {ticker}: {exc}")
-                    record_buy(ticker, {
-                        "strategy": strategy_name,
-                        "signal": result["trade_event"],
-                        "score": result["signal_score"],
-                        "gate_flag": result["quality_gate"],
-                        "price": result["close"],
-                        "regime": result["regime_signal"],
-                        "rsi": result["rsi"],
-                        "volume_ratio": result["volume_ratio"],
-                        "kelly_fraction": result["kelly_fraction"],
-                        "stop_level": result["stop_level"],
-                        "target_level": result["target_level"],
-                        "portfolio_value": result["portfolio_value"],
-                        "bh_return": result["bh_return"],
-                    })
-                elif _should_send_sell_alert(result, ticker):
-                    if send_email:
-                        try:
-                            from ..output.emailer import send_trade_alert
-                            send_trade_alert(result)
-                            logger.info(f"SELL alert email sent for {ticker}")
-                        except Exception as exc:
-                            logger.warning(f"SELL alert email failed for {ticker}: {exc}")
-                    record_sell(ticker, {
-                        "price": result["close"],
-                        "reason": result["sell_reason"] or result["quality_gate_reason"],
-                        "strategy_return": result["strategy_return"],
-                        "bh_return": result["bh_return"],
-                    })
-                elif result["trade_event"] == "SELL":
-                    logger.info(f"  SELL skipped (no prior BUY since reference date)")
+                if result["trade_event"] in ("BUY", "SELL"):
+                    from ..output.trade_state import record_buy, record_sell, has_open_buy
+
+                    if _should_send_buy_alert(result):
+                        if send_email:
+                            try:
+                                from ..output.emailer import send_trade_alert
+                                send_trade_alert(result)
+                                logger.info(f"BUY alert email sent for {ticker}")
+                            except Exception as exc:
+                                logger.warning(f"BUY alert email failed for {ticker}: {exc}")
+                        record_buy(ticker, {
+                            "strategy": strategy_name,
+                            "signal": result["trade_event"],
+                            "score": result["signal_score"],
+                            "gate_flag": result["quality_gate"],
+                            "price": result["close"],
+                            "regime": result["regime_signal"],
+                            "rsi": result["rsi"],
+                            "volume_ratio": result["volume_ratio"],
+                            "kelly_fraction": result["kelly_fraction"],
+                            "stop_level": result["stop_level"],
+                            "target_level": result["target_level"],
+                            "portfolio_value": result["portfolio_value"],
+                            "bh_return": result["bh_return"],
+                        })
+                    elif _should_send_sell_alert(result, ticker):
+                        if send_email:
+                            try:
+                                from ..output.emailer import send_trade_alert
+                                send_trade_alert(result)
+                                logger.info(f"SELL alert email sent for {ticker}")
+                            except Exception as exc:
+                                logger.warning(f"SELL alert email failed for {ticker}: {exc}")
+                        record_sell(ticker, {
+                            "price": result["close"],
+                            "reason": result["sell_reason"] or result["quality_gate_reason"],
+                            "strategy_return": result["strategy_return"],
+                            "bh_return": result["bh_return"],
+                        })
+                    elif result["trade_event"] == "SELL":
+                        logger.info(f"  SELL skipped (no prior BUY since reference date)")
 
             return {"ticker": ticker, "status": "OK", "time": elapsed, "result": result}
         else:

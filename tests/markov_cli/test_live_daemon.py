@@ -2691,6 +2691,58 @@ def test_process_cycle_logs_warning_on_round_robin_fail_status(monkeypatch):
     assert len(calls) > 0
 
 
+def test_process_cycle_parallel_collects_all_results(monkeypatch):
+    """workers>1 path still collects every candidate's result."""
+    from Strategy_Auto_Trader.markov_cli import batch
+
+    processed_tickers = []
+
+    def fake_process_ticker(ticker_cfg, defaults, send_email, state_lock=None):
+        processed_tickers.append(ticker_cfg["ticker"])
+        return {"ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0}
+
+    monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL", "MSFT", "GOOG"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
+
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    n = live_daemon.process_cycle(
+        "test_market", {}, config, {"cursors": {}},
+        portfolio=None, broker=None, logger=mock.Mock(),
+        workers=2,
+    )
+
+    assert n == 3
+    assert sorted(processed_tickers) == ["AAPL", "GOOG", "MSFT"]
+
+
+def test_process_cycle_parallel_state_lock_prevents_lost_writes(monkeypatch):
+    """state_lock is acquired during shared writes when workers>1."""
+    import threading
+    from Strategy_Auto_Trader.markov_cli import batch
+
+    lock_acquisitions = []
+
+    def fake_process_ticker(ticker_cfg, defaults, send_email, state_lock=None):
+        if state_lock is not None:
+            lock_acquisitions.append(ticker_cfg["ticker"])
+        return {"ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0}
+
+    monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL", "MSFT"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
+
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    live_daemon.process_cycle(
+        "test_market", {}, config, {"cursors": {}},
+        portfolio=None, broker=None, logger=mock.Mock(),
+        workers=2,
+    )
+
+    # Both tickers must have received a non-None state_lock
+    assert sorted(lock_acquisitions) == ["AAPL", "MSFT"]
+
+
 class TestRetryPendingTickers:
     """retry_pending_tickers: immediate re-evaluation of interrupted trades,
     instead of waiting for that market's next hourly cycle."""

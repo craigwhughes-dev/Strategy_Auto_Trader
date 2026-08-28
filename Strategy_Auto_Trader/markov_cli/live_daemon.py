@@ -817,6 +817,7 @@ def _evaluate_ticker(
     market_name: str,
     *,
     pin_open_strategy: bool,
+    state_lock=None,
 ) -> dict:
     """Build ticker_cfg and run process_ticker for a single ticker.
 
@@ -837,7 +838,8 @@ def _evaluate_ticker(
     # decline an admitted BUY on cash/quota/hours, so an alerted SELL can arrive
     # for a position never actually opened. Emails off; state (record_buy/
     # record_sell, needed by pin_open_strategy above) still updates.
-    result = process_ticker(ticker_cfg, defaults, send_email=False)
+    pt_kwargs = {"state_lock": state_lock} if state_lock is not None else {}
+    result = process_ticker(ticker_cfg, defaults, send_email=False, **pt_kwargs)
     if not str(result.get("status", "")).startswith("OK"):
         logger.warning(f"[{market_name}] {ticker} processing failed: {result.get('status')}")
     else:
@@ -999,6 +1001,7 @@ def process_cycle(
     last_cycle_hour: dict | None = None,
     protective_stops: bool = False,
     stop_buffer_pct: float = 1.5,
+    workers: int = 1,
 ) -> int:
     """Run one market cycle: prioritize open positions, then round-robin through candidates.
 
@@ -1067,22 +1070,42 @@ def process_cycle(
             logger,
         )
 
-        logger.info(f"[{market_name}] Round-robin ({len(candidates)} candidates, {remaining_budget:.0f}s budget):")
+        logger.info(f"[{market_name}] Round-robin ({len(candidates)} candidates, {remaining_budget:.0f}s budget, workers={workers}):")
         n_attempted = 0
-        for ticker in candidates:
-            now_remaining = max_seconds - (time.time() - cycle_start)
-            if now_remaining <= buffer_secs:
-                logger.debug(f"  {ticker}: budget near exhausted ({now_remaining:.0f}s left)")
-                skipped_budget.append(ticker)
-                break
-
+        if workers > 1:
+            import threading
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            state_lock = threading.Lock()
             process_manual_commands_wrapper(config, portfolio, broker, logger, daemon_state)
             _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(
+                        _evaluate_ticker, t, overrides, defaults, logger,
+                        market_name, pin_open_strategy=False, state_lock=state_lock,
+                    ): t
+                    for t in candidates
+                }
+                for future in as_completed(futures):
+                    processed.append(future.result())
+            n_attempted = len(candidates)
+            process_manual_commands_wrapper(config, portfolio, broker, logger, daemon_state)
+            _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
+        else:
+            for ticker in candidates:
+                now_remaining = max_seconds - (time.time() - cycle_start)
+                if now_remaining <= buffer_secs:
+                    logger.debug(f"  {ticker}: budget near exhausted ({now_remaining:.0f}s left)")
+                    skipped_budget.append(ticker)
+                    break
 
-            logger.debug(f"  Processing {ticker}")
-            result = _evaluate_ticker(ticker, overrides, defaults, logger, market_name, pin_open_strategy=False)
-            processed.append(result)
-            n_attempted += 1
+                process_manual_commands_wrapper(config, portfolio, broker, logger, daemon_state)
+                _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
+
+                logger.debug(f"  Processing {ticker}")
+                result = _evaluate_ticker(ticker, overrides, defaults, logger, market_name, pin_open_strategy=False)
+                processed.append(result)
+                n_attempted += 1
 
         cursor_end = advance_round_robin_cursor(
             market_name, round_robin_universe_len, cursor_start, n_attempted, daemon_state, logger
@@ -1800,6 +1823,9 @@ def main(argv: list[str] | None = None) -> int:
         "--stop-buffer-pct", type=float, default=1.5,
         help="Stop buffer percentage above strategy stop (default: 1.5)")
     parser.add_argument(
+        "--workers", type=int, default=None,
+        help="Parallel worker threads for round-robin Stage 2 (default: daytime.workers config or 1)")
+    parser.add_argument(
         "--send-nightly-roundup", action="store_true",
         help="Send nightly roundup email with today's results and exit")
     args = parser.parse_args(argv)
@@ -1838,6 +1864,8 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config()
     daemon_state = load_daemon_state()
     exec_cfg = config.get("execution", {})
+    if args.workers is None:
+        args.workers = int(config.get("daytime", {}).get("workers", 1))
 
     # A cycle_in_progress marker still set at startup means the previous
     # process was killed mid-cycle (e.g. a manual --takeover restart) rather
@@ -1992,6 +2020,7 @@ def main(argv: list[str] | None = None) -> int:
                             last_cycle_hour=last_cycle_hour,
                             protective_stops=args.protective_stops,
                             stop_buffer_pct=args.stop_buffer_pct,
+                            workers=args.workers,
                         )
 
                         daemon_state["cycle_in_progress"] = None
