@@ -91,10 +91,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--win-rate-weight", type=float, default=0.3)
     parser.add_argument("--lookback-days", type=int, default=60)
     parser.add_argument("--min-trend-quality", type=float, default=0.3)
-    parser.add_argument("--source", choices=["yfinance", "ibkr"], default="yfinance",
+    parser.add_argument("--source", choices=["yfinance", "ibkr"], default="ibkr",
                         help="Real-data source for the one-time ticker-universe bootstrap. "
-                             "Synthetic paths never touch this source. Default: yfinance "
-                             "(use --source ibkr only after ibkr_backfill_universe.py completes).")
+                             "Synthetic paths never touch this source. Default: ibkr "
+                             "(falls back to yfinance if no cache exists for a ticker).")
     parser.add_argument("--seasonal-volume", action="store_true", default=False)
     parser.add_argument("--n-paths", type=int, default=50,
                         help="Number of synthetic paths (default: 50)")

@@ -69,7 +69,7 @@ def resolve_strategy(
     min_trend_quality: float = 0.0,
     entry_overrides: dict | None = None,
     exit_overrides: dict | None = None,
-    source: str = "yfinance",
+    source: str = "ibkr",
 ) -> tuple[object, object]:
     """Instantiate the entry and exit classes for a named strategy.
 

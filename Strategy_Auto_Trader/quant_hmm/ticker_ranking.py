@@ -177,7 +177,7 @@ def _filter_candidates_by_daily_trend_quality(
 
 def run_ticker_backtest(
     ticker: str, strategy_name: str, vol_filter_ok: bool = True,
-    use_seasonal_volume: bool = False, source: str = "yfinance",
+    use_seasonal_volume: bool = False, source: str = "ibkr",
     df: pd.DataFrame | None = None,
     use_persistent_cache: bool = True,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
@@ -278,7 +278,7 @@ def candidates_from_detail(
 
 def fetch_and_extract(
     ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True,
-    use_seasonal_volume: bool = False, source: str = "yfinance",
+    use_seasonal_volume: bool = False, source: str = "ibkr",
     df: pd.DataFrame | None = None,
     use_persistent_cache: bool = True,
 ) -> list[Candidate]:
@@ -301,7 +301,7 @@ def fetch_and_extract(
 
 def fetch_extract_and_prices(
     ticker: str, strategy_name: str, vol_filter_tag: str, vol_filter_ok: bool = True,
-    use_seasonal_volume: bool = False, source: str = "yfinance",
+    use_seasonal_volume: bool = False, source: str = "ibkr",
     df: pd.DataFrame | None = None,
     use_persistent_cache: bool = True,
 ) -> tuple[list[Candidate], pd.Series | None, pd.Series | None]:
@@ -330,7 +330,7 @@ def generate_candidates(
     vol_filter_ok: bool = True,
     workers: int = 1,
     use_seasonal_volume: bool = False,
-    source: str = "yfinance",
+    source: str = "ibkr",
     df_by_ticker: dict[str, pd.DataFrame] | None = None,
     use_persistent_cache: bool = True,
 ) -> tuple[list[Candidate], dict[str, pd.Series], dict[str, pd.Series]]:

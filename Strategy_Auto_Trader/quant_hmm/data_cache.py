@@ -30,7 +30,7 @@ def clear_cache() -> None:
     _cache.clear()
 
 
-def fetch_hourly_cached(ticker: str, period: str = "730d", source: str = "yfinance"):
+def fetch_hourly_cached(ticker: str, period: str = "730d", source: str = "ibkr"):
     """fetch_hourly(), memoized per (ticker, period, source) for this process's
     lifetime.
 
@@ -47,7 +47,7 @@ def fetch_hourly_cached(ticker: str, period: str = "730d", source: str = "yfinan
     return cached
 
 
-def volatility_profile_cached(ticker: str, period: str = "2y", source: str = "yfinance"):
+def volatility_profile_cached(ticker: str, period: str = "2y", source: str = "ibkr"):
     """volatility_profile(), memoized per (ticker, period, source) for this
     process's lifetime.
 

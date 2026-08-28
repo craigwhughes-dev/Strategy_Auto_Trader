@@ -50,7 +50,7 @@ def _trend_quality_score(
     )
 
 
-def volatility_profile(ticker: str, period: str = "2y", source: str = "yfinance") -> dict | None:
+def volatility_profile(ticker: str, period: str = "2y", source: str = "ibkr") -> dict | None:
     """Compute volatility-character metrics for a ticker from daily data.
 
     source="ibkr" derives daily OHLC by resampling quant_engine.fetch_hourly's
@@ -73,7 +73,10 @@ def volatility_profile(ticker: str, period: str = "2y", source: str = "yfinance"
     if source == "ibkr":
         from .quant_engine import fetch_hourly
 
-        hourly = fetch_hourly(ticker, period=period, source="ibkr")
+        try:
+            hourly = fetch_hourly(ticker, period=period, source="ibkr")
+        except Exception:
+            return None
         if hourly is None or hourly.empty:
             return None
         df = hourly.resample("1D").agg({

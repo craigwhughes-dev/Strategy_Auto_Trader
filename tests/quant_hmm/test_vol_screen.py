@@ -22,7 +22,7 @@ class TestVolScreen:
         from Strategy_Auto_Trader.quant_hmm.vol_screen import volatility_profile
         close = np.linspace(100.0, 200.0, 300)  # monotonic uptrend
         df = self._daily_df(close)
-        with mock.patch("yfinance.download", return_value=df):
+        with mock.patch("Strategy_Auto_Trader.quant_hmm.quant_engine.fetch_hourly", return_value=df):
             profile = volatility_profile("TEST")
         assert profile is not None
         assert profile["efficiency_ratio"] > 0.95  # monotonic -> path == net change
@@ -33,7 +33,7 @@ class TestVolScreen:
         # Zigzag that ends near where it started -> large path length, small net change
         close = 100.0 + 10.0 * np.sin(np.arange(n) * (np.pi / 2))
         df = self._daily_df(close)
-        with mock.patch("yfinance.download", return_value=df):
+        with mock.patch("Strategy_Auto_Trader.quant_hmm.quant_engine.fetch_hourly", return_value=df):
             profile = volatility_profile("TEST")
         assert profile is not None
         assert profile["efficiency_ratio"] < 0.1
@@ -43,26 +43,27 @@ class TestVolScreen:
         n = 300
         trending = self._daily_df(np.linspace(100.0, 160.0, n))
         choppy = self._daily_df(100.0 + 10.0 * np.sin(np.arange(n) * (np.pi / 2)))
-        with mock.patch("yfinance.download", return_value=trending):
+        with mock.patch("Strategy_Auto_Trader.quant_hmm.quant_engine.fetch_hourly", return_value=trending):
             trend_profile = volatility_profile("TREND")
-        with mock.patch("yfinance.download", return_value=choppy):
+        with mock.patch("Strategy_Auto_Trader.quant_hmm.quant_engine.fetch_hourly", return_value=choppy):
             choppy_profile = volatility_profile("CHOP")
         assert trend_profile["trend_quality"] > choppy_profile["trend_quality"]
 
     def test_volatility_profile_too_short_returns_none(self):
         from Strategy_Auto_Trader.quant_hmm.vol_screen import volatility_profile
         df = self._daily_df(np.full(50, 100.0))
-        with mock.patch("yfinance.download", return_value=df):
+        with mock.patch("Strategy_Auto_Trader.quant_hmm.quant_engine.fetch_hourly", return_value=df):
             assert volatility_profile("TEST") is None
 
     def test_volatility_profile_empty_download_returns_none(self):
         from Strategy_Auto_Trader.quant_hmm.vol_screen import volatility_profile
-        with mock.patch("yfinance.download", return_value=pd.DataFrame()):
+        with mock.patch("Strategy_Auto_Trader.quant_hmm.quant_engine.fetch_hourly", return_value=None):
             assert volatility_profile("TEST") is None
 
     def test_volatility_profile_exception_returns_none(self):
         from Strategy_Auto_Trader.quant_hmm.vol_screen import volatility_profile
-        with mock.patch("yfinance.download", side_effect=Exception("network error")):
+        with mock.patch("Strategy_Auto_Trader.quant_hmm.quant_engine.fetch_hourly",
+                        side_effect=Exception("network error")):
             assert volatility_profile("TEST") is None
 
     def test_volatility_profile_source_ibkr_resamples_hourly_cache(self):
