@@ -416,10 +416,12 @@ def load_universe() -> list[str]:
     return data["tickers"]
 
 
-def build_sp_ftse_universe(out_path: Path = SP_FTSE_UNIVERSE_FILE) -> list[str]:
+def build_sp_ftse_universe(out_path: Path | None = None) -> list[str]:
     """Fetch fresh S&P 500 + FTSE 100 constituent lists only (no watchlist
     union) and cache them, so a multi-strategy sweep over just these two
     indices fetches Wikipedia once instead of once per strategy."""
+    if out_path is None:
+        out_path = SP_FTSE_UNIVERSE_FILE
     sources: dict[str, list[str]] = {}
     for name, fn in (("ftse100", _ftse100_tickers), ("sp500", _sp500_tickers)):
         sources[name] = fn()
