@@ -1088,7 +1088,19 @@ def process_cycle(
                 }
                 for future in as_completed(futures):
                     processed.append(future.result())
-            n_attempted = len(candidates)
+                    n_attempted += 1
+                    process_manual_commands_wrapper(config, portfolio, broker, logger, daemon_state)
+                    _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
+                    now_remaining = max_seconds - (time.time() - cycle_start)
+                    if now_remaining <= buffer_secs:
+                        cancelled = [ticker for f, ticker in futures.items() if f.cancel()]
+                        skipped_budget.extend(cancelled)
+                        if cancelled:
+                            logger.info(
+                                f"[{market_name}] Parallel budget exhausted "
+                                f"({now_remaining:.0f}s left), cancelled {len(cancelled)} pending"
+                            )
+                        break
             process_manual_commands_wrapper(config, portfolio, broker, logger, daemon_state)
             _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
         else:

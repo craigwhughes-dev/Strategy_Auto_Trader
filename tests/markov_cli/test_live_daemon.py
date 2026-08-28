@@ -2743,6 +2743,81 @@ def test_process_cycle_parallel_state_lock_prevents_lost_writes(monkeypatch):
     assert sorted(lock_acquisitions) == ["AAPL", "MSFT"]
 
 
+def test_process_cycle_parallel_manual_commands_called_per_future(monkeypatch):
+    """process_manual_commands_wrapper is called after each completed future, not just once."""
+    from Strategy_Auto_Trader.markov_cli import batch
+
+    cmd_call_count = []
+
+    def fake_process_ticker(ticker_cfg, defaults, send_email, state_lock=None):
+        return {"ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0}
+
+    def fake_manual_commands(config, portfolio, broker, logger, daemon_state):
+        cmd_call_count.append(1)
+
+    monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL", "MSFT", "GOOG"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
+    monkeypatch.setattr(live_daemon, "process_manual_commands_wrapper", fake_manual_commands)
+
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    live_daemon.process_cycle(
+        "test_market", {}, config, {"cursors": {}},
+        portfolio=None, broker=None, logger=mock.Mock(),
+        workers=2,
+    )
+
+    # Called at minimum once per future (3 tickers) plus before/after the executor
+    assert len(cmd_call_count) >= 3
+
+
+def test_process_cycle_parallel_budget_cancels_pending(monkeypatch):
+    """Budget check in as_completed loop cancels queued futures and logs exhaustion."""
+    import time as time_module
+    from Strategy_Auto_Trader.markov_cli import batch
+
+    # Intercept time.time used inside live_daemon: return a value that appears
+    # to have blown past the budget after the cycle_start capture.
+    _real_time = time_module.time
+    _call_n = [0]
+    _budget_base = [None]
+
+    def mock_time():
+        _call_n[0] += 1
+        if _call_n[0] == 1:
+            # First call is cycle_start; capture the base and return it normally.
+            t = _real_time()
+            _budget_base[0] = t
+            return t
+        # Every subsequent call returns a value 9999s past cycle_start,
+        # so the budget check fires immediately after the first future completes.
+        return (_budget_base[0] or _real_time()) + 9999
+
+    def fake_process_ticker(ticker_cfg, defaults, send_email, state_lock=None):
+        return {"ticker": ticker_cfg["ticker"], "status": "FAIL: stub", "time": 0.0}
+
+    monkeypatch.setattr(time_module, "time", mock_time)
+    monkeypatch.setattr(batch, "process_ticker", fake_process_ticker)
+    # 6 tickers, workers=2 — some will be in the queue when budget fires
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers",
+                        lambda m, l: ["T1", "T2", "T3", "T4", "T5", "T6"])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
+
+    mock_logger = mock.Mock()
+    config = {"daytime": {"max_seconds_per_cycle": 100, "cycle_buffer_minutes": 0}}
+    n = live_daemon.process_cycle(
+        "test_market", {}, config, {"cursors": {}},
+        portfolio=None, broker=None, logger=mock_logger,
+        workers=2,
+    )
+
+    # Fewer than all 6 collected (budget fired before draining the queue)
+    assert n < 6
+    # Logger should have recorded the exhaustion (either budget log line or cycle-done skipped count)
+    log_text = " ".join(str(c) for c in mock_logger.info.call_args_list)
+    assert "budget" in log_text.lower() or "skipped" in log_text.lower()
+
+
 class TestRetryPendingTickers:
     """retry_pending_tickers: immediate re-evaluation of interrupted trades,
     instead of waiting for that market's next hourly cycle."""
