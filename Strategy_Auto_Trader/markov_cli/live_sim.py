@@ -381,9 +381,11 @@ def main(argv: list[str] | None = None) -> int:
                              "(default: data/journals/live_sim_position_summary_<timestamp>.csv). "
                              "Additive output — does not change --journal's default path/format.")
     parser.add_argument("--seasonal-volume", dest="seasonal_volume", action="store_true",
-                        default=False,
+                        default=True,
                         help="Normalise volume ratio by same-hour-of-day trailing mean instead of "
-                             "flat rolling-20 mean. Off by default; not enabled in live daemon.")
+                             "flat rolling-20 mean. On by default — backtested to improve results "
+                             "and matches the live daemon's config "
+                             "(BACKTEST_LIVE_PARITY_PLAN.md Step 3b, decided 2026-08-28).")
     parser.add_argument("--source", choices=["yfinance", "ibkr"], default="yfinance",
                         help="Hourly data source for every ticker in this run: yfinance (default, "
                              "day-to-day research) or the local incremental IBKR-backed cache "

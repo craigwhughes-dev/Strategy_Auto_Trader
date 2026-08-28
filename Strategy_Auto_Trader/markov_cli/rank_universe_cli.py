@@ -45,8 +45,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Comma-separated pre-filtered ticker list. If omitted, loads the full S&P500+FTSE universe.",
     )
     parser.add_argument("--seasonal-volume", dest="seasonal_volume", action="store_true",
-                        default=False,
-                        help="Normalise volume ratio by same-hour-of-day trailing mean.")
+                        default=True,
+                        help="Normalise volume ratio by same-hour-of-day trailing mean. On by "
+                             "default, matching the daemon's overnight top-k ranking config "
+                             "(BACKTEST_LIVE_PARITY_PLAN.md Step 3b, decided 2026-08-28).")
     args = parser.parse_args(argv)
 
     if args.tickers:

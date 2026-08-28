@@ -126,10 +126,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
     # Volume seasonality
     parser.add_argument("--seasonal-volume", dest="seasonal_volume", action="store_true",
-                        default=False,
+                        default=True,
                         help="Normalise volume ratio by same-hour-of-day trailing mean "
-                             "instead of flat rolling-20 average (opt-in, unvalidated — "
-                             "run with and without to compare before enabling live)")
+                             "instead of flat rolling-20 average. On by default — "
+                             "backtested to improve results and matches the live daemon's "
+                             "config (BACKTEST_LIVE_PARITY_PLAN.md Step 3b, decided 2026-08-28).")
 
     # Exit indicators — default: the selected strategy's own value.
     parser.add_argument("--exit-rsi-reversal", dest="exit_rsi", action="store_true",
@@ -412,9 +413,12 @@ def main(argv: list[str] | None = None) -> int:
     # entry_overrides/exit_overrides (built above, before SUPPRESS backfill)
     # carry only the CLI flags the user explicitly passed — everything else
     # falls through to the selected strategy's own defaults.
-    # Daily mode: vol screen is calibrated on hourly data — hourly TQ is
-    # irrelevant for daily-bar research, so bypass it unconditionally.
-    vol_filter_ok = True if args.interval == "1d" else None
+    # Always True: matches live_sim.py/full_scan.py's hardcoded True
+    # (BACKTEST_LIVE_PARITY_PLAN.md Step 3, decision (a), 2026-08-28) — the
+    # daemon's per-ticker subprocess calls run through here, so this is what
+    # makes live stop vetoing on trend_quality instead of the backtest that
+    # selected the strategy starting to veto.
+    vol_filter_ok = True
     entry_s, exit_s = resolve_strategy(
         args.strategy, ticker=args.ticker,
         vol_filter_ok=vol_filter_ok,
