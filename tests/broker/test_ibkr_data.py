@@ -59,16 +59,20 @@ class TestFetchHourly:
     def test_bootstrap_pages_until_min_days_covered(self, tmp_path, monkeypatch):
         """Brand-new ticker, no cache: pages until min_days (from `period`)
         is covered — each "6 M" page counts as 180 days regardless of the
-        bar count returned, so a 200-day bootstrap needs two pages."""
+        bar count returned, so a 200-day bootstrap needs two pages.
+
+        Both pages use recent timestamps so they survive _truncate_to_period's
+        period=200d window (bars from now-190d to now-10d, all within 200d)."""
         pytest.importorskip("ib_async")
         from unittest.mock import MagicMock
         monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
 
         client = IBKRDataClient()
         client._ib = MagicMock()
-        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        page1 = _make_page(start + timedelta(days=180), 5)
-        page2 = _make_page(start, 5)
+        # Use recent dates so all bars fall within the requested 200d window.
+        start = datetime.now(timezone.utc) - timedelta(days=190)
+        page1 = _make_page(start + timedelta(days=180), 5)  # ~now-10d
+        page2 = _make_page(start, 5)                         # ~now-190d
         client._ib.reqHistoricalData.side_effect = [page1, page2]
 
         out = client.fetch_hourly("AAPL", period="200d", use_cache=False)
@@ -164,7 +168,9 @@ class TestFetchHourly:
 
     def test_connection_failure_falls_back_to_cache(self, monkeypatch, tmp_path):
         monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
-        idx = pd.date_range("2025-01-01", periods=5, freq="h", tz="UTC")
+        # Use recent timestamps so they fall within the requested period window.
+        idx = pd.date_range(
+            pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=10), periods=5, freq="h", tz="UTC")
         cached = pd.DataFrame(
             {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 100}, index=idx)
         ibkr_data._save_cache("AAPL", cached)
@@ -219,6 +225,30 @@ class TestFetchHourly:
 
         assert len(out) == 5
         assert ibkr_data._cache_path("AAPL").stat().st_mtime_ns == mtime_before
+
+
+class TestTruncateToPeriod:
+    def test_clips_old_bars_to_period_window(self):
+        """Cache with 3.5y of bars must be clipped to the requested 2y window at read time."""
+        old_idx = pd.date_range(
+            pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=1280), periods=50, freq="D", tz="UTC")
+        recent_idx = pd.date_range(
+            pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=700), periods=50, freq="D", tz="UTC")
+        df = pd.DataFrame(
+            {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 1},
+            index=old_idx.append(recent_idx))
+        result = ibkr_data._truncate_to_period(df, "730d")
+        assert result is not None
+        assert len(result) == 50  # old 50 bars dropped, recent 50 kept
+        assert (result.index >= pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=730)).all()
+
+    def test_none_passthrough(self):
+        assert ibkr_data._truncate_to_period(None, "730d") is None
+
+    def test_empty_passthrough(self):
+        empty = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+        assert ibkr_data._truncate_to_period(empty, "730d") is not None
+        assert len(ibkr_data._truncate_to_period(empty, "730d")) == 0
 
 
 class TestPeriodToDays:

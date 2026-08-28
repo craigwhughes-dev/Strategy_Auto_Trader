@@ -103,6 +103,20 @@ def _resample_30min_aligned(df: pd.DataFrame | None) -> pd.DataFrame | None:
     )
 
 
+def _truncate_to_period(df: pd.DataFrame | None, period: str) -> pd.DataFrame | None:
+    """Clip df to only the most recent `period` of bars (read-time only; cache file unchanged).
+
+    The on-disk IBKR cache is append-only and may contain more history than the
+    requested period — this ensures callers like volatility_profile() score the
+    same window as the yfinance branch, preventing trend_quality sign-flips from
+    the extra history (see BACKTEST_LIVE_PARITY_PLAN Step 1).
+    """
+    if df is None or df.empty:
+        return df
+    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=_period_to_days(period))
+    return df[df.index >= cutoff]
+
+
 class IBKRDataClient:
     """Wraps ib_async for historical-bar requests.
 
@@ -237,13 +251,13 @@ class IBKRDataClient:
 
         owns_connection = self._ib is None
         if owns_connection and not self.connect():
-            return _resample_30min_aligned(cached)
+            return _resample_30min_aligned(_truncate_to_period(cached, period))
 
         try:
             from ib_async import Stock
             contract = Stock(*ibkr_contract_params(ticker))
             if not self._qualify(ticker, contract):
-                return _resample_30min_aligned(cached)
+                return _resample_30min_aligned(_truncate_to_period(cached, period))
             if cached is not None:
                 new_df = self._fetch_pages(contract, what_to_show=what_to_show,
                                             stop_at=cached.index[-1])
@@ -252,7 +266,7 @@ class IBKRDataClient:
                                             min_days=_period_to_days(period))
         except Exception:
             logger.warning("fetch_hourly(%s) failed", ticker, exc_info=True)
-            return _resample_30min_aligned(cached)
+            return _resample_30min_aligned(_truncate_to_period(cached, period))
         finally:
             if owns_connection:
                 self.disconnect()
@@ -264,10 +278,10 @@ class IBKRDataClient:
             merged = new_df
 
         if merged.empty:
-            return _resample_30min_aligned(cached)
+            return _resample_30min_aligned(_truncate_to_period(cached, period))
         if use_cache and not new_df.empty:
             _save_cache(ticker, merged)
-        return _resample_30min_aligned(merged)
+        return _resample_30min_aligned(_truncate_to_period(merged, period))
 
     def fetch_recent_raw(self, ticker: str, lookback_days: int,
                           what_to_show: str = "TRADES") -> pd.DataFrame | None:
