@@ -27,6 +27,7 @@ import argparse
 import json
 import subprocess
 import sys
+import warnings
 from datetime import date
 from pathlib import Path
 
@@ -99,6 +100,43 @@ def _sim_entries(journal_path: Path, dates: set[date]) -> pd.DataFrame:
     return df[df["_date"].isin(dates)].copy()
 
 
+def _open_position_entry_date(detail: "pd.DataFrame") -> date | None:
+    """Return the entry date of the current open trade if position > 0 on last bar, else None.
+
+    Finds the first bar of the trailing contiguous block where position > 0.
+    """
+    if detail is None or detail.empty or detail.iloc[-1]["position"] <= 0:
+        return None
+    # walk backwards to find where the current trade started
+    for i in range(len(detail) - 2, -1, -1):
+        if detail.iloc[i]["position"] <= 0:
+            entry_ts = detail.index[i + 1]
+            return entry_ts.date()
+    # position > 0 for the entire history (unlikely)
+    return detail.index[0].date()
+
+
+def _check_open_positions(
+    tickers: list[str], strategy: str, source: str, signal_dates: set[date]
+) -> set[str]:
+    """Return subset of tickers where the backtest ended with an open position
+    whose entry date falls within signal_dates. Uses clientId=3 (clear of all
+    reserved IDs) for the inline IBKR data fetch."""
+    from Strategy_Auto_Trader.quant_hmm.ticker_ranking import run_ticker_backtest  # noqa: PLC0415
+
+    matched: set[str] = set()
+    for ticker in tickers:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore")
+            detail, _ = run_ticker_backtest(
+                ticker, strategy, vol_filter_ok=True, source=source, client_id=3
+            )
+        entry_date = _open_position_entry_date(detail)
+        if entry_date is not None and entry_date in signal_dates:
+            matched.add(ticker)
+    return matched
+
+
 def _daemon_entries(target_date: date) -> list[dict]:
     path = STATE_DIR / "execution_state.json"
     with open(path, encoding="utf-8") as f:
@@ -113,7 +151,7 @@ def _daemon_entries(target_date: date) -> list[dict]:
 
 
 def _build_report(target_date: date, prev_date: date, sim_df: pd.DataFrame,
-                  daemon_entries: list[dict]) -> str:
+                  daemon_entries: list[dict], open_matches: set[str]) -> str:
     lines: list[str] = []
     lines.append(f"\n{'='*60}")
     lines.append(f"  Backtest vs Daemon — daemon date: {target_date}")
@@ -123,8 +161,8 @@ def _build_report(target_date: date, prev_date: date, sim_df: pd.DataFrame,
     sim_tickers = set(sim_df["ticker"].tolist()) if not sim_df.empty else set()
     daemon_tickers = {e["ticker"] for e in daemon_entries}
 
-    # --- Sim entries ---
-    lines.append(f"Sim entries ({len(sim_tickers)}):")
+    # --- Sim entries (closed trades) ---
+    lines.append(f"Sim entries, closed ({len(sim_tickers)}):")
     if sim_df.empty:
         lines.append("  (none)")
     else:
@@ -139,6 +177,14 @@ def _build_report(target_date: date, prev_date: date, sim_df: pd.DataFrame,
             if "entry_price" in row:
                 parts.append(f"price={row['entry_price']:.4g}")
             lines.append("  ".join(parts))
+
+    # --- Sim open positions (entered in window, not yet closed) ---
+    lines.append(f"\nSim entries, open/in-progress ({len(open_matches)}):")
+    if open_matches:
+        for t in sorted(open_matches):
+            lines.append(f"  {t}")
+    else:
+        lines.append("  (none)")
 
     lines.append("")
 
@@ -157,13 +203,16 @@ def _build_report(target_date: date, prev_date: date, sim_df: pd.DataFrame,
     lines.append("")
 
     # --- Diff ---
-    both = sim_tickers & daemon_tickers
-    sim_only = sim_tickers - daemon_tickers
-    daemon_only = daemon_tickers - sim_tickers
+    all_sim = sim_tickers | open_matches
+    both = all_sim & daemon_tickers
+    sim_only = all_sim - daemon_tickers
+    daemon_only = daemon_tickers - all_sim
 
     lines.append(f"Match (sim AND daemon): {len(both)}")
     if both:
-        lines.append("  " + ", ".join(sorted(both)))
+        for t in sorted(both):
+            suffix = " [open]" if t in open_matches else ""
+            lines.append(f"  {t}{suffix}")
 
     lines.append(f"\nSim only — predicted but daemon didn't enter: {len(sim_only)}")
     if sim_only:
@@ -209,7 +258,21 @@ def main(argv: list[str] | None = None) -> int:
     sim_df = _sim_entries(journal_path, {prev_date, target_date})
     daemon = _daemon_entries(target_date)
 
-    report = _build_report(target_date, prev_date, sim_df, daemon)
+    signal_dates = {prev_date, target_date}
+    daemon_tickers = {e["ticker"] for e in daemon}
+    sim_tickers = set(sim_df["ticker"].tolist()) if not sim_df.empty else set()
+    daemon_only = daemon_tickers - sim_tickers
+
+    # For daemon-only entries, check whether the backtest also opened that position
+    # but it's still in-flight (not yet closed) at the end of the data window.
+    # These are correct predictions, not divergences — candidates_from_detail only
+    # returns closed trades so live entries show up as "missing" until they close.
+    open_matches: set[str] = set()
+    if daemon_only:
+        print(f"Checking {len(daemon_only)} daemon-only ticker(s) for in-progress backtest positions...")
+        open_matches = _check_open_positions(list(daemon_only), strategy, source, signal_dates)
+
+    report = _build_report(target_date, prev_date, sim_df, daemon, open_matches)
     print(report)
 
     LOGS_DIR.mkdir(exist_ok=True)
