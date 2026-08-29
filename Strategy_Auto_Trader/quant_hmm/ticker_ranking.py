@@ -10,6 +10,7 @@ silently drift from what live_sim.py's --top-k sweeps actually validated.
 from __future__ import annotations
 
 import logging
+import multiprocessing
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -30,6 +31,16 @@ logger = logging.getLogger(__name__)
 
 
 _HMM_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "cache" / "hmm_cache"
+
+# Parallel worker client IDs start at 20 — clear of reserved IDs
+# (1=execution daemon, 2=data-fetch default, 4=reconcile, 7/9=tests).
+_WORKER_CLIENT_ID_BASE = 20
+_worker_client_id: int = 2  # overwritten per worker process by _init_worker_client_id
+
+
+def _init_worker_client_id(q: "multiprocessing.Queue[int]") -> None:
+    global _worker_client_id
+    _worker_client_id = q.get()
 
 
 @dataclass
@@ -180,6 +191,7 @@ def run_ticker_backtest(
     use_seasonal_volume: bool = False, source: str = "ibkr",
     df: pd.DataFrame | None = None,
     use_persistent_cache: bool = True,
+    client_id: int = 2,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """Fetch data and run one ticker's full-history backtest.
 
@@ -208,7 +220,7 @@ def run_ticker_backtest(
     High/Low (e.g. for rolling_trend_quality) don't have to re-fetch.
     """
     if df is None:
-        df = fetch_hourly_cached(ticker, period="730d", source=source)
+        df = fetch_hourly_cached(ticker, period="730d", source=source, client_id=client_id)
     if df is None or df.empty:
         return None, None
     if isinstance(df.columns, pd.MultiIndex):
@@ -281,6 +293,7 @@ def fetch_and_extract(
     use_seasonal_volume: bool = False, source: str = "ibkr",
     df: pd.DataFrame | None = None,
     use_persistent_cache: bool = True,
+    client_id: int = 2,
 ) -> list[Candidate]:
     """Run one ticker's full-history backtest and extract its round-trip trades.
 
@@ -292,7 +305,8 @@ def fetch_and_extract(
     """
     detail, _df = run_ticker_backtest(ticker, strategy_name, vol_filter_ok,
                                       use_seasonal_volume=use_seasonal_volume, source=source,
-                                      df=df, use_persistent_cache=use_persistent_cache)
+                                      df=df, use_persistent_cache=use_persistent_cache,
+                                      client_id=client_id)
     if detail is None:
         logger.info(f"  {ticker}: no data or insufficient data, skipping")
         return []
@@ -315,7 +329,8 @@ def fetch_extract_and_prices(
     """
     detail, df_out = run_ticker_backtest(ticker, strategy_name, vol_filter_ok,
                                          use_seasonal_volume=use_seasonal_volume, source=source,
-                                         df=df, use_persistent_cache=use_persistent_cache)
+                                         df=df, use_persistent_cache=use_persistent_cache,
+                                         client_id=_worker_client_id)
     if detail is None:
         return [], None, None
     candidates = candidates_from_detail(ticker, detail, strategy_name, vol_filter_tag)
@@ -358,7 +373,14 @@ def generate_candidates(
     trend_quality_by_ticker: dict[str, pd.Series] = {}
 
     if workers > 1 and len(tickers) > 1:
-        with ProcessPoolExecutor(max_workers=workers) as executor:
+        id_queue: multiprocessing.Queue = multiprocessing.Queue()
+        for i in range(workers):
+            id_queue.put(_WORKER_CLIENT_ID_BASE + i)
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=_init_worker_client_id,
+            initargs=(id_queue,),
+        ) as executor:
             futures = {
                 executor.submit(
                     fetch_extract_and_prices, t, strategy_name, vol_filter_tag,

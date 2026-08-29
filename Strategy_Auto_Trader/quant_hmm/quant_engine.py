@@ -11,6 +11,7 @@ Core principles:
 from __future__ import annotations
 
 import logging
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -20,7 +21,7 @@ from ..plugins.interest import IbkrTieredInterest
 _log = logging.getLogger(__name__)
 
 
-def fetch_hourly(ticker: str, period: str = "730d", source: str = "ibkr") -> pd.DataFrame | None:
+def fetch_hourly(ticker: str, period: str = "730d", source: str = "ibkr", client_id: int = 2) -> pd.DataFrame | None:
     """Fetch hourly OHLCV data.
 
     source="ibkr" tries the incremental IBKR-backed local cache first
@@ -32,7 +33,7 @@ def fetch_hourly(ticker: str, period: str = "730d", source: str = "ibkr") -> pd.
     fall through to yfinance without a real connection attempt."""
     if source == "ibkr":
         from ..broker.ibkr_data import IBKRDataClient
-        df = IBKRDataClient().fetch_hourly(ticker, period=period)
+        df = IBKRDataClient(client_id=client_id).fetch_hourly(ticker, period=period)
         if df is not None and not df.empty:
             return df
 
@@ -96,7 +97,9 @@ def fit_hmm_expanding(
             n_iter=n_iter, random_state=seed,
         )
         try:
-            model.fit(X)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*not converging.*")
+                model.fit(X)
             score = float(model.score(X))
         except Exception:
             continue

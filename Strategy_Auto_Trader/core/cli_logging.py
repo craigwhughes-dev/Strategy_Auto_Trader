@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -92,7 +93,7 @@ def setup_cli_logger(cli_name: str) -> Path | None:
     file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     root.addHandler(file_handler)
 
-    console_handler = logging.StreamHandler()
+    console_handler = logging.StreamHandler(stream=sys.stdout)
     console_handler.setFormatter(logging.Formatter("%(message)s"))
     root.addHandler(console_handler)
 

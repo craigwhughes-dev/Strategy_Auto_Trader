@@ -28,14 +28,14 @@ class TestRunTickerBacktestSource:
                         return_value=None) as mock_fetch:
             run_ticker_backtest("AAPL", "default", source="ibkr")
 
-        mock_fetch.assert_called_once_with("AAPL", period="730d", source="ibkr")
+        mock_fetch.assert_called_once_with("AAPL", period="730d", source="ibkr", client_id=2)
 
     def test_default_source_is_ibkr(self):
         with mock.patch("Strategy_Auto_Trader.quant_hmm.ticker_ranking.fetch_hourly_cached",
                         return_value=None) as mock_fetch:
             run_ticker_backtest("AAPL", "default")
 
-        mock_fetch.assert_called_once_with("AAPL", period="730d", source="ibkr")
+        mock_fetch.assert_called_once_with("AAPL", period="730d", source="ibkr", client_id=2)
 
 
 class _ImmediateExecutor:

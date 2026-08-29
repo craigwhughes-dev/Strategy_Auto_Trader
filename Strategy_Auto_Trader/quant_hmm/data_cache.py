@@ -30,7 +30,7 @@ def clear_cache() -> None:
     _cache.clear()
 
 
-def fetch_hourly_cached(ticker: str, period: str = "730d", source: str = "ibkr"):
+def fetch_hourly_cached(ticker: str, period: str = "730d", source: str = "ibkr", client_id: int = 2):
     """fetch_hourly(), memoized per (ticker, period, source) for this process's
     lifetime.
 
@@ -41,7 +41,7 @@ def fetch_hourly_cached(ticker: str, period: str = "730d", source: str = "ibkr")
     key = ("hourly", ticker, period, source)
     cached = _cache.get(key)
     if cached is None:
-        cached = fetch_hourly(ticker, period=period, source=source)
+        cached = fetch_hourly(ticker, period=period, source=source, client_id=client_id)
         if cached is not None and not cached.empty:
             _cache[key] = cached
     return cached
