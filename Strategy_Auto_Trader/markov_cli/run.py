@@ -30,6 +30,7 @@ from ..plugins.kelly_sizer import FixedSizer, KellySizer
 from ..plugins.context_adjuster import NullAdjuster, SentimentAdjuster
 from ..strategy.base.registry import STRATEGY_REGISTRY, resolve_strategy
 from ..core.cli_logging import setup_cli_logger
+from ..core.atomic_io import atomic_write_csv
 
 logger = logging.getLogger(__name__)
 
@@ -494,7 +495,7 @@ def main(argv: list[str] | None = None) -> int:
     _print_backtest_summary(bt)
 
     detail = bt["detail"]
-    detail.to_csv(run_dir / "compositeBacktest.csv")
+    atomic_write_csv(run_dir / "compositeBacktest.csv", detail)
 
     # Current signal from last bar
     last_row = detail.iloc[-1]

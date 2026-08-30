@@ -194,7 +194,7 @@ def _collect_results(ticker: str) -> dict | None:
     if not csv_path.exists():
         return None
 
-    detail = pd.read_csv(csv_path, index_col="date")
+    detail = pd.read_csv(csv_path, index_col="date", on_bad_lines="warn")
     if detail.empty:
         return None
 
