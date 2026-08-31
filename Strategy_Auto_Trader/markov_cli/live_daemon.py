@@ -125,6 +125,7 @@ def setup_logging() -> logging.Logger:
 # the OS releases the lock the instant this process dies, so a held lock
 # always means a live daemon — no PID-liveness guessing.
 _lock_handle = None
+_last_reconnect_failure: float = 0.0  # epoch secs; suppresses repeated reconnect attempts
 
 _DAEMON_CMDLINE_MARKERS = ("markov_cli.live_daemon",
                            "markov_cli\\live_daemon.py",
@@ -1415,9 +1416,14 @@ def check_protective_stops(
     and cancels orphan stops with no matching position.
     """
     if not broker.is_connected():
+        global _last_reconnect_failure
+        now_ts = time.time()
+        if now_ts - _last_reconnect_failure < 600:
+            return  # suppress reconnect spam; TWS likely down/weekend
         try:
             broker.connect()
         except Exception as e:
+            _last_reconnect_failure = now_ts
             logger.warning(f"check_protective_stops: broker reconnect failed: {e}")
             return
 
@@ -2036,8 +2042,13 @@ def main(argv: list[str] | None = None) -> int:
                         stop_buffer_pct=args.stop_buffer_pct,
                     )
 
-                # Check protective stops (before ticker processing)
-                if args.protective_stops and not dry_run and startup_reconciliation_done:
+                # Check protective stops (before ticker processing) — only when at
+                # least one market is open; TWS refuses connections on weekends/off-hours.
+                _any_market_open = any(
+                    is_trading_hours(mcfg, logger, market_name=mname)
+                    for mname, mcfg in config.get("markets", {}).items()
+                )
+                if args.protective_stops and not dry_run and startup_reconciliation_done and _any_market_open:
                     check_protective_stops(portfolio, broker, logger, args.stop_buffer_pct)
 
                 # Resolve any entry-order cancels IBKR hasn't confirmed yet

@@ -171,7 +171,7 @@ class PersistentHMMRegimeModel(HMMRegimeModel):
             ) * 100
             _log.warning(
                 "%s: HMM cache close prices differ by up to %.4f%% "
-                "(yfinance data revision?) — cold refit will run",
+                "(price adjustment — dividend/split?) — cold refit will run",
                 name, max_diff_pct,
             )
             self._pending_relabel_check = {
