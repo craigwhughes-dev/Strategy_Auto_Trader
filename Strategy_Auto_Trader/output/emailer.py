@@ -389,6 +389,28 @@ def send_pending_cancel_timeout_alert(
     logger.info(f"  Pending-cancel timeout alert sent: {subject}")
 
 
+def send_tws_unreachable_alert(host: str, port: int, minutes: int) -> None:
+    """Alert that TWS/Gateway has been unreachable for an extended period.
+
+    Fires once after N consecutive reconciliation failures; suppressed until
+    reconciliation succeeds and the counter resets."""
+    html = f"""<html><body style="margin:0;padding:20px;background:#0f1117;font-family:system-ui,sans-serif;color:#e0e0e0">
+<div style="max-width:700px;margin:0 auto">
+  <h1 style="color:#ef9a9a;margin:0 0 4px">TWS/Gateway unreachable</h1>
+  <div style="color:#888;margin-bottom:16px">Startup reconciliation has been failing for {minutes} minutes</div>
+  <div style="background:#2a1a1a;border:1px solid #4a2a2a;border-radius:8px;padding:12px 16px;margin:16px 0">
+    <p style="color:#ddd;margin:0">Cannot connect to TWS/Gateway at <strong>{host}:{port}</strong>.</p>
+    <p style="color:#ddd;margin:8px 0 0">New entries are halted. The daemon is alive and will resume automatically
+    once TWS is restarted and reconciliation succeeds.</p>
+  </div>
+  <p style="color:#888;font-size:0.85em">No further alerts will be sent for this outage.</p>
+</div></body></html>"""
+
+    subject = f"TWS unreachable at {host}:{port} — daemon halted for {minutes} min"
+    _send(subject, html)
+    logger.info(f"  TWS-unreachable alert sent: {subject}")
+
+
 def send_portfolio_status(positions: list[dict]) -> None:
     """Send a portfolio status email showing all active trades with P&L since entry."""
     if not positions:

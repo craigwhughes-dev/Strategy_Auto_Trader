@@ -1558,7 +1558,7 @@ def run_reconciliation(
         try:
             broker.connect()
         except Exception as e:
-            logger.error(f"Reconciliation: broker connect failed: {e}")
+            logger.warning(f"Reconciliation: broker connect failed: {e}")
             return "error"
 
     logger.debug("Reconciliation: fetching broker positions...")
@@ -1997,6 +1997,8 @@ def main(argv: list[str] | None = None) -> int:
             logger.warning("Continuing anyway; will retry on first trade attempt")
 
     startup_reconciliation_done = False
+    _recon_fail_count = 0
+    _recon_unreachable_alerted = False
     if not dry_run:
         logger.warning("New entries halted pending startup reconciliation")
 
@@ -2023,6 +2025,8 @@ def main(argv: list[str] | None = None) -> int:
                 if not dry_run and (not startup_reconciliation_done or daemon_state.get("needs_reconciliation")):
                     if run_startup_reconciliation(daemon_state, portfolio, broker, logger):
                         startup_reconciliation_done = True
+                        _recon_fail_count = 0
+                        _recon_unreachable_alerted = False
                         daemon_state["needs_reconciliation"] = False
                         save_daemon_state(daemon_state)
                         logger.info("Startup reconciliation complete — resuming normal entry evaluation")
@@ -2033,6 +2037,19 @@ def main(argv: list[str] | None = None) -> int:
                             protective_stops=args.protective_stops,
                             stop_buffer_pct=args.stop_buffer_pct,
                         )
+                    else:
+                        _recon_fail_count += 1
+                        _ALERT_AFTER_FAILURES = 5
+                        if _recon_fail_count >= _ALERT_AFTER_FAILURES and not _recon_unreachable_alerted:
+                            elapsed_min = (_recon_fail_count * poll_interval) // 60
+                            try:
+                                from ..output.emailer import send_tws_unreachable_alert
+                                send_tws_unreachable_alert(
+                                    broker._host, broker._port, elapsed_min
+                                )
+                            except Exception as _e:
+                                logger.error(f"TWS-unreachable alert email failed: {_e}")
+                            _recon_unreachable_alerted = True
 
                 # Nightly broker/state reconciliation (real broker only)
                 if not dry_run:
