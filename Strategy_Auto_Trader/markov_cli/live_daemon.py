@@ -1998,9 +1998,15 @@ def main(argv: list[str] | None = None) -> int:
 
     startup_reconciliation_done = False
     _recon_fail_count = 0
+    _recon_first_fail_at = None
     _recon_unreachable_alerted = False
     if not dry_run:
         logger.warning("New entries halted pending startup reconciliation")
+
+    # Backoff steps (seconds) applied to startup-reconciliation retries once
+    # ALL markets are closed — avoids hammering TWS every poll_interval
+    # overnight when it's down (was 60s flat, ~1400 retries/day).
+    _RECON_BACKOFF_OFF_HOURS = [60, 120, 300]
 
     try:
         poll_interval = config.get("daytime", {}).get("poll_interval_seconds", 60)
@@ -2010,6 +2016,7 @@ def main(argv: list[str] | None = None) -> int:
         shutting_down = False
         while True:
             had_error = False
+            _any_market_open = True  # safe default if an exception hits before it's computed below
             try:
                 # Check IBKR data reconciliation (before overnight screening,
                 # so any corrected bars feed tonight's vol/top-K screening)
@@ -2017,6 +2024,13 @@ def main(argv: list[str] | None = None) -> int:
 
                 # Check overnight screening
                 check_overnight_screening(config, daemon_state, logger)
+
+                # Market-open check, used both to gate protective-stop checks below
+                # and to decide whether startup-reconciliation retries need to back off.
+                _any_market_open = any(
+                    is_trading_hours(mcfg, logger, market_name=mname)
+                    for mname, mcfg in config.get("markets", {}).items()
+                )
 
                 # Startup reconciliation — run on every poll until resolved (live mode
                 # only). Also re-entered whenever a mid-run execution interrupt sets
@@ -2026,6 +2040,7 @@ def main(argv: list[str] | None = None) -> int:
                     if run_startup_reconciliation(daemon_state, portfolio, broker, logger):
                         startup_reconciliation_done = True
                         _recon_fail_count = 0
+                        _recon_first_fail_at = None
                         _recon_unreachable_alerted = False
                         daemon_state["needs_reconciliation"] = False
                         save_daemon_state(daemon_state)
@@ -2039,9 +2054,11 @@ def main(argv: list[str] | None = None) -> int:
                         )
                     else:
                         _recon_fail_count += 1
+                        if _recon_first_fail_at is None:
+                            _recon_first_fail_at = datetime.now(timezone.utc)
                         _ALERT_AFTER_FAILURES = 5
                         if _recon_fail_count >= _ALERT_AFTER_FAILURES and not _recon_unreachable_alerted:
-                            elapsed_min = (_recon_fail_count * poll_interval) // 60
+                            elapsed_min = int((datetime.now(timezone.utc) - _recon_first_fail_at).total_seconds() // 60)
                             try:
                                 from ..output.emailer import send_tws_unreachable_alert
                                 send_tws_unreachable_alert(
@@ -2061,10 +2078,6 @@ def main(argv: list[str] | None = None) -> int:
 
                 # Check protective stops (before ticker processing) — only when at
                 # least one market is open; TWS refuses connections on weekends/off-hours.
-                _any_market_open = any(
-                    is_trading_hours(mcfg, logger, market_name=mname)
-                    for mname, mcfg in config.get("markets", {}).items()
-                )
                 if args.protective_stops and not dry_run and startup_reconciliation_done and _any_market_open:
                     check_protective_stops(portfolio, broker, logger, args.stop_buffer_pct)
 
@@ -2123,9 +2136,18 @@ def main(argv: list[str] | None = None) -> int:
                 _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
 
                 # Sleep before next iteration (5s on error, normal interval on
-                # success); skip entirely on shutdown so Ctrl+C exits promptly
+                # success); skip entirely on shutdown so Ctrl+C exits promptly.
+                # While startup reconciliation is unresolved and all markets are
+                # closed, back off past poll_interval — no market is admitting
+                # trades anyway, so hammering TWS every poll_interval is wasted.
                 if not shutting_down:
-                    sleep_duration = 5 if had_error else poll_interval
+                    if had_error:
+                        sleep_duration = 5
+                    elif not startup_reconciliation_done and _recon_fail_count > 0 and not _any_market_open:
+                        step = min(_recon_fail_count - 1, len(_RECON_BACKOFF_OFF_HOURS) - 1)
+                        sleep_duration = _RECON_BACKOFF_OFF_HOURS[step]
+                    else:
+                        sleep_duration = poll_interval
                     logger.debug(f"Sleeping {sleep_duration}s...")
                     time.sleep(sleep_duration)
 
