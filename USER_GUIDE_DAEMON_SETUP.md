@@ -199,6 +199,40 @@ uv run python -m Strategy_Auto_Trader.markov_cli.live_daemon >> logs\daemon.log 
 
 ---
 
+## IB Gateway Unattended Restart (IBC)
+
+IBKR forces a full session/token invalidation every Sunday during its maintenance
+window, which without automation means a manual username/password login before
+trading can resume. [IBC](https://github.com/IbcAlpha/IBC) (`C:\IBC`, v3.24.2)
+automates this — it drives Gateway's login dialog and can perform a scheduled
+"Cold Restart" that re-authenticates on its own.
+
+**Setup (2FA must be disabled on the account for this to be fully unattended —
+if 2FA is on, IBC can inject the password but IBKR still requires a manual tap
+on the IB Key mobile app; there's no bypass for that):**
+
+1. Credentials + behavior: `C:\Users\Craig\Documents\IBC\config.ini`
+   (folder ACL-restricted to Craig/SYSTEM/Administrators — this file holds a
+   plaintext password). Edit `IbLoginId` / `IbPassword` in there directly; do
+   not commit this file or paste its contents anywhere.
+   - `TradingMode=paper`, `ColdRestartTime=07:05` (always after 01:00 US/Eastern
+     regardless of DST offset — this is what re-authenticates after IBKR's
+     Sunday token invalidation without you present), `ExistingSessionDetectedAction=primary`,
+     `AcceptNonBrokerageAccountWarning=yes` (required for paper-account login
+     to complete unattended), `AcceptIncomingConnectionAction=accept`.
+2. Launch script: `C:\IBC\StartGateway.bat` — `TWS_MAJOR_VRSN=1048` (matches
+   the installed `C:\Jts\ibgateway\1048`), `CONFIG` points at the file above,
+   `HIDE=YES` to keep it out of the way when running headless.
+3. Scheduled task: run `CREATE_IBC_GATEWAY_TASK.bat` (double-click it — creating
+   scheduled tasks from an automation/script context got denied by security
+   tooling here, likely a persistence-technique heuristic; the GUI/manual path
+   isn't blocked). Same pattern as `StrategyAutoTraderDaemon`: trigger at logon,
+   non-elevated, restart up to 999 times 1 minute apart.
+
+The daemon's existing reconnect/retry logic (`DAEMON_RESILIENCE.md`) already
+tolerates Gateway being briefly unreachable during a cold restart — no daemon
+changes needed.
+
 ## Monitoring
 
 ### Check if Daemon is Running
