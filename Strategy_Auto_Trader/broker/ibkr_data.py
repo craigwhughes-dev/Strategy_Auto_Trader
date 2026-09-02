@@ -249,7 +249,8 @@ class IBKRDataClient:
         return True
 
     def fetch_hourly(self, ticker: str, period: str = "730d", use_cache: bool = True,
-                      what_to_show: str = "TRADES") -> pd.DataFrame | None:
+                      what_to_show: str = "TRADES",
+                      historical_only: bool = False) -> pd.DataFrame | None:
         """Fetch hourly OHLCV, same return contract as quant_engine's
         yfinance path: pd.DataFrame | None, tz-aware index, OHLCV columns.
 
@@ -259,11 +260,25 @@ class IBKRDataClient:
         Results are merged into data/cache/ibkr_hourly/ so the cache only
         ever grows.
 
+        historical_only: skip the live gap-fill (and the IBKR connection
+        entirely) when a cache already exists — a pure backtest doesn't need
+        today's newest bar, and a live_sim/run.py sweep across hundreds of
+        tickers otherwise opens one reqHistoricalData call per ticker just to
+        check for a gap it doesn't care about, competing with the live
+        daemon's own polling for IBKR's account-wide historical-data pacing
+        limit. Only the live daemon (via batch.py -> run.py, which always
+        needs the freshest bar to trade on) should ever see historical_only
+        default False. A brand-new ticker with no cache still needs the
+        one-time bootstrap pull regardless — there's nothing to serve.
+
         what_to_show="ADJUSTED_LAST" is exposed for scripts/ibkr_data_pilot.py's
         split/dividend-adjustment validation against yfinance; the incremental
         cache itself always uses the default "TRADES" — see the migration
         plan's validation notes for why ADJUSTED_LAST was not adopted."""
         cached = _load_cache(ticker) if use_cache else None
+
+        if historical_only and cached is not None:
+            return _resample_30min_aligned(_truncate_to_period(cached, period))
 
         owns_connection = self._ib is None
         if owns_connection and not self.connect():

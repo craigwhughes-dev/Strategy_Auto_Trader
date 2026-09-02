@@ -111,6 +111,47 @@ class TestFetchHourly:
         reloaded = ibkr_data._load_cache("AAPL")
         assert len(reloaded) == 10
 
+    def test_historical_only_with_cache_skips_ibkr_connection_entirely(self, tmp_path, monkeypatch):
+        """historical_only=True with an existing cache must not connect to
+        IBKR at all — a backtest doesn't need today's newest bar, and this is
+        what lets a full-universe live_sim run avoid competing with the live
+        daemon's own polling for IBKR's account-wide historical-data pacing
+        limit (see live_sim.py's generate_candidates() calls)."""
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
+
+        cached_idx = pd.date_range("2026-01-01 00:00", periods=5, freq="h", tz="UTC")
+        cached = pd.DataFrame(
+            {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 100}, index=cached_idx)
+        ibkr_data._save_cache("AAPL", cached)
+
+        client = IBKRDataClient()
+        client._ib = None  # would need to connect() if the live path were reached
+        from unittest.mock import patch
+        with patch.object(client, "connect") as mock_connect:
+            out = client.fetch_hourly("AAPL", period="730d", use_cache=True,
+                                       historical_only=True)
+
+        mock_connect.assert_not_called()
+        assert len(out) == 5
+
+    def test_historical_only_without_cache_still_bootstraps(self, tmp_path, monkeypatch):
+        """historical_only=True has nothing to serve for a brand-new ticker —
+        the one-time bootstrap pull still happens."""
+        pytest.importorskip("ib_async")
+        from unittest.mock import MagicMock
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
+
+        client = IBKRDataClient()
+        client._ib = MagicMock()
+        start = datetime.now(timezone.utc) - timedelta(days=5)
+        client._ib.reqHistoricalData.side_effect = [_make_page(start, 5), []]
+
+        out = client.fetch_hourly("AAPL", period="200d", use_cache=True,
+                                   historical_only=True)
+
+        assert client._ib.reqHistoricalData.call_count >= 1
+        assert len(out) == 5
+
     def test_gap_with_no_bars_in_between_is_still_bridged(self, tmp_path, monkeypatch):
         """Gap-fill correctness doesn't assume bar density between the last
         cached bar and now — IBKR simply omits non-trading hours (weekends,

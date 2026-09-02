@@ -30,18 +30,24 @@ def clear_cache() -> None:
     _cache.clear()
 
 
-def fetch_hourly_cached(ticker: str, period: str = "730d", source: str = "ibkr", client_id: int = 2):
+def fetch_hourly_cached(ticker: str, period: str = "730d", source: str = "ibkr", client_id: int = 2,
+                         historical_only: bool = False):
     """fetch_hourly(), memoized per (ticker, period, source) for this process's
     lifetime.
 
     A None/empty result (fetch failure) is never cached — a transient network
     error must not permanently poison every later strategy's fetch for this
     ticker, so those calls retry instead of reading a stale failure.
+
+    historical_only: passed straight through to fetch_hourly (see its
+    docstring) — not part of the memo key since a single process run uses a
+    constant value throughout, same as client_id today.
     """
     key = ("hourly", ticker, period, source)
     cached = _cache.get(key)
     if cached is None:
-        cached = fetch_hourly(ticker, period=period, source=source, client_id=client_id)
+        cached = fetch_hourly(ticker, period=period, source=source, client_id=client_id,
+                               historical_only=historical_only)
         if cached is not None and not cached.empty:
             _cache[key] = cached
     return cached

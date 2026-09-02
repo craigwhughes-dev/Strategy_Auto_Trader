@@ -57,15 +57,22 @@ try {
         $posSummary = "data/journals/same_day_cap_sweep_${label}_equity.csv"
         $log = "scripts/same_day_cap_sweep_$label.log"
 
+        # No 2>&1 here: redirecting a native command's stderr in PowerShell 5.1
+        # wraps every stderr line (including benign warnings, e.g. IBKR
+        # reqHistoricalData retry-timeout messages logged during a 600-ticker
+        # fetch) in a terminating NativeCommandError under $ErrorActionPreference
+        # = Stop, which aborted the very first run of this sweep on nothing
+        # more than a normal transient warning. $LASTEXITCODE is the reliable
+        # native-process success signal instead.
         uv run python -m Strategy_Auto_Trader.markov_cli.live_sim `
             --universe --strategies optimised_new `
             --initial-cash 100000 --top-k 70 --source ibkr --workers 4 `
             --start-date 2024-11-21 `
             --journal $journal --position-summary $posSummary `
-            2>&1 | Tee-Object -FilePath $log
+            | Tee-Object -FilePath $log
 
-        if (-not $?) {
-            Write-Host "FAILED: $label (continuing to next cap value)"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "FAILED: $label (exit $LASTEXITCODE, continuing to next cap value)"
         }
     }
 } finally {
