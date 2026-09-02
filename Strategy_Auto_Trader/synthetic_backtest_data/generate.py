@@ -14,7 +14,10 @@ are always real.
 series has the same bars-per-year density the rest of the codebase assumes
 (Sharpe/Sortino annualization, HMM bar-count expectations, etc).
 
-Volume is a flat placeholder, not modeled — see bridge.py's docstring.
+Volume: the real daily total (from the same daily source as the closes) is
+distributed across each day's synthetic bars proportional to bar-level
+price movement — see bridge.py's docstring for the method and its
+limitations.
 
 Output is written to a directory entirely separate from the real IBKR
 hourly/daily caches (data/cache/ibkr_hourly/, data/cache/ibkr_daily/) and
@@ -31,6 +34,16 @@ can already be passed as
     generate_candidates(df_by_ticker={ticker: df}, use_persistent_cache=False)
 — the same df_by_ticker override monte_carlo_live_sim.py already uses for
 synthetic paths — once that wiring is deliberately added.
+
+HMM-cache warning for that future wiring: the persistent HMM cache
+(data/cache/hmm_cache/<ticker>.pkl, built by quant_hmm.ticker_ranking) is
+keyed by ticker name alone, real or synthetic. Any backtest/live_sim run
+against this module's output must either pass use_persistent_cache=False
+(same invariant Monte Carlo already enforces, see monte_carlo.py's
+docstring / .claude/rules/cli.md) or, to keep the caching speedup,
+hmm_cache_dir=SYNTHETIC_HMM_CACHE_DIR (below) — generate_candidates() takes
+both params. Using the real cache path for a synthetic run would silently
+corrupt the real ticker's on-disk HMM state.
 """
 
 from __future__ import annotations
@@ -52,6 +65,31 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_VOL_WINDOW = 21
 _DEFAULT_BARS_PER_DAY = 7
+
+# Pass as hmm_cache_dir to live_sim.py's --synthetic-data-dir /
+# generate_candidates(hmm_cache_dir=...) to keep HMM caching enabled for
+# synthetic-data runs without touching the real per-ticker cache at
+# data/cache/hmm_cache/ — see this module's docstring.
+SYNTHETIC_HMM_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data_synthetic" / "hmm_cache"
+
+DEFAULT_HOURLY_DIR = Path(__file__).resolve().parent.parent.parent / "data_synthetic" / "hourly"
+
+
+def load_synthetic_hourly(ticker: str, hourly_dir: Path | None = None) -> pd.DataFrame | None:
+    """Load a ticker's already-generated synthetic hourly CSV (written by
+    generate_synthetic_hourly / main()). None if no file exists for this
+    ticker. Same tz-localize-if-naive contract as broker.ibkr_data's cache
+    loader."""
+    hourly_dir = DEFAULT_HOURLY_DIR if hourly_dir is None else Path(hourly_dir)
+    path = hourly_dir / f"{ticker.replace('/', '-')}.csv"
+    if not path.exists():
+        return None
+    df = pd.read_csv(path, index_col=0, parse_dates=True)
+    if df.empty:
+        return None
+    if df.index.tz is None:
+        df.index = df.index.tz_localize("UTC")
+    return df
 
 
 def generate_synthetic_hourly(
@@ -76,6 +114,7 @@ def generate_synthetic_hourly(
 
     frames: list[pd.DataFrame] = []
     closes = daily["Close"].to_numpy()
+    volumes = daily["Volume"].to_numpy() if "Volume" in daily.columns else None
     timestamps = daily.index
     for i in range(1, len(daily)):
         day_sigma = sigma.iloc[i]
@@ -87,6 +126,7 @@ def generate_synthetic_hourly(
             sigma=day_sigma,
             n_bars=bars_per_day,
             rng=rng,
+            daily_volume=volumes[i] if volumes is not None else None,
         )
         end = timestamps[i]
         day_df.index = pd.date_range(end=end, periods=bars_per_day, freq="1h")
