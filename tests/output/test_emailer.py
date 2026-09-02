@@ -189,3 +189,36 @@ class TestEmailer:
 
         assert "2 order(s) placed" in subject
         assert "ftse" in subject
+
+    @mock.patch("Strategy_Auto_Trader.output.emailer._send")
+    def test_send_nightly_position_pnl(self, mock_send):
+        from Strategy_Auto_Trader.output.emailer import send_nightly_position_pnl
+
+        positions = [
+            {"ticker": "SMT.L", "entry_date": "2026-08-17", "quantity": 598,
+             "entry_price": 14.43, "amount": 8629.14, "current_price": 14.595,
+             "current_value": 8727.81, "currency": "GBP",
+             "pl_pct": 1.14, "pl_abs": 98.67},
+            {"ticker": "NG.L", "entry_date": "2026-08-18", "quantity": 677,
+             "entry_price": 12.10, "amount": 8191.70, "current_price": 11.54,
+             "current_value": 7812.58, "currency": "GBP",
+             "pl_pct": -4.63, "pl_abs": -379.12},
+        ]
+        send_nightly_position_pnl(positions)
+        mock_send.assert_called_once()
+        call_args = mock_send.call_args
+        subject = call_args[0][0]
+        html = call_args[0][1]
+
+        assert "2 open position" in subject
+        assert "SMT.L" in html
+        assert "NG.L" in html
+        assert "598" in html
+        assert "8,629.14" in html
+        assert "£" in html
+
+    @mock.patch("Strategy_Auto_Trader.output.emailer._send")
+    def test_send_nightly_position_pnl_empty(self, mock_send):
+        from Strategy_Auto_Trader.output.emailer import send_nightly_position_pnl
+        send_nightly_position_pnl([])
+        mock_send.assert_not_called()

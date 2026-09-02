@@ -1779,6 +1779,45 @@ def _send_nightly_roundup(config: dict, logger: logging.Logger) -> None:
         logger.debug("No ticker results to send in nightly roundup")
 
 
+def _build_nightly_pnl_positions(portfolio: object, broker: object, logger: logging.Logger) -> list[dict]:
+    """Snapshot each open position with a fresh broker quote for the nightly P&L email.
+
+    A per-ticker quote failure is skipped (logged), not fatal — one bad quote
+    should not suppress the whole nightly report.
+    """
+    from ..broker.symbols import sizing_price
+
+    rows: list[dict] = []
+    for ticker, pos in portfolio.positions.items():
+        try:
+            raw_price = broker.get_last_price(ticker)
+            current_price = sizing_price(ticker, raw_price)
+        except Exception as e:
+            logger.warning(f"Nightly P&L: quote failed for {ticker}: {e}")
+            continue
+        if current_price <= 0:
+            logger.warning(f"Nightly P&L: no usable quote for {ticker}")
+            continue
+
+        entry_price = pos["fill_price"]
+        quantity = pos["quantity"]
+        amount = pos.get("cost_value", entry_price * quantity)
+        current_value = current_price * quantity
+        rows.append({
+            "ticker": ticker,
+            "entry_date": pos.get("entry_date", "?"),
+            "quantity": quantity,
+            "entry_price": entry_price,
+            "amount": amount,
+            "current_price": current_price,
+            "current_value": current_value,
+            "currency": pos.get("currency", ""),
+            "pl_pct": (current_price - entry_price) / entry_price * 100 if entry_price else 0.0,
+            "pl_abs": current_value - amount,
+        })
+    return rows
+
+
 def check_nightly_reconciliation(
     config: dict,
     daemon_state: dict,
@@ -1829,6 +1868,14 @@ def check_nightly_reconciliation(
                 _send_nightly_roundup(config, logger)
             except Exception as e:
                 logger.error(f"Nightly roundup email failed: {e}", exc_info=True)
+
+            # Send nightly open-position P&L email (qty, amount, current value, P&L)
+            try:
+                from ..output.emailer import send_nightly_position_pnl
+                pnl_positions = _build_nightly_pnl_positions(portfolio, broker, logger)
+                send_nightly_position_pnl(pnl_positions)
+            except Exception as e:
+                logger.error(f"Nightly position P&L email failed: {e}", exc_info=True)
         elif outcome == "error":
             # Count at most one error per calendar day — the run window can
             # retry every ~60s for 30+ minutes, and that retry storm must not

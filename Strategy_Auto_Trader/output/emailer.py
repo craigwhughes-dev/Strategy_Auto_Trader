@@ -484,3 +484,68 @@ def send_portfolio_status(positions: list[dict]) -> None:
     subject = f"Active trades: {n} positions | {winners} winning, {losers} losing"
     _send(subject, html)
     logger.info(f"  Portfolio status email sent: {subject}")
+
+
+_CCY_SYMBOL = {"GBP": "£", "USD": "$", "EUR": "€"}
+
+
+def send_nightly_position_pnl(positions: list[dict]) -> None:
+    """Send the nightly open-position P&L report: qty, entry amount, current
+    value and P&L per live position, sourced from the daemon's own portfolio
+    state and a fresh broker quote per ticker (see check_nightly_reconciliation).
+
+    Each position dict: ticker, entry_date, quantity, entry_price, current_price,
+    currency (pot-currency units, e.g. GBP pounds not LSE pence).
+    """
+    if not positions:
+        return
+
+    n = len(positions)
+    sorted_pos = sorted(positions, key=lambda p: p.get("pl_pct", 0), reverse=True)
+
+    rows_html = ""
+    for p in sorted_pos:
+        sym = _CCY_SYMBOL.get(p.get("currency", ""), "")
+        pl_pct = p.get("pl_pct", 0)
+        pl_abs = p.get("pl_abs", 0)
+        pl_colour = "#69f0ae" if pl_pct >= 0 else "#ef9a9a"
+        rows_html += f"""<tr style="border-top:1px solid #2a2d3e">
+          <td style="padding:6px 10px;color:#eee">{p['ticker']}</td>
+          <td style="padding:6px 10px;color:#aaa;white-space:nowrap">{p.get('entry_date','?')}</td>
+          <td style="padding:6px 10px;color:#ddd;text-align:right">{p.get('quantity',0):,}</td>
+          <td style="padding:6px 10px;color:#ddd;text-align:right;white-space:nowrap">{sym}{p.get('entry_price',0):,.3f}</td>
+          <td style="padding:6px 10px;color:#ddd;text-align:right;white-space:nowrap">{sym}{p.get('amount',0):,.2f}</td>
+          <td style="padding:6px 10px;color:#ddd;text-align:right;white-space:nowrap">{sym}{p.get('current_price',0):,.3f}</td>
+          <td style="padding:6px 10px;color:#ddd;text-align:right;white-space:nowrap">{sym}{p.get('current_value',0):,.2f}</td>
+          <td style="padding:6px 10px;color:{pl_colour};text-align:right;font-weight:bold;white-space:nowrap">{pl_pct:+.2f}%</td>
+          <td style="padding:6px 10px;color:{pl_colour};text-align:right;white-space:nowrap">{sym}{pl_abs:+,.2f}</td>
+        </tr>"""
+
+    html = f"""<html><body style="margin:0;padding:20px;background:#0f1117;font-family:system-ui,sans-serif;color:#e0e0e0">
+<div style="max-width:820px;margin:0 auto">
+  <h1 style="color:#fff;margin:0 0 4px">Nightly Position P&amp;L</h1>
+  <div style="color:#888;margin-bottom:16px">{n} open position{'s' if n != 1 else ''}</div>
+
+  <table style="width:100%;border-collapse:collapse;background:#1e2130;border-radius:8px;overflow:hidden;font-size:0.85em;margin:16px 0">
+    <tr style="color:#888;font-size:0.85em">
+      <th style="padding:8px 10px;text-align:left">Ticker</th>
+      <th style="padding:8px 10px;text-align:left">Entered</th>
+      <th style="padding:8px 10px;text-align:right">Qty</th>
+      <th style="padding:8px 10px;text-align:right">Entry price</th>
+      <th style="padding:8px 10px;text-align:right">Amount</th>
+      <th style="padding:8px 10px;text-align:right">Current price</th>
+      <th style="padding:8px 10px;text-align:right">Current value</th>
+      <th style="padding:8px 10px;text-align:right">P&amp;L %</th>
+      <th style="padding:8px 10px;text-align:right">P&amp;L</th>
+    </tr>
+    {rows_html}
+  </table>
+
+  <div style="color:#555;font-size:0.8em;margin-top:20px;text-align:center">
+    Live broker quotes at send time — not investment advice
+  </div>
+</div></body></html>"""
+
+    subject = f"Nightly position P&L: {n} open position{'s' if n != 1 else ''}"
+    _send(subject, html)
+    logger.info(f"  Nightly position P&L email sent: {subject}")

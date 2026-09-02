@@ -1681,6 +1681,134 @@ class TestNightlyRoundup:
         assert sent[0]["failed"][0]["ticker"] == "QQQ"
 
 
+class TestBuildNightlyPnlPositions:
+    """_build_nightly_pnl_positions: qty/amount/current-value/P&L snapshot for the nightly email."""
+
+    def _portfolio(self, positions):
+        p = mock.Mock()
+        p.positions = positions
+        return p
+
+    def test_computes_amount_current_value_and_pl(self):
+        portfolio = self._portfolio({
+            "NG.L": {"entry_date": "2026-08-18", "fill_price": 12.10,
+                     "quantity": 677, "cost_value": 8191.70, "currency": "GBP"},
+        })
+        broker = mock.Mock()
+        broker.get_last_price.return_value = 1154.0  # pence, per get_last_price's LSE contract
+
+        rows = live_daemon._build_nightly_pnl_positions(portfolio, broker, mock.Mock())
+
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["ticker"] == "NG.L"
+        assert row["quantity"] == 677
+        assert row["amount"] == pytest.approx(8191.70)
+        assert row["current_price"] == pytest.approx(11.54)
+        assert row["current_value"] == pytest.approx(11.54 * 677)
+        assert row["pl_pct"] == pytest.approx((11.54 - 12.10) / 12.10 * 100)
+        assert row["pl_abs"] == pytest.approx(11.54 * 677 - 8191.70)
+
+    def test_skips_ticker_on_quote_failure_without_raising(self):
+        portfolio = self._portfolio({
+            "AV.L": {"entry_date": "2026-08-28", "fill_price": 7.272,
+                     "quantity": 1020, "cost_value": 7417.44, "currency": "GBP"},
+        })
+        broker = mock.Mock()
+        broker.get_last_price.side_effect = ConnectionError("TWS gone")
+
+        rows = live_daemon._build_nightly_pnl_positions(portfolio, broker, mock.Mock())
+
+        assert rows == []
+
+    def test_skips_ticker_on_zero_quote(self):
+        portfolio = self._portfolio({
+            "AV.L": {"entry_date": "2026-08-28", "fill_price": 7.272,
+                     "quantity": 1020, "cost_value": 7417.44, "currency": "GBP"},
+        })
+        broker = mock.Mock()
+        broker.get_last_price.return_value = 0.0
+
+        rows = live_daemon._build_nightly_pnl_positions(portfolio, broker, mock.Mock())
+
+        assert rows == []
+
+    def test_multiple_positions_mixed_currency(self):
+        portfolio = self._portfolio({
+            "NG.L": {"entry_date": "2026-08-18", "fill_price": 12.10,
+                     "quantity": 677, "cost_value": 8191.70, "currency": "GBP"},
+            "KMI": {"entry_date": "2026-08-17", "fill_price": 32.61,
+                    "quantity": 279, "cost_value": 9098.19, "currency": "USD"},
+        })
+        broker = mock.Mock()
+        broker.get_last_price.side_effect = lambda t: {"NG.L": 1154.0, "KMI": 32.16}[t]
+
+        rows = live_daemon._build_nightly_pnl_positions(portfolio, broker, mock.Mock())
+
+        assert {r["ticker"] for r in rows} == {"NG.L", "KMI"}
+        kmi = next(r for r in rows if r["ticker"] == "KMI")
+        assert kmi["current_price"] == pytest.approx(32.16)  # USD: no pence conversion
+        assert kmi["currency"] == "USD"
+
+    def test_nightly_reconciliation_sends_position_pnl_email_on_clean_pass(self, monkeypatch):
+        """check_nightly_reconciliation wires the new email in alongside the roundup."""
+        sent = []
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.markov_cli.live_daemon._send_nightly_roundup",
+            lambda cfg, logger: None,
+        )
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.output.emailer.send_nightly_position_pnl",
+            lambda positions: sent.append(positions),
+        )
+        portfolio = self._portfolio({
+            "NG.L": {"entry_date": "2026-08-18", "fill_price": 12.10,
+                     "quantity": 677, "cost_value": 8191.70, "currency": "GBP"},
+        })
+        portfolio.accrue_daily_interest.return_value = 0.0
+        portfolio.save = mock.Mock()
+        broker = mock.Mock()
+        broker.get_last_price.return_value = 1154.0
+        config = {"overnight_timezone": "Europe/London", "reconciliation_run_time": "21:30"}
+        daemon_state = {}
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(
+                2026, 7, 6, 21, 30, tzinfo=ZoneInfo("Europe/London"))
+            live_daemon.check_nightly_reconciliation(
+                config, daemon_state, portfolio, broker, mock.Mock(),
+                run_recon=mock.Mock(return_value="clean"), save_state=lambda s: None)
+
+        assert len(sent) == 1
+        assert sent[0][0]["ticker"] == "NG.L"
+
+    def test_nightly_reconciliation_email_failure_does_not_break_reconciliation(self, monkeypatch):
+        """A broken quote/email must not stop last_reconcile_date from being set."""
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.markov_cli.live_daemon._send_nightly_roundup",
+            lambda cfg, logger: None,
+        )
+        portfolio = self._portfolio({
+            "NG.L": {"entry_date": "2026-08-18", "fill_price": 12.10,
+                     "quantity": 677, "cost_value": 8191.70, "currency": "GBP"},
+        })
+        portfolio.accrue_daily_interest.return_value = 0.0
+        portfolio.save = mock.Mock()
+        broker = mock.Mock()
+        broker.get_last_price.side_effect = RuntimeError("boom")
+        config = {"overnight_timezone": "Europe/London", "reconciliation_run_time": "21:30"}
+        daemon_state = {}
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(
+                2026, 7, 6, 21, 30, tzinfo=ZoneInfo("Europe/London"))
+            live_daemon.check_nightly_reconciliation(
+                config, daemon_state, portfolio, broker, mock.Mock(),
+                run_recon=mock.Mock(return_value="clean"), save_state=lambda s: None)
+
+        assert daemon_state["last_reconcile_date"] == "2026-07-06"
+
+
 class TestExecuteSignalsWithRetry:
     """Auto-reconnect and retry on socket errors."""
 
