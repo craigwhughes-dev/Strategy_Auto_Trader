@@ -64,8 +64,45 @@ class TestBuildHourlyOhlcvForDay:
         assert (df["High"] >= df[["Open", "Close"]].max(axis=1)).all()
         assert (df["Low"] <= df[["Open", "Close"]].min(axis=1)).all()
 
-    def test_volume_is_constant_placeholder(self):
+    def test_volume_is_constant_placeholder_when_no_daily_volume_given(self):
         rng = np.random.default_rng(0)
         df = bridge.build_hourly_ohlcv_for_day(
             prev_close=100.0, next_close=102.0, sigma=0.01, n_bars=7, rng=rng)
         assert (df["Volume"] == bridge._PLACEHOLDER_VOLUME).all()
+
+    @pytest.mark.parametrize("bad_volume", [None, 0, -5, float("nan")])
+    def test_volume_falls_back_to_placeholder_for_invalid_daily_volume(self, bad_volume):
+        rng = np.random.default_rng(0)
+        df = bridge.build_hourly_ohlcv_for_day(
+            prev_close=100.0, next_close=102.0, sigma=0.01, n_bars=7, rng=rng,
+            daily_volume=bad_volume)
+        assert (df["Volume"] == bridge._PLACEHOLDER_VOLUME).all()
+
+    def test_volume_sums_to_daily_total(self):
+        rng = np.random.default_rng(0)
+        df = bridge.build_hourly_ohlcv_for_day(
+            prev_close=100.0, next_close=95.0, sigma=0.03, n_bars=7, rng=rng,
+            daily_volume=1_000_000)
+        assert df["Volume"].sum() == pytest.approx(1_000_000)
+
+    def test_volume_weighted_by_bar_move_size(self):
+        """A bar with a bigger |Close - Open| move must get a bigger share
+        of the daily volume than a bar with a smaller move."""
+        rng = np.random.default_rng(0)
+        df = bridge.build_hourly_ohlcv_for_day(
+            prev_close=100.0, next_close=110.0, sigma=0.05, n_bars=7, rng=rng,
+            daily_volume=1_000_000)
+        moves = (df["Close"] - df["Open"]).abs()
+        biggest_move_bar = moves.idxmax()
+        smallest_move_bar = moves.idxmin()
+        assert df["Volume"].loc[biggest_move_bar] > df["Volume"].loc[smallest_move_bar]
+
+    def test_volume_even_split_when_all_moves_zero(self):
+        """sigma=0 collapses every bar's move to (near-)zero in a straight
+        interpolation between equal prev/next closes — weights must fall
+        back to an even split rather than divide by a zero move-total."""
+        rng = np.random.default_rng(0)
+        df = bridge.build_hourly_ohlcv_for_day(
+            prev_close=100.0, next_close=100.0, sigma=0.0, n_bars=4, rng=rng,
+            daily_volume=800.0)
+        assert list(df["Volume"]) == pytest.approx([200.0, 200.0, 200.0, 200.0])
