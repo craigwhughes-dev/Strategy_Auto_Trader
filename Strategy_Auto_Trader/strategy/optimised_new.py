@@ -98,12 +98,18 @@ class OptimisedNewEntry:
     # Optional same-day capital-deployment concentration cap (fraction of
     # pot's initial_cash), read by live_sim.py's arbitrate() via
     # resolve_same_day_deployment_cap() — see .claude/rules/strategy.md's
-    # Strategy-Owned Admission Attributes section. None = off (current
-    # default; under validation via scripts/run_same_day_cap_sweep.ps1 —
-    # 2026-09-02 rolling-Sharpe-volatility investigation found correlated
-    # same-day entries/exits driving Sharpe swings, not yet confirmed this
-    # cap actually helps without hurting return).
-    same_day_deployment_cap_pct: float | None = 0.50
+    # Strategy-Owned Admission Attributes section. None = off, permanently:
+    # validated 2026-09-02 (scripts/run_same_day_cap_sweep.ps1, full universe,
+    # £100k pot, 2024-11-21 start) against the rolling-30d-Sharpe volatility
+    # this was meant to fix — negative result. 0.35/0.50 never bound (the
+    # worst clustering day, 2025-03-11, deploys under a third of the pot).
+    # 0.10/0.20 bound but made things worse (0.10: Sharpe std +9.8%, P&L
+    # -40.7%; 0.20: Sharpe std +2.1%). A $-cap throttles correlated winners
+    # and losers proportionally without changing the correlation structure
+    # driving the volatility — do not re-enable without a materially
+    # different mechanism (e.g. gating by cross-ticker correlation, not $
+    # amount).
+    same_day_deployment_cap_pct: float | None = None
     # overnight_scope.py stage-1 (per-market vol_screen) is redundant for this
     # strategy: vol_filter_ok is enforced per-bar at signal time, and
     # top_k_screen's hybrid score weights trend_quality at 0.7 — a third
