@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -102,10 +103,19 @@ def _generate_and_write_worker(
     """Top-level module worker function for ProcessPoolExecutor — generate
     one ticker's synthetic hourly series and write it, returning a status
     dict rather than raising, so one ticker's failure doesn't kill the pool
-    (mirrors full_scan.py's _scan_ticker_worker)."""
+    (mirrors full_scan.py's _scan_ticker_worker).
+
+    Derives a per-process IBKR client_id (os.getpid()-based) for the
+    IBKR-fallback path in generate_synthetic_hourly — under --workers > 1,
+    every worker process hitting the fallback with the same hardcoded
+    client_id collided on the same TWS connection slot and timed out
+    (observed live: 5/6 Stooq-missing FTSE tickers failed this way in one
+    run). One process = one PID = one client_id avoids the collision."""
+    client_id = 1000 + (os.getpid() % 9000)
     try:
         df = generate_synthetic_hourly(
             ticker, vol_window=vol_window, bars_per_day=bars_per_day, seed=seed,
+            client_id=client_id,
         )
         if df is None:
             return {"ticker": ticker, "status": "no_data"}
