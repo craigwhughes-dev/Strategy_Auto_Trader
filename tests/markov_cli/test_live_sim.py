@@ -839,6 +839,37 @@ class TestArbitrate:
         assert result["final_cash"] == 5000.0
         assert result["n_candidates"] == 0
 
+    def test_pot_size_sweep_does_not_alias_records_across_runs(self, ts_base):
+        """A --pot-sizes sweep reuses the same candidate list (and therefore
+        the same cand.record objects) across multiple arbitrate() calls, per
+        the "no need to re-backtest per pot size" design (.claude/rules/cli.md).
+        arbitrate() must not mutate cand.record in place — doing so lets a
+        later pot size's pnl_usd/position_size_gbp silently overwrite an
+        earlier pot size's already-appended executed record, corrupting the
+        trade journal for every pot size but the last."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate, Candidate
+
+        rec = TradeRecord(date_opened="2026-01-12", ticker="TEST", strategy="test",
+                           entry_score=1.0, kelly_fraction=0.5, return_pct=0.05,
+                           entry_price=10.0)
+        cand = Candidate(
+            ticker="TEST", date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=5),
+            entry_score=1.0, kelly_fraction=0.5, return_pct=0.05, record=rec,
+        )
+        candidates = [cand]
+
+        small_result = arbitrate(candidates, initial_cash=1_000.0, trade_cost=1.0)
+        large_result = arbitrate(candidates, initial_cash=100_000.0, trade_cost=1.0)
+
+        small_exec = small_result["executed"][0]
+        large_exec = large_result["executed"][0]
+
+        assert small_exec is not large_exec
+        assert small_exec.position_size_gbp < large_exec.position_size_gbp
+        assert small_exec.pnl_usd != large_exec.pnl_usd
+        # the shared candidate's own record must survive both runs unmutated
+        assert cand.record.position_size_gbp == 0.0
+
 
 class TestMarkToMarket:
 

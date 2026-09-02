@@ -35,6 +35,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import logging
 from pathlib import Path
@@ -234,7 +235,7 @@ def arbitrate(
                 "alloc": alloc,
             })
 
-            rec = cand.record
+            rec = dataclasses.replace(cand.record)
             rec.pnl_usd = exit_proceeds - alloc - entry_fee
             rec.position_size_gbp = alloc
             executed.append(rec)
