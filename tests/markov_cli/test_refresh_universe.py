@@ -19,6 +19,7 @@ class TestMain:
         monkeypatch.setattr(full_scan, "SP_FTSE_UNIVERSE_FILE", out_path)
         monkeypatch.setattr(full_scan, "_sp500_tickers", lambda: ["AAPL", "FERG"])
         monkeypatch.setattr(full_scan, "_ftse100_tickers", lambda: ["SHEL.L"])
+        monkeypatch.setattr(full_scan, "_sp500_date_added", lambda: {})
 
         assert refresh_universe.main() == 0
 
@@ -32,6 +33,7 @@ class TestMain:
         monkeypatch.setattr(full_scan, "SP_FTSE_UNIVERSE_FILE", out_path)
         monkeypatch.setattr(full_scan, "_sp500_tickers", lambda: ["AAPL"])
         monkeypatch.setattr(full_scan, "_ftse100_tickers", lambda: ["SHEL.L"])
+        monkeypatch.setattr(full_scan, "_sp500_date_added", lambda: {})
 
         assert refresh_universe.main() == 0
 
@@ -49,6 +51,7 @@ class TestMain:
         monkeypatch.setattr(full_scan, "SP_FTSE_UNIVERSE_FILE", out_path)
         monkeypatch.setattr(full_scan, "_sp500_tickers", lambda: ["AAPL"])
         monkeypatch.setattr(full_scan, "_ftse100_tickers", lambda: ["SHEL.L"])
+        monkeypatch.setattr(full_scan, "_sp500_date_added", lambda: {})
 
         assert refresh_universe.main() == 0
 

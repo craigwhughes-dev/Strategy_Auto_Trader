@@ -346,6 +346,25 @@ def _sp500_tickers() -> list[str]:
     raise RuntimeError("S&P 500 constituent table not found on Wikipedia page")
 
 
+def _sp500_date_added() -> dict[str, str]:
+    """Per-ticker S&P 500 index-inclusion date (yfinance symbol convention,
+    ISO date string), for gating backtests against look-ahead bias — a
+    ticker must not be treated as tradable before it actually joined the
+    index. Only covers *current* constituents: a ticker removed from the
+    index has no row here at all (see build_sp_ftse_universe's docstring
+    for why that survivorship gap is untouched)."""
+    for df in _wiki_tables(WIKI_SP500):
+        sym_col = next((c for c in df.columns if c.lower() in ("symbol", "ticker")), None)
+        date_col = next((c for c in df.columns if c.lower() == "date added"), None)
+        if sym_col and date_col and len(df) > 400:
+            return {
+                sym.replace(".", "-"): date
+                for sym, date in zip(df[sym_col], df[date_col])
+                if sym and date
+            }
+    raise RuntimeError("S&P 500 'Date added' column not found on Wikipedia page")
+
+
 def _ftse100_tickers() -> list[str]:
     """Current FTSE 100 constituents mapped to yfinance .L symbols (BT.A -> BT-A.L)."""
     for df in _wiki_tables(WIKI_FTSE100):
@@ -419,13 +438,23 @@ def load_universe() -> list[str]:
 def build_sp_ftse_universe(out_path: Path | None = None) -> list[str]:
     """Fetch fresh S&P 500 + FTSE 100 constituent lists only (no watchlist
     union) and cache them, so a multi-strategy sweep over just these two
-    indices fetches Wikipedia once instead of once per strategy."""
+    indices fetches Wikipedia once instead of once per strategy.
+
+    Also caches each current S&P 500 ticker's index-inclusion date (see
+    _sp500_date_added) under the "sp500_date_added" key, for gating
+    backtests against look-ahead bias via is_eligible_as_of(). This is a
+    look-ahead-only fix, not a full survivorship-bias fix: a ticker removed
+    from the S&P 500 has no inclusion date here and is silently untracked
+    (no FTSE 100 equivalent exists yet either — Wikipedia's FTSE page has
+    no per-ticker inclusion date; the real source is a LSEG/FTSE Russell
+    PDF, deferred)."""
     if out_path is None:
         out_path = SP_FTSE_UNIVERSE_FILE
     sources: dict[str, list[str]] = {}
     for name, fn in (("ftse100", _ftse100_tickers), ("sp500", _sp500_tickers)):
         sources[name] = fn()
         logger.info(f"  {name}: {len(sources[name])} tickers from Wikipedia")
+    sp500_date_added = _sp500_date_added()
 
     raw = set(sources["ftse100"]) | set(sources["sp500"])
     excluded = raw & IBKR_UNRESOLVABLE
@@ -441,6 +470,7 @@ def build_sp_ftse_universe(out_path: Path | None = None) -> list[str]:
         "built": datetime.now().isoformat(timespec="seconds"),
         "sources": {k: len(v) for k, v in sources.items()},
         "tickers": universe,
+        "sp500_date_added": sp500_date_added,
     }, indent=2), encoding="utf-8")
     logger.info(f"  sp_ftse universe: {len(universe)} tickers ({len(uk)} UK + {len(us)} US) -> {out_path}")
     return universe
@@ -449,6 +479,25 @@ def build_sp_ftse_universe(out_path: Path | None = None) -> list[str]:
 def load_sp_ftse_universe() -> list[str]:
     data = json.loads(SP_FTSE_UNIVERSE_FILE.read_text(encoding="utf-8"))
     return data["tickers"]
+
+
+def load_sp500_date_added() -> dict[str, pd.Timestamp]:
+    """Per-ticker S&P 500 index-inclusion date, cached by
+    build_sp_ftse_universe(). Missing/absent tickers (FTSE names, or a
+    since-removed S&P name) simply have no entry — see is_eligible_as_of()."""
+    data = json.loads(SP_FTSE_UNIVERSE_FILE.read_text(encoding="utf-8"))
+    return {t: pd.Timestamp(d) for t, d in data.get("sp500_date_added", {}).items()}
+
+
+def is_eligible_as_of(ticker: str, date, sp500_date_added: dict[str, pd.Timestamp]) -> bool:
+    """True if `ticker` may be treated as tradable on `date` w.r.t. S&P 500
+    index membership. A ticker absent from sp500_date_added (a FTSE name,
+    or an S&P ticker already removed from the index) is always eligible —
+    this is a look-ahead-only gate, not a full survivorship-bias fix (see
+    build_sp_ftse_universe's docstring for the untracked removed-ticker
+    gap). Not wired into any backtest/entry path yet."""
+    added = sp500_date_added.get(ticker)
+    return added is None or pd.Timestamp(date) >= added
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,8 @@ augmentation, daily snapshots, and summary-row alignment."""
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -203,6 +205,7 @@ class TestUniverse:
     def test_build_sp_ftse_universe_no_watchlist_union(self, tmp_path, monkeypatch):
         monkeypatch.setattr(full_scan, "_sp500_tickers", lambda: ["AAPL", "MSFT"])
         monkeypatch.setattr(full_scan, "_ftse100_tickers", lambda: ["SHEL.L"])
+        monkeypatch.setattr(full_scan, "_sp500_date_added", lambda: {})
         out_path = tmp_path / "universe_sp_ftse.json"
         tickers = full_scan.build_sp_ftse_universe(out_path)
         assert tickers == ["SHEL.L", "AAPL", "MSFT"]
@@ -214,6 +217,7 @@ class TestUniverse:
         unresolvable = next(iter(IBKR_UNRESOLVABLE))  # pick any confirmed entry
         monkeypatch.setattr(full_scan, "_sp500_tickers", lambda: ["AAPL"])
         monkeypatch.setattr(full_scan, "_ftse100_tickers", lambda: ["SHEL.L", unresolvable])
+        monkeypatch.setattr(full_scan, "_sp500_date_added", lambda: {})
         out_path = tmp_path / "universe_sp_ftse.json"
         tickers = full_scan.build_sp_ftse_universe(out_path)
         assert unresolvable not in tickers
@@ -224,8 +228,59 @@ class TestUniverse:
         monkeypatch.setattr(full_scan, "SP_FTSE_UNIVERSE_FILE", out_path)
         monkeypatch.setattr(full_scan, "_sp500_tickers", lambda: ["AAPL"])
         monkeypatch.setattr(full_scan, "_ftse100_tickers", lambda: ["SHEL.L"])
+        monkeypatch.setattr(full_scan, "_sp500_date_added", lambda: {})
         full_scan.build_sp_ftse_universe(out_path)
         assert full_scan.load_sp_ftse_universe() == ["SHEL.L", "AAPL"]
+
+    def test_sp500_date_added_parsing(self, monkeypatch):
+        symbols = [f"T{i}" for i in range(499)] + ["AAPL", "BRK.B"]
+        dates = ["2000-01-01"] * 499 + ["1982-11-30", "2010-02-16"]
+        fake_table = pd.DataFrame({"Symbol": symbols, "Date added": dates})
+        monkeypatch.setattr(full_scan, "_wiki_tables", lambda url: [fake_table])
+        out = full_scan._sp500_date_added()
+        assert out["AAPL"] == "1982-11-30"
+        assert out["BRK-B"] == "2010-02-16"
+        assert "BRK.B" not in out
+
+    def test_sp500_date_added_small_table_rejected(self, monkeypatch):
+        fake_table = pd.DataFrame({"Symbol": ["AAPL"], "Date added": ["1982-11-30"]})
+        monkeypatch.setattr(full_scan, "_wiki_tables", lambda url: [fake_table])
+        with pytest.raises(RuntimeError):
+            full_scan._sp500_date_added()
+
+    def test_build_sp_ftse_universe_includes_date_added(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(full_scan, "_sp500_tickers", lambda: ["AAPL"])
+        monkeypatch.setattr(full_scan, "_ftse100_tickers", lambda: ["SHEL.L"])
+        monkeypatch.setattr(full_scan, "_sp500_date_added", lambda: {"AAPL": "1982-11-30"})
+        out_path = tmp_path / "universe_sp_ftse.json"
+        full_scan.build_sp_ftse_universe(out_path)
+        data = json.loads(out_path.read_text(encoding="utf-8"))
+        assert data["sp500_date_added"] == {"AAPL": "1982-11-30"}
+
+    def test_load_sp500_date_added_round_trip(self, tmp_path, monkeypatch):
+        out_path = tmp_path / "universe_sp_ftse.json"
+        out_path.write_text(json.dumps({
+            "built": "2026-01-01T00:00:00",
+            "sources": {}, "tickers": [],
+            "sp500_date_added": {"AAPL": "1982-11-30"},
+        }), encoding="utf-8")
+        monkeypatch.setattr(full_scan, "SP_FTSE_UNIVERSE_FILE", out_path)
+        out = full_scan.load_sp500_date_added()
+        assert out == {"AAPL": pd.Timestamp("1982-11-30")}
+
+
+class TestIsEligibleAsOf:
+    def test_before_date_added_is_ineligible(self):
+        dates = {"AAPL": pd.Timestamp("1982-11-30")}
+        assert full_scan.is_eligible_as_of("AAPL", "1980-01-01", dates) is False
+
+    def test_on_or_after_date_added_is_eligible(self):
+        dates = {"AAPL": pd.Timestamp("1982-11-30")}
+        assert full_scan.is_eligible_as_of("AAPL", "1982-11-30", dates) is True
+        assert full_scan.is_eligible_as_of("AAPL", "2026-01-01", dates) is True
+
+    def test_ticker_absent_is_always_eligible(self):
+        assert full_scan.is_eligible_as_of("SHEL.L", "1980-01-01", {}) is True
 
 
 def _trade(pnl_usd, return_pct, opened, closed) -> TradeRecord:
