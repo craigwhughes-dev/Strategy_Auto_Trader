@@ -810,6 +810,178 @@ class TestMainCLI:
         assert not dump_path.exists()
 
 
+def _fake_synthetic_df(start="2007-06-01", periods=20000):
+    idx = pd.date_range(start, periods=periods, freq="1h", tz="UTC")
+    return pd.DataFrame(
+        {"Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.0, "Volume": 1000.0},
+        index=idx,
+    )
+
+
+class TestMainCLISyntheticMode:
+
+    @pytest.fixture(autouse=True)
+    def _no_real_position_summary_writes(self):
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim._write_position_summary") as m:
+            yield m
+
+    def test_requires_both_synthetic_flags_together(self):
+        from Strategy_Auto_Trader.markov_cli.live_sim import main
+
+        with pytest.raises(SystemExit):
+            main(["--tickers", "TEST", "--synthetic-data-dir", "somedir"])
+        with pytest.raises(SystemExit):
+            main(["--tickers", "TEST", "--synthetic-end-date", "2009-07-31"])
+
+    def test_wires_df_by_ticker_and_synthetic_hmm_cache_dir(self):
+        from Strategy_Auto_Trader.markov_cli.live_sim import SYNTHETIC_HMM_CACHE_DIR, main
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.load_synthetic_hourly",
+                        return_value=_fake_synthetic_df()):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates",
+                            return_value=([], {}, {})) as mock_gen:
+                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
+                    main([
+                        "--tickers", "TEST", "--strategies", "default",
+                        "--start-date", "2008-01-01",
+                        "--synthetic-data-dir", "some/dir",
+                        "--synthetic-end-date", "2009-07-31",
+                    ])
+
+        gen_kwargs = mock_gen.call_args_list[0][1]
+        assert gen_kwargs["hmm_cache_dir"] == SYNTHETIC_HMM_CACHE_DIR
+        assert gen_kwargs["use_persistent_cache"] is True
+        assert "TEST" in gen_kwargs["df_by_ticker"]
+
+    def test_ticker_with_no_synthetic_file_dropped_not_passed_through(self):
+        """Regression guard: a ticker missing from the synthetic dir must be
+        excluded from the tickers list entirely, never reach
+        generate_candidates with a df_by_ticker miss (which would silently
+        fall through to a REAL fetch of REAL current data — the whole point
+        of an isolated historical stress test defeated)."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import main
+
+        def fake_load(ticker, hourly_dir=None):
+            return _fake_synthetic_df() if ticker == "HAS_DATA" else None
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.load_synthetic_hourly",
+                        side_effect=fake_load):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates",
+                            return_value=([], {}, {})) as mock_gen:
+                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
+                    main([
+                        "--tickers", "HAS_DATA", "NO_DATA", "--strategies", "default",
+                        "--start-date", "2008-01-01",
+                        "--synthetic-data-dir", "some/dir",
+                        "--synthetic-end-date", "2009-07-31",
+                    ])
+
+        gen_kwargs = mock_gen.call_args_list[0][1]
+        assert gen_kwargs["tickers"] == ["HAS_DATA"]
+        assert "NO_DATA" not in gen_kwargs["df_by_ticker"]
+
+    def test_ticker_with_empty_window_dropped(self):
+        """A synthetic file that exists but has no bars inside
+        [start_date, synthetic_end_date] must be dropped the same way a
+        missing file is — not passed through with an empty frame."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import main
+
+        out_of_range_df = _fake_synthetic_df(start="2015-01-01", periods=100)
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.load_synthetic_hourly",
+                        return_value=out_of_range_df):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates",
+                            return_value=([], {}, {})) as mock_gen:
+                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
+                    main([
+                        "--tickers", "TEST", "--strategies", "default",
+                        "--start-date", "2008-01-01",
+                        "--synthetic-data-dir", "some/dir",
+                        "--synthetic-end-date", "2009-07-31",
+                    ])
+
+        gen_kwargs = mock_gen.call_args_list[0][1]
+        assert gen_kwargs["tickers"] == []
+        assert gen_kwargs["df_by_ticker"] == {}
+
+    def test_date_slicing_applied_to_synthetic_frame(self):
+        from Strategy_Auto_Trader.markov_cli.live_sim import main
+
+        full_df = _fake_synthetic_df(start="2007-06-01", periods=15000)
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.load_synthetic_hourly",
+                        return_value=full_df):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates",
+                            return_value=([], {}, {})) as mock_gen:
+                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
+                    main([
+                        "--tickers", "TEST", "--strategies", "default",
+                        "--start-date", "2008-01-01",
+                        "--synthetic-data-dir", "some/dir",
+                        "--synthetic-end-date", "2009-07-31",
+                    ])
+
+        sliced = mock_gen.call_args_list[0][1]["df_by_ticker"]["TEST"]
+        assert sliced.index.min() >= pd.Timestamp("2008-01-01", tz="UTC")
+        assert sliced.index.max() <= pd.Timestamp("2009-07-31 23:59:59", tz="UTC")
+        assert len(sliced) < len(full_df)
+
+    def test_synthetic_mode_defaults_journal_under_data_synthetic(self):
+        from Strategy_Auto_Trader.markov_cli.live_sim import _SYNTHETIC_JOURNAL_DIR, main
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.load_synthetic_hourly",
+                        return_value=_fake_synthetic_df()):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates",
+                            return_value=([], {}, {})):
+                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades",
+                                return_value=0) as mock_append:
+                    main([
+                        "--tickers", "TEST", "--strategies", "default",
+                        "--start-date", "2008-01-01",
+                        "--synthetic-data-dir", "some/dir",
+                        "--synthetic-end-date", "2009-07-31",
+                    ])
+
+        journal_path = mock_append.call_args_list[0][0][0]
+        assert journal_path.parent == _SYNTHETIC_JOURNAL_DIR
+
+    def test_explicit_journal_overrides_synthetic_default(self, tmp_path):
+        from Strategy_Auto_Trader.markov_cli.live_sim import main
+
+        explicit = tmp_path / "custom.csv"
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.load_synthetic_hourly",
+                        return_value=_fake_synthetic_df()):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates",
+                            return_value=([], {}, {})):
+                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades",
+                                return_value=0) as mock_append:
+                    main([
+                        "--tickers", "TEST", "--strategies", "default",
+                        "--start-date", "2008-01-01",
+                        "--synthetic-data-dir", "some/dir",
+                        "--synthetic-end-date", "2009-07-31",
+                        "--journal", str(explicit),
+                    ])
+
+        assert mock_append.call_args_list[0][0][0] == explicit
+
+    def test_non_synthetic_path_passes_none_for_new_kwargs(self):
+        """Omitting --synthetic-data-dir must reach generate_candidates with
+        df_by_ticker=None and hmm_cache_dir=None — today's exact behavior,
+        unchanged."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import main
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates",
+                        return_value=([], {}, {})) as mock_gen:
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
+                main(["--tickers", "TEST", "--strategies", "default"])
+
+        gen_kwargs = mock_gen.call_args_list[0][1]
+        assert gen_kwargs["df_by_ticker"] is None
+        assert gen_kwargs["hmm_cache_dir"] is None
+        assert gen_kwargs["use_persistent_cache"] is True
+
+
 class TestArbitrate:
 
     def test_no_daily_admission_cap_all_admitted_when_cash_allows(self, ts_base):

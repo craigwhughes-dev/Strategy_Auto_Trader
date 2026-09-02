@@ -30,6 +30,13 @@ Usage:
     uv run python -m Strategy_Auto_Trader.markov_cli.live_sim \\
         --universe --strategies conservative default trend optimised \\
         --pot-sizes 25000 50000 100000 200000 --workers 4
+
+    # Synthetic-data stress test (e.g. a historical window real hourly data
+    # can't reach) — see synthetic_backtest_data/generate.py:
+    uv run python -m Strategy_Auto_Trader.markov_cli.live_sim \\
+        --universe --strategies optimised_new --start-date 2008-01-01 \\
+        --synthetic-data-dir data_synthetic/hourly --synthetic-end-date 2009-07-31 \\
+        --initial-cash 100000 --top-k 70 --workers 4
 """
 
 from __future__ import annotations
@@ -58,6 +65,9 @@ from ..quant_hmm.ticker_ranking import (
 )
 from ..core.cli_logging import setup_cli_logger
 from ..strategy.base.registry import STRATEGY_REGISTRY, wants_low_trend_quality
+from ..synthetic_backtest_data.generate import SYNTHETIC_HMM_CACHE_DIR, load_synthetic_hourly
+
+_SYNTHETIC_JOURNAL_DIR = Path(__file__).resolve().parent.parent.parent / "data_synthetic" / "journals"
 
 logger = logging.getLogger(__name__)
 
@@ -331,7 +341,12 @@ def simulate_strategy(
     all_candidates: list[Candidate] = []
     for ticker in tickers:
         logger.info(f"  fetching + backtesting {ticker}...")
-        cands = fetch_and_extract(ticker, strategy_name, vol_filter_tag, vol_filter_ok)
+        # historical_only=True: live_sim.py is a backtest/simulation tool,
+        # never the live daemon's signal path — no need for today's newest
+        # bar, and skipping the live gap-fill avoids competing with the
+        # daemon's own IBKR polling for pacing-limit headroom.
+        cands = fetch_and_extract(ticker, strategy_name, vol_filter_tag, vol_filter_ok,
+                                   historical_only=True)
         cutoff = pd.Timestamp(start_date)
         # Normalize to naive timestamps for comparison (hourly data is tz-aware)
         cands = [c for c in cands if c.date_opened.tz_localize(None) >= cutoff]
@@ -429,12 +444,53 @@ def main(argv: list[str] | None = None) -> int:
                         help="Hourly data source for every ticker in this run: local incremental "
                              "IBKR-backed cache (default) or yfinance. IBKR falls back to "
                              "yfinance if no cache exists for a ticker.")
+    parser.add_argument("--synthetic-data-dir", default=None,
+                        help="Use synthetic hourly CSVs from this directory (see "
+                             "synthetic_backtest_data/generate.py) instead of fetching real data via "
+                             "--source. Requires --synthetic-end-date. Isolated from real data: uses "
+                             "SYNTHETIC_HMM_CACHE_DIR instead of the real HMM cache, and defaults "
+                             "--journal/--position-summary under data_synthetic/journals/ instead of "
+                             "the real journal, unless explicitly overridden.")
+    parser.add_argument("--synthetic-end-date", default=None, metavar="YYYY-MM-DD",
+                        help="Upper bound for the synthetic data window (--start-date is the lower "
+                             "bound). Required together with --synthetic-data-dir — arbitrate() has "
+                             "no other end-of-window concept, and the synthetic CSVs span decades.")
     args = parser.parse_args(argv)
 
     if bool(args.tickers) == bool(args.universe):
         parser.error("exactly one of --tickers or --universe is required")
+    if bool(args.synthetic_data_dir) != bool(args.synthetic_end_date):
+        parser.error("--synthetic-data-dir and --synthetic-end-date must be given together")
     if args.universe:
         args.tickers = full_scan.load_sp_ftse_universe()
+
+    df_by_ticker: dict[str, pd.DataFrame] | None = None
+    if args.synthetic_data_dir:
+        synthetic_dir = Path(args.synthetic_data_dir)
+        df_by_ticker = {}
+        dropped: list[tuple[str, str]] = []
+        for ticker in args.tickers:
+            df = load_synthetic_hourly(ticker, hourly_dir=synthetic_dir)
+            if df is None:
+                dropped.append((ticker, "no synthetic file"))
+                continue
+            window = df.loc[args.start_date:args.synthetic_end_date]
+            if window.empty:
+                dropped.append((ticker, "no bars in window"))
+                continue
+            df_by_ticker[ticker] = window
+        args.tickers = list(df_by_ticker.keys())
+        logger.info(
+            f"  synthetic mode: {len(args.tickers)}/{len(args.tickers) + len(dropped)} tickers have "
+            f"data in [{args.start_date}, {args.synthetic_end_date}], hmm_cache_dir={SYNTHETIC_HMM_CACHE_DIR}"
+        )
+        if dropped:
+            logger.info(f"  dropped ({len(dropped)}): {', '.join(t for t, _ in dropped)}")
+        if args.journal is None:
+            args.journal = str(_SYNTHETIC_JOURNAL_DIR / "live_sim_synthetic.csv")
+        if args.position_summary is None:
+            ts = pd.Timestamp.now().strftime("%Y%m%dT%H%M%S")
+            args.position_summary = str(_SYNTHETIC_JOURNAL_DIR / f"live_sim_synthetic_position_summary_{ts}.csv")
 
     pot_sizes = args.pot_sizes if args.pot_sizes else [args.initial_cash]
 
@@ -469,6 +525,13 @@ def main(argv: list[str] | None = None) -> int:
             workers=args.workers,
             use_seasonal_volume=args.seasonal_volume,
             source=args.source,
+            df_by_ticker=df_by_ticker,
+            use_persistent_cache=True,
+            hmm_cache_dir=SYNTHETIC_HMM_CACHE_DIR if args.synthetic_data_dir else None,
+            # Backtest tool, not the live daemon's signal path — skip the
+            # live IBKR gap-fill and serve straight from cache (see
+            # generate_candidates' docstring).
+            historical_only=True,
         )
 
         cutoff = pd.Timestamp(args.start_date)

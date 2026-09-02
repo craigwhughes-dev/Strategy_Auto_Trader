@@ -28,6 +28,22 @@ Net P&L is the sum of N *independent* backtests, each with unlimited capital and
 
 ---
 
+## 2026-09-02 (evening) — Synthetic 2008 crash stress test: full universe, optimised_new, £100k, top-k=70
+Tool: live_sim.py (new `--synthetic-data-dir`/`--synthetic-end-date` flags, wired this session)
+Scope: `--universe --strategies optimised_new --start-date 2008-01-01 --synthetic-data-dir data_synthetic/hourly --synthetic-end-date 2009-07-31 --initial-cash 100000 --top-k 70 --workers 4`. Real hourly data doesn't reach 2008 (IBKR's UK history starts 1998, but hourly specifically is far shorter) — this run uses `synthetic_backtest_data`'s Brownian-bridge synthetic hourly bars (built from real Stooq/IBKR daily closes) instead, isolated from real data via `SYNTHETIC_HMM_CACHE_DIR` and a dedicated journal path. 600-ticker universe, 450 had synthetic data covering the window (150 dropped — post-2009 IPOs/spinoffs: TSLA, META, UBER, ABNB, COIN, PLTR, HOOD, GEV, CEG, KVUE, WBD, IAG.L, NWG.L, etc., confirmed real listing-date gaps, not a bug). HMM `min_train_bars=500` warmup consumed Jan–mid-April 2008 (no entries possible before then, by design — same mechanism live has always had).
+Journal: data_synthetic/journals/live_sim_synthetic.csv (765 trades), data_synthetic/journals/live_sim_synthetic_position_summary_20260902T193113.csv
+Chart: reports/live_sim_synthetic_chart.png
+
+| Strategy | Data span | Trades admitted | Rejected (cash / kelly≤0) | Final portfolio | P&L | Return | Max drawdown | Peak deployed |
+|---|---|---|---|---|---|---|---|---|
+| optimised_new | 2008-04-13 → 2009-07-30 | 765/774 | 0 / 9 | £10,225.07 | −£90,733.60 | −90.7% | −89.7% | £93,582.05 |
+
+Chart detail worth noting (not just the headline number): deployed capital and open-position count were **already declining** through summer 2008, well before the Sept 15 Lehman collapse — peak deployed (£93.6k, 38 open positions) was mid-April 2008, down to ~£45k/16 positions by the Lehman line. So the strategy was de-risking somewhat ahead of the crash, not blindly loading up into it. The real damage was existing positions marking down through the crash while little new capital was deployed (deployed stayed £5–20k Oct 2008–March 2009) — P&L bled continuously and only flattened around the real-world March 2009 market bottom. Re-entries resumed after that (open positions climbed back to 40+ by May 2009) but never recovered the loss — P&L stayed pinned near −£90k through the end of the window.
+
+Conclusion: **Severe result, real finding not noise.** Whatever de-risking behavior reduced new deployment through 2008 wasn't enough to protect capital already committed — the loss is dominated by mark-to-market decline on held positions through the crash, not reckless re-entry into it (re-entry only resumes post-bottom, and even then doesn't recover). Worth investigating whether `optimised_new`'s regime-exit logic should be exiting held positions faster once the HMM detects a bear regime, rather than only gating new entries. Not yet investigated further — this run establishes the finding, doesn't diagnose the mechanism.
+
+---
+
 ## 2026-08-30 — Pot-size comparison: £20k vs £30k, full universe, optimised_new
 Tool: live_sim.py
 Scope: `--universe --strategies optimised_new --pot-sizes 20000 30000 --top-k 70 --vol-weight 0.7 --win-rate-weight 0.3 --lookback-days 60 --workers 4 --cost-model ibkr_tiered_spread --seasonal-volume --source ibkr`
