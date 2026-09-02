@@ -95,6 +95,15 @@ class OptimisedNewEntry:
     require_flip_entry: bool = True
     require_vol_filter_ok: bool = True
     volume_min_ratio: float = 1.0
+    # Optional same-day capital-deployment concentration cap (fraction of
+    # pot's initial_cash), read by live_sim.py's arbitrate() via
+    # resolve_same_day_deployment_cap() — see .claude/rules/strategy.md's
+    # Strategy-Owned Admission Attributes section. None = off (current
+    # default; under validation via scripts/run_same_day_cap_sweep.ps1 —
+    # 2026-09-02 rolling-Sharpe-volatility investigation found correlated
+    # same-day entries/exits driving Sharpe swings, not yet confirmed this
+    # cap actually helps without hurting return).
+    same_day_deployment_cap_pct: float | None = None
     # overnight_scope.py stage-1 (per-market vol_screen) is redundant for this
     # strategy: vol_filter_ok is enforced per-bar at signal time, and
     # top_k_screen's hybrid score weights trend_quality at 0.7 — a third

@@ -57,7 +57,7 @@ from ..quant_hmm.ticker_ranking import (
     trend_quality_asof,
 )
 from ..core.cli_logging import setup_cli_logger
-from ..strategy.base.registry import wants_low_trend_quality
+from ..strategy.base.registry import STRATEGY_REGISTRY, wants_low_trend_quality
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,17 @@ def _max_drawdown(values: list[float]) -> float:
     return max_dd
 
 
+def resolve_same_day_deployment_cap(strategy_name: str) -> float | None:
+    """Strategy-owned same_day_deployment_cap_pct, read off the strategy's
+    registered Entry class (default None for every strategy that doesn't
+    declare it, or isn't registered at all) — see .claude/rules/strategy.md.
+    Not a CLI flag. An unregistered strategy_name resolves to None here
+    rather than raising — resolving a bad name is generate_candidates()'s
+    job, not this lookup's."""
+    entry_cls = STRATEGY_REGISTRY.get(strategy_name, {}).get("entry")
+    return getattr(entry_cls, "same_day_deployment_cap_pct", None)
+
+
 def arbitrate(
     candidates: list[Candidate],
     initial_cash: float,
@@ -109,12 +120,26 @@ def arbitrate(
     cost_model_name: str = "flat",
     currency: str = "GBP",
     price_by_ticker: dict[str, pd.Series] | None = None,
+    same_day_deployment_cap_pct: float | None = None,
 ) -> dict:
     """Walk candidates day-by-day (event days only: opens/closes), arbitrating
-    entries against one shared, mutating cash pot. No daily admission cap and
-    no position-count cap — cash alone gates admission, matching the live
-    daemon (broker/portfolio.py has no max_positions or daily-trade-count
-    check either; see .claude/rules/cli.md capital-arbitration section).
+    entries against one shared, mutating cash pot. No position-count cap —
+    cash and a positive Kelly fraction are the only mandatory gates, matching
+    the live daemon (broker/portfolio.py has no max_positions or daily-trade-
+    count check either; see .claude/rules/cli.md capital-arbitration section).
+
+    same_day_deployment_cap_pct is an OPTIONAL third gate: caps total new
+    capital admitted across a single calendar day at cap_pct * initial_cash.
+    It is strategy-owned, not a CLI/engine knob — the caller resolves it from
+    the strategy's registered Entry class (see main()) and passes it in here;
+    arbitrate() itself stays generic and doesn't know about STRATEGY_REGISTRY.
+    Default None means every strategy that doesn't declare the attribute sees
+    unchanged behavior. This is NOT the daily_buy_limit/daily_sell_limit
+    trade-count cap removed 2026-08-11 (that was centrally hardcoded and
+    never enforced) — this targets $-deployment concentration on days when
+    many candidates enter/exit together (correlated regime-driven risk), and
+    narrows the entry_score-sorted admission from the bottom rather than
+    reordering or delaying anyone.
 
     A candidate with kelly_fraction <= 0 is rejected outright, not sized via
     a flat fallback — this matches live's PortfolioManager.compute_quantity(),
@@ -134,7 +159,8 @@ def arbitrate(
     realized P&L, cumulative interest), total_interest, final_cash,
     n_candidates, n_admitted, n_rejected_cash (candidates that couldn't be
     sized due to insufficient cash), n_rejected_kelly (candidates with
-    kelly_fraction <= 0).
+    kelly_fraction <= 0), n_rejected_concentration (candidates that would
+    have exceeded same_day_deployment_cap_pct).
 
     Note: equity_curve is sampled at trade-event days only, not every calendar
     day — for strategies with infrequent trades this is a sparse series. Do
@@ -150,6 +176,7 @@ def arbitrate(
             "executed": [], "equity_curve": [], "total_interest": 0.0,
             "final_cash": initial_cash, "n_candidates": 0, "n_admitted": 0,
             "n_rejected_cash": 0, "n_rejected_kelly": 0,
+            "n_rejected_concentration": 0,
         }
 
     by_day: dict[pd.Timestamp, list[Candidate]] = {}
@@ -171,6 +198,7 @@ def arbitrate(
     n_admitted = 0
     n_rejected_cash = 0
     n_rejected_kelly = 0
+    n_rejected_concentration = 0
     prev_day = None
 
     for day in all_days:
@@ -194,6 +222,9 @@ def arbitrate(
         # 2. admit new entries for this day, highest score first
         day_candidates = sorted(by_day.get(day, []), key=lambda c: -c.entry_score)
         taken = 0
+        deployed_today = 0.0
+        daily_cap = (same_day_deployment_cap_pct * initial_cash
+                     if same_day_deployment_cap_pct else None)
         for cand in day_candidates:
             if not cand.kelly_fraction or cand.kelly_fraction <= 0:
                 n_rejected_kelly += 1
@@ -225,6 +256,10 @@ def arbitrate(
                 n_rejected_cash += 1
                 continue
 
+            if daily_cap is not None and deployed_today + alloc > daily_cap:
+                n_rejected_concentration += 1
+                continue
+
             cash -= (alloc + entry_fee)
             exit_proceeds = alloc * (1 + cand.return_pct) - exit_fee
             open_positions.append({
@@ -241,6 +276,7 @@ def arbitrate(
             executed.append(rec)
             taken += 1
             n_admitted += 1
+            deployed_today += alloc
 
         skipped = len(day_candidates) - taken
         if taken or skipped:
@@ -268,6 +304,7 @@ def arbitrate(
         "n_admitted": n_admitted,
         "n_rejected_cash": n_rejected_cash,
         "n_rejected_kelly": n_rejected_kelly,
+        "n_rejected_concentration": n_rejected_concentration,
     }
 
 
@@ -308,6 +345,7 @@ def simulate_strategy(
         cost_model_name=cost_model_name,
         currency=currency,
         price_by_ticker=None,
+        same_day_deployment_cap_pct=resolve_same_day_deployment_cap(strategy_name),
     )
 
     executed = result["executed"]
@@ -473,6 +511,11 @@ def main(argv: list[str] | None = None) -> int:
             logger.info(f"  {len(candidates)} candidate trade(s) on/after {args.start_date} "
                   f"(earliest actual: {earliest.date()})")
 
+        same_day_cap = resolve_same_day_deployment_cap(strategy_name)
+        if same_day_cap:
+            logger.info(f"  same_day_deployment_cap_pct={same_day_cap} (strategy-owned, "
+                        f"{strategy_name}.same_day_deployment_cap_pct)")
+
         for pot_size in pot_sizes:
             result = arbitrate(
                 candidates,
@@ -481,6 +524,7 @@ def main(argv: list[str] | None = None) -> int:
                 cost_model_name=args.cost_model,
                 currency="GBP",
                 price_by_ticker=price_by_ticker,
+                same_day_deployment_cap_pct=same_day_cap,
             )
             all_executed.extend(result["executed"])
 
@@ -489,7 +533,8 @@ def main(argv: list[str] | None = None) -> int:
             max_dd = _max_drawdown([row["portfolio_value"] for row in result["equity_curve"]])
             logger.info(f"  pot £{pot_size:,.0f}: {len(result['executed'])}/{result['n_candidates']} admitted "
                   f"({result['n_rejected_cash']} rejected for cash, "
-                  f"{result['n_rejected_kelly']} rejected for kelly<=0), "
+                  f"{result['n_rejected_kelly']} rejected for kelly<=0, "
+                  f"{result['n_rejected_concentration']} rejected for concentration cap), "
                   f"final £{result['final_cash']:,.2f} (P&L £{total_pnl:+,.2f}, "
                   f"peak deployed £{peak_deployed:,.2f}, max drawdown {max_dd*100:.1f}%)")
 
@@ -502,7 +547,9 @@ def main(argv: list[str] | None = None) -> int:
                 "interest_cum": result["total_interest"],
                 "n_candidates": result["n_candidates"], "n_admitted": result["n_admitted"],
                 "n_rejected_cash": result["n_rejected_cash"],
-                "n_rejected_kelly": result["n_rejected_kelly"], "max_drawdown": max_dd,
+                "n_rejected_kelly": result["n_rejected_kelly"],
+                "n_rejected_concentration": result["n_rejected_concentration"],
+                "max_drawdown": max_dd,
             })
 
     journal_path = Path(args.journal) if args.journal else LIVE_JOURNAL

@@ -619,7 +619,7 @@ class TestFilterCandidatesByDailyTrendQuality:
 _EMPTY_ARBITRATE_RESULT = {
     "executed": [], "equity_curve": [], "total_interest": 0.0,
     "final_cash": 0.0, "n_candidates": 0, "n_admitted": 0,
-    "n_rejected_cash": 0, "n_rejected_kelly": 0,
+    "n_rejected_cash": 0, "n_rejected_kelly": 0, "n_rejected_concentration": 0,
 }
 
 
@@ -742,6 +742,33 @@ class TestMainCLI:
         assert mock_arb.call_count == 3
         pot_sizes_used = [c[1]["initial_cash"] for c in mock_arb.call_args_list]
         assert pot_sizes_used == [25000.0, 50000.0, 100000.0]
+
+    def test_main_resolves_same_day_cap_from_strategy_registry(self):
+        """same_day_deployment_cap_pct is not a CLI flag — main() resolves it
+        from the strategy's registered Entry class attribute and threads it
+        into arbitrate(). A strategy whose Entry class doesn't declare the
+        attribute gets None."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import main
+
+        class _CappedEntry:
+            same_day_deployment_cap_pct = 0.3
+
+        fake_registry = {
+            "capped": {"entry": _CappedEntry, "exit": object},
+            "default": {"entry": object, "exit": object},  # no attribute -> None
+        }
+
+        with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.STRATEGY_REGISTRY", fake_registry):
+            with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.generate_candidates", return_value=([], {}, {})):
+                with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.arbitrate", return_value=dict(_EMPTY_ARBITRATE_RESULT)) as mock_arb:
+                    with mock.patch("Strategy_Auto_Trader.markov_cli.live_sim.append_trades", return_value=0):
+                        # --no-vol-filter skips wants_low_trend_quality(), which
+                        # reads the REAL (unpatched) registry module directly and
+                        # would KeyError on our fake "capped" strategy name.
+                        main(["--tickers", "TEST", "--strategies", "capped", "default", "--no-vol-filter"])
+
+        caps_by_call = [c[1]["same_day_deployment_cap_pct"] for c in mock_arb.call_args_list]
+        assert caps_by_call == [0.3, None]
 
     def test_dump_ticker_scores_writes_json(self, base_record, ts_base, tmp_path):
         from Strategy_Auto_Trader.markov_cli.live_sim import main
@@ -869,6 +896,121 @@ class TestArbitrate:
         assert small_exec.pnl_usd != large_exec.pnl_usd
         # the shared candidate's own record must survive both runs unmutated
         assert cand.record.position_size_gbp == 0.0
+
+    def _make_same_day_candidates(self, n, kelly, entry_price, ts_base, day_offset=0):
+        from Strategy_Auto_Trader.markov_cli.live_sim import Candidate
+
+        cands = []
+        for i in range(n):
+            rec = TradeRecord(date_opened="2026-01-12", ticker=f"T{i}", strategy="test",
+                               entry_score=float(n - i), kelly_fraction=kelly,
+                               return_pct=0.05, entry_price=entry_price)
+            cands.append(Candidate(
+                ticker=f"T{i}",
+                date_opened=ts_base + pd.Timedelta(days=day_offset),
+                date_closed=ts_base + pd.Timedelta(days=day_offset + 5),
+                entry_score=float(n - i), kelly_fraction=kelly,
+                return_pct=0.05, record=rec,
+            ))
+        return cands
+
+    def test_deployment_cap_none_behaves_identically_to_no_cap(self, ts_base):
+        """same_day_deployment_cap_pct=None (or omitted) must be a true no-op
+        — this is what makes the default-off rollout safe for every strategy
+        that doesn't declare the attribute."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate
+
+        candidates = self._make_same_day_candidates(5, kelly=0.5, entry_price=10.0, ts_base=ts_base)
+
+        omitted = arbitrate(candidates, initial_cash=1_000.0, trade_cost=1.0)
+        explicit_none = arbitrate(candidates, initial_cash=1_000.0, trade_cost=1.0,
+                                   same_day_deployment_cap_pct=None)
+
+        assert omitted["n_admitted"] == explicit_none["n_admitted"]
+        assert omitted["n_rejected_cash"] == explicit_none["n_rejected_cash"]
+        assert omitted["n_rejected_concentration"] == explicit_none["n_rejected_concentration"] == 0
+
+    def test_deployment_cap_zero_treated_as_disabled(self, ts_base):
+        """cap_pct=0.0 is falsy — treated as 'no cap', not 'admit nothing',
+        consistent with None/absent meaning disabled."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate
+
+        candidates = self._make_same_day_candidates(3, kelly=0.5, entry_price=10.0, ts_base=ts_base)
+
+        result = arbitrate(candidates, initial_cash=1_000.0, trade_cost=1.0,
+                            same_day_deployment_cap_pct=0.0)
+
+        assert result["n_rejected_concentration"] == 0
+        assert result["n_admitted"] == 3
+
+    def test_deployment_cap_rejects_lowest_priority_candidates_first(self, ts_base):
+        """Cash alone would admit all 5 candidates; the concentration cap
+        narrows the admitted set to the highest-entry_score prefix that fits
+        under cap_pct * initial_cash, rejecting the rest under
+        n_rejected_concentration (not n_rejected_cash).
+
+        5 candidates, kelly=0.1, price=10, initial_cash=100_000: T0 wants
+        qty=floor(100_000*0.1/10)=1000 (alloc=10_000), and each subsequent
+        admission shrinks `cash` so T1's alloc=9_000. cap_pct=0.25 ->
+        daily_cap=25_000, which fits T0+T1 (19_000) but not +T2 (27_100) —
+        admits exactly the top 2 by entry_score, rejects the rest."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate
+
+        candidates = self._make_same_day_candidates(5, kelly=0.1, entry_price=10.0, ts_base=ts_base)
+
+        result = arbitrate(candidates, initial_cash=100_000.0, trade_cost=0.0,
+                            same_day_deployment_cap_pct=0.25)
+
+        assert result["n_rejected_cash"] == 0
+        assert result["n_admitted"] == 2
+        assert result["n_rejected_concentration"] == 3
+        # admitted tickers must be the highest-entry_score prefix (T0 has the
+        # highest score by construction: entry_score = n - i)
+        admitted_tickers = {r.ticker for r in result["executed"]}
+        assert admitted_tickers == {"T0", "T1"}
+
+    def test_deployment_cap_resets_each_day(self, ts_base):
+        """deployed_today resets per calendar day. One candidate per day,
+        cap_pct chosen so a single day's admission (alloc ~100) fits under
+        daily_cap=150, but two days' admissions summed (~190) would not —
+        proving the cap is evaluated fresh each day rather than carried
+        forward (which would incorrectly reject day1's candidate)."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate
+
+        day0 = self._make_same_day_candidates(1, kelly=0.001, entry_price=10.0, ts_base=ts_base, day_offset=0)
+        day1 = self._make_same_day_candidates(1, kelly=0.001, entry_price=10.0, ts_base=ts_base, day_offset=1)
+        day1[0].ticker = "D1_T0"
+        day1[0].record.ticker = "D1_T0"
+
+        result = arbitrate(day0 + day1, initial_cash=100_000.0, trade_cost=0.0,
+                            same_day_deployment_cap_pct=0.0015)
+
+        assert result["n_rejected_concentration"] == 0
+        assert result["n_admitted"] == 2
+
+    def test_deployment_cap_uses_fixed_initial_cash_not_mark_to_market(self, ts_base):
+        """The cap's denominator is the fixed initial_cash, not a mark-to-
+        market portfolio value — even when price_by_ticker is supplied (which
+        would let mark-to-market pricing exist), the admit/reject boundary is
+        unaffected by it."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate
+
+        candidates = self._make_same_day_candidates(5, kelly=0.1, entry_price=10.0, ts_base=ts_base)
+        # Wildly different mark-to-market prices for open positions — should
+        # have no bearing on same-day admission, which happens before any
+        # position is "open" long enough to be marked.
+        price_by_ticker = {
+            f"T{i}": pd.Series([1000.0], index=[ts_base]) for i in range(5)
+        }
+
+        without_prices = arbitrate(candidates, initial_cash=100_000.0, trade_cost=0.0,
+                                    same_day_deployment_cap_pct=0.01)
+        with_prices = arbitrate(candidates, initial_cash=100_000.0, trade_cost=0.0,
+                                 same_day_deployment_cap_pct=0.01,
+                                 price_by_ticker=price_by_ticker)
+
+        assert without_prices["n_admitted"] == with_prices["n_admitted"]
+        assert without_prices["n_rejected_concentration"] == with_prices["n_rejected_concentration"]
 
 
 class TestMarkToMarket:
