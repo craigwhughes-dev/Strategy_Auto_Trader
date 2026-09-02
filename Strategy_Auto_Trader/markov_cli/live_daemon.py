@@ -934,6 +934,30 @@ def _execute_processed_tickers(
             logger.warning(f"[{market_name}] top_k_screen stale/missing — new entries blocked")
         if daemon_state.get("paused_by_user"):
             logger.info(f"[{market_name}] Buying paused by user — new entries blocked")
+
+        # VIX entry gate: block new entries when ^VIX >= strategy-owned threshold.
+        # Fail open (allow entries) if VIX fetch fails — a network hiccup must
+        # not prevent the daemon from trading. SELL signals are never affected.
+        if allow_new_entries:
+            from ..strategy.base.registry import STRATEGY_REGISTRY
+            from ..quant_hmm.sentiment import vix_regime
+            strategy_name = config.get("markets", {}).get(market_name, {}).get("defaults", {}).get("strategy", "")
+            entry_cls = STRATEGY_REGISTRY.get(strategy_name, {}).get("entry")
+            vix_threshold = getattr(entry_cls, "vix_entry_gate_threshold", None)
+            if vix_threshold is not None:
+                vix_data = vix_regime()
+                vix_current = vix_data.get("vix_current")
+                if vix_current is not None and vix_current >= vix_threshold:
+                    allow_new_entries = False
+                    logger.warning(
+                        f"[{market_name}] VIX gate: VIX={vix_current:.1f} >= {vix_threshold:.0f} "
+                        f"— new entries blocked"
+                    )
+                elif vix_current is not None:
+                    logger.info(f"[{market_name}] VIX gate: VIX={vix_current:.1f} < {vix_threshold:.0f} — entries open")
+                else:
+                    logger.warning(f"[{market_name}] VIX gate: fetch failed — entries allowed (fail open)")
+
         market_currency = get_market_currency(market_name, config)
         buys, sells, skipped = execute_signals_with_retry(
             market_name, ticker_list, DATA_DIR, portfolio, limit_tracker, broker,

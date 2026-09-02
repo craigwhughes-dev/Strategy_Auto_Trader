@@ -615,3 +615,40 @@ Result: daily gate survival rate ~72-77% of candidates (vs. the static filter's 
 **Every strategy is worse under daily rescreening than under the static once-only filter, at every pot size tested â€” optimised is the only one still close to breakeven, and only at Â£200k (+Â£258).** conservative/default now blow through Â£25k pots entirely (âˆ’100% max drawdown = pot hit zero, meaning at least one point in the walk-forward the strategy ran out of cash and rejected 10,000+ candidates â€” see the huge "rejected" counts at Â£25k/Â£50k). This is the opposite of a rounding difference: candidate volume is 4-6x higher than the static run (21,087 vs 5,304 for conservative) because all 603 tickers now generate candidates (not just the 118 that passed today's snapshot), and the daily gate admits many candidates on tickers/days the static filter would have excluded entirely for the whole window, and vice versa excludes some the static filter always allowed. Root cause read: the static filter's 118-ticker set was implicitly survivorship-biased toward tickers that are trend-quality-good **as of 2026-07-27** â€” which correlates with having trended well recently, i.e. already-profitable-looking history. The daily gate removes that hindsight and the result is uniformly worse. **This is a more damaging, not more reassuring, correction than the earlier "return on max deployed" fix** â€” it says the Â£100k-earns-Â£16,321/yr (optimised) headline from the static-filter run does not hold once the vol-filter stops leaking future information into which tickers get considered at all.
 
 Conclusion: **the static once-only vol-filter run above should be treated as invalidated for forward-looking return estimates â€” its numbers reflect a filter that could not have been applied in real time.** This daily-rescreen run is the more honest answer to "what would live-trading this earn": at Â£100k, every strategy tested loses money (best: optimised at âˆ’Â£2,773; worst: conservative at âˆ’Â£36,816). Before drawing further conclusions: worth checking whether `--min-trend-quality` (currently the default 0.0) is too permissive for a 603-ticker daily-gated universe (loosening the effective bar from "118 pre-vetted tickers" to "72-77% of any day's candidates" may just be admitting more noise), and whether the huge cash-rejection counts at Â£25k/Â£50k for conservative/default point to a strategy that's structurally unsuited to small-pot deployment regardless of filter design.
+
+---
+
+## 2026-09-02 — VIX portfolio-level risk-off gate: threshold sweep + validation
+
+**Context:** Synthetic Jan2008–Jul2009 stress test (previous entry) showed -90.7% return / -89.7% max drawdown for optimised_new at £100k, top-k=70. Per-position 8% stop-loss alone was insufficient — 429/765 trades stopped out correctly but compounding stop-outs through a sustained downtrend wiped the pot. Hypothesis: a portfolio-level VIX regime gate (block all new entries when market-wide fear is elevated) would have de-risked before the crash, not just responded to it per-position. Related to the rolling-Sharpe volatility investigation (same session): correlated same-day entry clustering driven by shared HMM regime signals is the same mechanism that VIX detects.
+
+**What was built:** `vix_entry_gate_threshold` strategy-owned class attribute on `OptimisedNewEntry` (follows same pattern as `same_day_deployment_cap_pct`). `arbitrate()` in `live_sim.py` gains `vix_series: pd.Series | None` + `vix_entry_gate_threshold: float | None` params — before processing each day's candidates, checks `vix_series.asof(day) >= threshold`; if true, all entries for that day are blocked (counted in `n_rejected_vix`). Cash release for closing positions and equity-curve recording still happen on blocked days. Real `^VIX` daily history fetched once via `fetch_daily("^VIX")` (yfinance max period, back to 1993), used even in synthetic-data mode. 1534 tests pass.
+
+**Sweep:** `scripts/run_vix_gate_sweep.ps1` — thresholds {None, 20, 25, 30, 35, 40} x 2 windows. `scripts/analyze_vix_gate_sweep.py` for results.
+
+Tool: live_sim.py, optimised_new, £100k, top-k=70, full universe, --workers 4. Two windows:
+- **Window A (crash):** synthetic Jan2008–Jul2009 (450/600 tickers had synthetic coverage)
+- **Window B (normal):** real Nov2024–present, --source ibkr
+
+| Threshold | Crash return | Crash Sharpe | Crash Sortino | Normal return | Normal Sharpe | Normal Sortino | VIX-blocked (crash) | VIX-blocked (normal) |
+|---|---|---|---|---|---|---|---|---|
+| None (baseline) | -89.8% | -6.64 | -7.32 | +13.9% | +0.96 | +1.10 | 0 | 0 |
+| 20 | -12.4% | -2.22 | -1.31 | +9.7% | +0.81 | +0.94 | 722 | 107 |
+| 25 | -36.1% | -3.42 | -2.78 | +7.2% | +0.59 | +0.65 | 549 | 38 |
+| 30 | -44.8% | -3.85 | -3.54 | +11.0% | +0.83 | +0.94 | 479 | 17 |
+| 35 | -52.3% | -4.05 | -3.98 | +13.9% | +0.96 | +1.08 | 395 | 6 |
+| 40 | -60.4% | -4.29 | -4.55 | +13.6% | +0.93 | +1.06 | 325 | 3 |
+
+**Key findings:**
+
+1. **vix20 chosen:** crash Sharpe -2.22 vs baseline -6.64 (+4.42 improvement), crash Sortino -1.31 vs -7.32 (+6.01). Normal-market cost: only -0.15 Sharpe (0.81 vs 0.96). The Sharpe cost is negligible; the tail protection is large.
+
+2. **vix25 is worst-of-both-worlds:** worst normal Sharpe (0.59) AND mediocre crash Sharpe (-3.42). The VIX 20–25 range contains net-negative entries on average in the real window — blocking them (vix20) outperforms letting them through (vix25). Do not use 25.
+
+3. **vix30 is runner-up:** good balance (crash Sharpe -3.85, normal Sharpe 0.83) but the crash Sortino (-3.54) is more than twice as bad as vix20 (-1.31) for only +0.02 normal Sharpe gained. Not worth the trade-off.
+
+4. **vix35/40 essentially free in normal markets** (normal Sharpe matches baseline) but provide only modest crash protection.
+
+**Decision:** `OptimisedNewEntry.vix_entry_gate_threshold = 20.0`. Comment in strategy file explains validation result.
+
+**Not started:** Wiring VIX gate into the live daemon (`live_daemon.py`). The `live_sim.py` backtest path now has the gate; the daemon's entry path does not yet. Next step is adding a daily VIX check in the daemon's pre-entry logic using real-time `^VIX` (the existing `sentiment.py::vix_regime()` fetches 60d of VIX history — sufficient for a live check, just needs gating on `vix_current >= 20`).

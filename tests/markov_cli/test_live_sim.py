@@ -620,6 +620,7 @@ _EMPTY_ARBITRATE_RESULT = {
     "executed": [], "equity_curve": [], "total_interest": 0.0,
     "final_cash": 0.0, "n_candidates": 0, "n_admitted": 0,
     "n_rejected_cash": 0, "n_rejected_kelly": 0, "n_rejected_concentration": 0,
+    "n_rejected_vix": 0,
 }
 
 

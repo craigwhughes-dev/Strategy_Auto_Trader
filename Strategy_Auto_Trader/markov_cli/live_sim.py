@@ -65,6 +65,7 @@ from ..quant_hmm.ticker_ranking import (
 )
 from ..core.cli_logging import setup_cli_logger
 from ..strategy.base.registry import STRATEGY_REGISTRY, wants_low_trend_quality
+from ..quant_hmm.quant_engine import fetch_daily
 from ..synthetic_backtest_data.generate import SYNTHETIC_HMM_CACHE_DIR, load_synthetic_hourly
 
 _SYNTHETIC_JOURNAL_DIR = Path(__file__).resolve().parent.parent.parent / "data_synthetic" / "journals"
@@ -123,6 +124,16 @@ def resolve_same_day_deployment_cap(strategy_name: str) -> float | None:
     return getattr(entry_cls, "same_day_deployment_cap_pct", None)
 
 
+def resolve_vix_entry_gate_threshold(strategy_name: str) -> float | None:
+    """Strategy-owned vix_entry_gate_threshold, read off the strategy's
+    registered Entry class (default None = gate disabled). When set, arbitrate()
+    blocks all new entries on days where ^VIX daily close >= this level.
+    Not a CLI flag — see .claude/rules/strategy.md Strategy-Owned Admission
+    Attributes section."""
+    entry_cls = STRATEGY_REGISTRY.get(strategy_name, {}).get("entry")
+    return getattr(entry_cls, "vix_entry_gate_threshold", None)
+
+
 def arbitrate(
     candidates: list[Candidate],
     initial_cash: float,
@@ -131,6 +142,8 @@ def arbitrate(
     currency: str = "GBP",
     price_by_ticker: dict[str, pd.Series] | None = None,
     same_day_deployment_cap_pct: float | None = None,
+    vix_series: pd.Series | None = None,
+    vix_entry_gate_threshold: float | None = None,
 ) -> dict:
     """Walk candidates day-by-day (event days only: opens/closes), arbitrating
     entries against one shared, mutating cash pot. No position-count cap —
@@ -151,6 +164,16 @@ def arbitrate(
     narrows the entry_score-sorted admission from the bottom rather than
     reordering or delaying anyone.
 
+    vix_series / vix_entry_gate_threshold are an OPTIONAL fourth gate:
+    blocks ALL new entries on days where the ^VIX daily close (looked up via
+    Series.asof(day)) is >= vix_entry_gate_threshold. Strategy-owned —
+    resolved from the Entry class attribute and passed in by main(). Uses real
+    historical VIX even in synthetic-data mode (the macro signal is real; only
+    per-ticker prices are synthetic). Days with no VIX observation (NaN from
+    asof) are treated as gate-not-triggered (entries allowed). Cash release for
+    closing positions and equity-curve recording still happen on a VIX-blocked
+    day — only new entries are suppressed.
+
     A candidate with kelly_fraction <= 0 is rejected outright, not sized via
     a flat fallback — this matches live's PortfolioManager.compute_quantity(),
     which returns 0 for kelly_fraction <= 0 and never places the order.
@@ -170,7 +193,8 @@ def arbitrate(
     n_candidates, n_admitted, n_rejected_cash (candidates that couldn't be
     sized due to insufficient cash), n_rejected_kelly (candidates with
     kelly_fraction <= 0), n_rejected_concentration (candidates that would
-    have exceeded same_day_deployment_cap_pct).
+    have exceeded same_day_deployment_cap_pct), n_rejected_vix (candidates
+    blocked because VIX >= vix_entry_gate_threshold on their entry day).
 
     Note: equity_curve is sampled at trade-event days only, not every calendar
     day — for strategies with infrequent trades this is a sparse series. Do
@@ -186,7 +210,7 @@ def arbitrate(
             "executed": [], "equity_curve": [], "total_interest": 0.0,
             "final_cash": initial_cash, "n_candidates": 0, "n_admitted": 0,
             "n_rejected_cash": 0, "n_rejected_kelly": 0,
-            "n_rejected_concentration": 0,
+            "n_rejected_concentration": 0, "n_rejected_vix": 0,
         }
 
     by_day: dict[pd.Timestamp, list[Candidate]] = {}
@@ -209,6 +233,7 @@ def arbitrate(
     n_rejected_cash = 0
     n_rejected_kelly = 0
     n_rejected_concentration = 0
+    n_rejected_vix = 0
     prev_day = None
 
     for day in all_days:
@@ -235,6 +260,14 @@ def arbitrate(
         deployed_today = 0.0
         daily_cap = (same_day_deployment_cap_pct * initial_cash
                      if same_day_deployment_cap_pct else None)
+
+        # VIX gate: block all new entries on high-volatility days
+        if vix_entry_gate_threshold is not None and vix_series is not None:
+            vix_val = vix_series.asof(day)
+            if not pd.isna(vix_val) and float(vix_val) >= vix_entry_gate_threshold:
+                n_rejected_vix += len(day_candidates)
+                day_candidates = []
+
         for cand in day_candidates:
             if not cand.kelly_fraction or cand.kelly_fraction <= 0:
                 n_rejected_kelly += 1
@@ -315,6 +348,7 @@ def arbitrate(
         "n_rejected_cash": n_rejected_cash,
         "n_rejected_kelly": n_rejected_kelly,
         "n_rejected_concentration": n_rejected_concentration,
+        "n_rejected_vix": n_rejected_vix,
     }
 
 
@@ -328,6 +362,8 @@ def simulate_strategy(
     vol_filter_ok: bool = True,
     cost_model_name: str = "flat",
     currency: str = "GBP",
+    vix_series: pd.Series | None = None,
+    vix_entry_gate_threshold: float | None = None,
 ) -> list[TradeRecord]:
     """Run one strategy across all tickers with a shared capital pool. Returns executed TradeRecords.
 
@@ -361,6 +397,8 @@ def simulate_strategy(
         currency=currency,
         price_by_ticker=None,
         same_day_deployment_cap_pct=resolve_same_day_deployment_cap(strategy_name),
+        vix_series=vix_series,
+        vix_entry_gate_threshold=vix_entry_gate_threshold,
     )
 
     executed = result["executed"]
@@ -504,6 +542,8 @@ def main(argv: list[str] | None = None) -> int:
     all_executed: list[TradeRecord] = []
     summary_rows: list[dict] = []
 
+    _vix_series_cache: pd.Series | None = None  # fetched once, reused across strategies
+
     for strategy_name in args.strategies:
         exempt = args.no_vol_filter or strategy_name in args.vol_filter_exempt
         vol_filter_tag = "disabled" if args.no_vol_filter else ("exempt" if exempt else "daily-rescreened")
@@ -579,6 +619,23 @@ def main(argv: list[str] | None = None) -> int:
             logger.info(f"  same_day_deployment_cap_pct={same_day_cap} (strategy-owned, "
                         f"{strategy_name}.same_day_deployment_cap_pct)")
 
+        vix_threshold = resolve_vix_entry_gate_threshold(strategy_name)
+        vix_series: pd.Series | None = None
+        if vix_threshold is not None:
+            if _vix_series_cache is None:
+                vix_df = fetch_daily("^VIX")
+                if vix_df is not None and "Close" in vix_df.columns:
+                    s = vix_df["Close"].dropna()
+                    s.index = pd.to_datetime(s.index).tz_localize(None)
+                    _vix_series_cache = s
+            vix_series = _vix_series_cache
+            if vix_series is None or vix_series.empty:
+                logger.warning("  VIX gate: ^VIX fetch failed — gate disabled for this run")
+                vix_threshold = None
+            else:
+                logger.info(f"  vix_entry_gate_threshold={vix_threshold} (strategy-owned), "
+                            f"latest VIX={vix_series.iloc[-1]:.1f}")
+
         for pot_size in pot_sizes:
             result = arbitrate(
                 candidates,
@@ -588,16 +645,21 @@ def main(argv: list[str] | None = None) -> int:
                 currency="GBP",
                 price_by_ticker=price_by_ticker,
                 same_day_deployment_cap_pct=same_day_cap,
+                vix_series=vix_series,
+                vix_entry_gate_threshold=vix_threshold,
             )
             all_executed.extend(result["executed"])
 
             total_pnl = sum(r.pnl_usd for r in result["executed"])
             peak_deployed = max((row["deployed"] for row in result["equity_curve"]), default=0.0)
             max_dd = _max_drawdown([row["portfolio_value"] for row in result["equity_curve"]])
+            vix_rej_str = (f", {result['n_rejected_vix']} rejected for VIX gate"
+                           if result['n_rejected_vix'] else "")
             logger.info(f"  pot £{pot_size:,.0f}: {len(result['executed'])}/{result['n_candidates']} admitted "
                   f"({result['n_rejected_cash']} rejected for cash, "
                   f"{result['n_rejected_kelly']} rejected for kelly<=0, "
-                  f"{result['n_rejected_concentration']} rejected for concentration cap), "
+                  f"{result['n_rejected_concentration']} rejected for concentration cap"
+                  f"{vix_rej_str}), "
                   f"final £{result['final_cash']:,.2f} (P&L £{total_pnl:+,.2f}, "
                   f"peak deployed £{peak_deployed:,.2f}, max drawdown {max_dd*100:.1f}%)")
 
@@ -612,6 +674,7 @@ def main(argv: list[str] | None = None) -> int:
                 "n_rejected_cash": result["n_rejected_cash"],
                 "n_rejected_kelly": result["n_rejected_kelly"],
                 "n_rejected_concentration": result["n_rejected_concentration"],
+                "n_rejected_vix": result["n_rejected_vix"],
                 "max_drawdown": max_dd,
             })
 

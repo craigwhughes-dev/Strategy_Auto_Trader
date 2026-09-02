@@ -110,6 +110,14 @@ class OptimisedNewEntry:
     # different mechanism (e.g. gating by cross-ticker correlation, not $
     # amount).
     same_day_deployment_cap_pct: float | None = None
+    # VIX portfolio-level risk-off gate: block all new entries on days where
+    # ^VIX daily close >= this level. Validated 2026-09-02 via threshold sweep
+    # {None,20,25,30,35,40} x 2 windows (synthetic Jan2008-Jul2009 crash +
+    # real Nov2024-present). 20.0 chosen: crash Sharpe -2.22 vs baseline -6.64
+    # (+4.42 improvement), crash Sortino -1.31 vs -7.32; real-market cost only
+    # -0.15 Sharpe (0.81 vs 0.96). vix25 confirmed worst-of-both-worlds (real
+    # Sharpe 0.59, mediocre crash Sharpe -3.42). See BACKTEST_LOG.md 2026-09-02.
+    vix_entry_gate_threshold: float = 20.0
     # overnight_scope.py stage-1 (per-market vol_screen) is redundant for this
     # strategy: vol_filter_ok is enforced per-bar at signal time, and
     # top_k_screen's hybrid score weights trend_quality at 0.7 — a third
