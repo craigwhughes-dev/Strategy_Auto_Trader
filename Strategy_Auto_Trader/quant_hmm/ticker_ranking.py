@@ -220,7 +220,10 @@ def run_ticker_backtest(
     High/Low (e.g. for rolling_trend_quality) don't have to re-fetch.
     """
     if df is None:
-        df = fetch_hourly_cached(ticker, period="730d", source=source, client_id=client_id)
+        # "max" only makes sense for the growing on-disk ibkr cache; yfinance's
+        # own 1h history is hard-capped at ~730d by Yahoo regardless of period.
+        period = "max" if source == "ibkr" else "730d"
+        df = fetch_hourly_cached(ticker, period=period, source=source, client_id=client_id)
     if df is None or df.empty:
         return None, None
     if isinstance(df.columns, pd.MultiIndex):

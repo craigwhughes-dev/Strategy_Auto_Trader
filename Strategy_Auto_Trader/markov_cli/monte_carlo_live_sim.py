@@ -258,9 +258,13 @@ def main(argv: list[str] | None = None) -> int:
         historical_returns: dict[str, np.ndarray] = {}
         historical_labels: dict[str, np.ndarray] = {}
 
+        # "max" only makes sense for the growing on-disk ibkr cache; yfinance's
+        # own 1h history is hard-capped at ~730d by Yahoo regardless of period.
+        period = "max" if args.source == "ibkr" else "730d"
+
         skipped = []
         for ticker in fixed_tickers:
-            df = fetch_hourly_cached(ticker, period="730d", source=args.source)
+            df = fetch_hourly_cached(ticker, period=period, source=args.source)
             if df is None or df.empty:
                 skipped.append(ticker)
                 continue
@@ -306,7 +310,7 @@ def main(argv: list[str] | None = None) -> int:
         market_max_n = 0
         if args.market_coupling > 0.0:
             logger.info("  fitting market HMM on SPY for cross-ticker panic coupling...")
-            spy_df = fetch_hourly_cached("SPY", period="730d", source=args.source)
+            spy_df = fetch_hourly_cached("SPY", period=period, source=args.source)
             if spy_df is not None and not spy_df.empty:
                 if isinstance(spy_df.columns, pd.MultiIndex):
                     spy_df.columns = spy_df.columns.get_level_values(0)

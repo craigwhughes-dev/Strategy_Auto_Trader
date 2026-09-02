@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 
 def _fetch(ticker: str) -> pd.DataFrame | None:
     from ..quant_hmm.quant_engine import fetch_hourly
-    return fetch_hourly(ticker, period="730d")
+    return fetch_hourly(ticker, period="max")
 
 
 def _get_company_info(ticker: str) -> tuple[str, str]:

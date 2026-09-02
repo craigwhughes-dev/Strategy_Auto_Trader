@@ -580,8 +580,11 @@ def scan_ticker(
     fetch_hourly_cached / volatility_profile_cached / consolidated_backtest).
     source is only threaded into those module-level defaults — a caller-supplied
     fetch_fn/vol_profile_fn (e.g. tests) is used as-is and never receives it."""
+    # "max" only makes sense for the growing on-disk ibkr cache; yfinance's
+    # own 1h history is hard-capped at ~730d by Yahoo regardless of period.
+    _default_period = "max" if source == "ibkr" else "730d"
     fetch = fetch_fn if fetch_fn is not None else (
-        lambda t, period="730d": fetch_hourly_cached(t, period=period, source=source))
+        lambda t, period=_default_period: fetch_hourly_cached(t, period=period, source=source))
     vol_profile = vol_profile_fn if vol_profile_fn is not None else (
         lambda t: volatility_profile_cached(t, source=source))
     backtest = backtest_fn if backtest_fn is not None else consolidated_backtest
@@ -599,7 +602,7 @@ def scan_ticker(
     for k in _VOL_PROFILE_KEYS:
         row[k] = prof.get(k) if prof else None
 
-    df = fetch(ticker, period="730d")
+    df = fetch(ticker, period=_default_period)
     if df is None or df.empty:
         row["status"] = "no_data"
         return row
@@ -833,7 +836,8 @@ def main(argv: list[str] | None = None) -> int:
         tickers = tickers[: args.limit]
 
     logger.info(f"Full scan: {len(tickers)} tickers, strategy={args.strategy}, "
-          f"no vol screening, max hourly history (730d), cost model {args.cost_model}"
+          f"no vol screening, max hourly history ({'growing ibkr cache' if args.source == 'ibkr' else '730d'}), "
+          f"cost model {args.cost_model}"
           + (f", data cutoff {data_cutoff.isoformat()}" if data_cutoff else ""))
     logger.info(f"  outputs: {SCAN_DIR}  journals: {JOURNAL_DIR}")
     logger.info(f"  workers: {args.workers} (rows land in completion order)\n")

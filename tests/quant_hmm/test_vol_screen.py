@@ -81,7 +81,7 @@ class TestVolScreen:
                         return_value=hourly_like) as mock_fetch, \
              mock.patch("yfinance.download") as mock_yf:
             profile = volatility_profile("TEST", source="ibkr")
-        mock_fetch.assert_called_once_with("TEST", period="2y", source="ibkr")
+        mock_fetch.assert_called_once_with("TEST", period="max", source="ibkr")
         mock_yf.assert_not_called()
         assert profile is not None
         assert profile["efficiency_ratio"] > 0.95

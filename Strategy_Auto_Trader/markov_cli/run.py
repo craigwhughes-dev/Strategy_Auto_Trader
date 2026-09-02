@@ -387,7 +387,10 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     else:
         logger.info(f"  fetching {args.ticker} hourly data (source={args.source})...")
-        df = fetch_hourly(args.ticker, period="730d", source=args.source)
+        # "max" only makes sense for the growing on-disk ibkr cache; yfinance's
+        # own 1h history is hard-capped at ~730d by Yahoo regardless of period.
+        period = "max" if args.source == "ibkr" else "730d"
+        df = fetch_hourly(args.ticker, period=period, source=args.source)
         if df is None or df.empty:
             logger.info(f"  ERROR: could not fetch hourly data for {args.ticker}")
             _write_quality_gate(run_dir, "HOLD", "no data")

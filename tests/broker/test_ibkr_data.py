@@ -160,6 +160,25 @@ class TestFetchHourly:
         assert client._ib.reqHistoricalData.call_count == 2
         assert len(out) == 5
 
+    def test_max_period_bootstrap_pages_to_empty_page_not_a_day_count(self, tmp_path, monkeypatch):
+        """period="max" must never stop bootstrap paging on the min_days
+        check (its sentinel is huge but finite) — only the empty-page/real
+        start-of-history condition should end it, same as any other period,
+        just without an artificial ceiling."""
+        pytest.importorskip("ib_async")
+        from unittest.mock import MagicMock
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
+
+        client = IBKRDataClient()
+        client._ib = MagicMock()
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        client._ib.reqHistoricalData.side_effect = [_make_page(start, 5), []]
+
+        out = client.fetch_hourly("AAPL", period="max", use_cache=False)
+
+        assert client._ib.reqHistoricalData.call_count == 2  # stopped on the empty page
+        assert len(out) == 5
+
     def test_connection_failure_returns_none_when_no_cache(self, monkeypatch, tmp_path):
         monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
         client = IBKRDataClient()
@@ -250,10 +269,22 @@ class TestTruncateToPeriod:
         assert ibkr_data._truncate_to_period(empty, "730d") is not None
         assert len(ibkr_data._truncate_to_period(empty, "730d")) == 0
 
+    def test_max_period_returns_full_cache_unclipped(self):
+        """"max" is a no-op clip — the whole growing on-disk cache comes back."""
+        old_idx = pd.date_range(
+            pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=1280), periods=50, freq="D", tz="UTC")
+        recent_idx = pd.date_range(
+            pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=700), periods=50, freq="D", tz="UTC")
+        df = pd.DataFrame(
+            {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 1},
+            index=old_idx.append(recent_idx))
+        result = ibkr_data._truncate_to_period(df, "max")
+        assert len(result) == 100  # nothing clipped
+
 
 class TestPeriodToDays:
     @pytest.mark.parametrize("period,expected", [
-        ("730d", 730), ("2y", 730), ("1mo", 30),
+        ("730d", 730), ("2y", 730), ("1mo", 30), ("max", ibkr_data._MAX_PERIOD_DAYS),
     ])
     def test_parses_common_formats(self, period, expected):
         assert ibkr_data._period_to_days(period) == expected

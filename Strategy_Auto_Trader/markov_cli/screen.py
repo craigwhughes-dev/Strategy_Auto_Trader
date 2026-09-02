@@ -32,7 +32,7 @@ def _screen_one(ticker: str, years: int = 2) -> dict | None:
     from ..quant_hmm.quant_engine import fetch_hourly
     from ..quant_hmm.consolidated_engine import consolidated_backtest
 
-    df = fetch_hourly(ticker, period="730d")
+    df = fetch_hourly(ticker, period="max")
     if df is None or len(df) < 200:
         return None
 

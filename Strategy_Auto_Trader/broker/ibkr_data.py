@@ -53,9 +53,20 @@ def _duration_str_to_days(duration: str) -> int:
     return int(n) * _DURATION_UNIT_DAYS[unit.upper()[0]]
 
 
+_MAX_PERIOD_DAYS = 36500  # "max" sentinel: ~100yr, stays within pd.Timestamp bounds
+
+
 def _period_to_days(period: str) -> int:
-    """Parse a yfinance-style period string ("730d", "2y") into a day count."""
+    """Parse a yfinance-style period string ("730d", "2y") into a day count.
+
+    "max" returns a day count large enough that _truncate_to_period() is a
+    no-op (returns the full on-disk cache) and fetch_hourly()'s bootstrap
+    paging never stops on the min_days check — it stops only when IBKR
+    returns an empty page, i.e. the real start of available history.
+    """
     period = period.strip().lower()
+    if period == "max":
+        return _MAX_PERIOD_DAYS
     if period.endswith("d"):
         return int(period[:-1])
     if period.endswith("y"):
@@ -107,9 +118,11 @@ def _truncate_to_period(df: pd.DataFrame | None, period: str) -> pd.DataFrame | 
     """Clip df to only the most recent `period` of bars (read-time only; cache file unchanged).
 
     The on-disk IBKR cache is append-only and may contain more history than the
-    requested period — this ensures callers like volatility_profile() score the
-    same window as the yfinance branch, preventing trend_quality sign-flips from
-    the extra history (see BACKTEST_LIVE_PARITY_PLAN Step 1).
+    requested period. period="max" is a no-op here (see _period_to_days) — every
+    ibkr-source bar-fetching call site in this project now requests "max" so the
+    growing cache is used in full; this function still matters for any caller
+    that deliberately wants a bounded window (e.g. a genuine yfinance-fallback
+    read), and for _period_to_days's own bootstrap min_days semantics.
     """
     if df is None or df.empty:
         return df

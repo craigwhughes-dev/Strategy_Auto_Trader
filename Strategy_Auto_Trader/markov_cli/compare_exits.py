@@ -36,7 +36,7 @@ STRATEGIES = [
 def _fetch(ticker: str) -> pd.DataFrame | None:
     from ..quant_hmm.quant_engine import fetch_hourly
     try:
-        return fetch_hourly(ticker, period="730d")
+        return fetch_hourly(ticker, period="max")
     except Exception:
         return None
 

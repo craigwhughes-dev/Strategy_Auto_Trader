@@ -55,11 +55,17 @@ def volatility_profile(ticker: str, period: str = "2y", source: str = "ibkr") ->
 
     source="ibkr" derives daily OHLC by resampling quant_engine.fetch_hourly's
     IBKR-backed cache instead of a second, separate IBKR daily fetch/cache —
-    the 2y default period is well within the hourly cache's retention window,
-    so there's no need for a parallel daily paging path. Resampling by UTC
-    calendar day is safe here: both NYSE and LSE trading hours fall entirely
-    within one UTC day (neither session crosses UTC midnight), so no bar
-    ever gets split across two resampled days.
+    no need for a parallel daily paging path. Resampling by UTC calendar day
+    is safe here: both NYSE and LSE trading hours fall entirely within one
+    UTC day (neither session crosses UTC midnight), so no bar ever gets
+    split across two resampled days.
+
+    The ibkr branch always requests the full growing on-disk cache ("max"),
+    ignoring `period` — this project only ever runs source="ibkr" live, so
+    there's no yfinance window to stay in parity with (unlike the old
+    2y-matching behaviour this replaced). `period` still governs the
+    yfinance branch below, which does have a real ~730d-ish practical
+    ceiling on intraday-derived history.
 
     Returns dict with:
       - ann_vol: annualised total volatility (both up and down moves)
@@ -74,7 +80,7 @@ def volatility_profile(ticker: str, period: str = "2y", source: str = "ibkr") ->
         from .quant_engine import fetch_hourly
 
         try:
-            hourly = fetch_hourly(ticker, period=period, source="ibkr")
+            hourly = fetch_hourly(ticker, period="max", source="ibkr")
         except Exception:
             return None
         if hourly is None or hourly.empty:
