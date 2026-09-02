@@ -20,6 +20,7 @@ ENV/
 
 # Generated output and runtime artifacts
 data/
+data_synthetic/
 logs/
 reports/
 state/

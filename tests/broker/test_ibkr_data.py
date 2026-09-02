@@ -246,6 +246,73 @@ class TestFetchHourly:
         assert ibkr_data._cache_path("AAPL").stat().st_mtime_ns == mtime_before
 
 
+class TestFetchDaily:
+    def test_bootstrap_pages_until_min_days_covered(self, tmp_path, monkeypatch):
+        pytest.importorskip("ib_async")
+        from unittest.mock import MagicMock
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR_DAILY", tmp_path)
+
+        client = IBKRDataClient()
+        client._ib = MagicMock()
+        start = datetime.now(timezone.utc) - timedelta(days=190)
+        page1 = _make_page(start + timedelta(days=180), 5)
+        page2 = _make_page(start, 5)
+        client._ib.reqHistoricalData.side_effect = [page1, page2]
+
+        out = client.fetch_daily("AAPL", period="200d", use_cache=False)
+
+        assert client._ib.reqHistoricalData.call_count == 2
+        assert client._ib.reqHistoricalData.call_args.kwargs["barSizeSetting"] == "1 day"
+        assert list(out.columns) == ["Open", "High", "Low", "Close", "Volume"]
+        assert len(out) == 10
+        assert out.index.is_monotonic_increasing
+
+    def test_incremental_fetch_only_pages_the_gap(self, tmp_path, monkeypatch):
+        pytest.importorskip("ib_async")
+        from unittest.mock import MagicMock
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR_DAILY", tmp_path)
+
+        cached_idx = pd.date_range("2026-01-01", periods=5, freq="D", tz="UTC")
+        cached = pd.DataFrame(
+            {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 100}, index=cached_idx)
+        ibkr_data._save_cache("AAPL", cached, ibkr_data.CACHE_DIR_DAILY)
+
+        client = IBKRDataClient()
+        client._ib = MagicMock()
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        page = [_bar(start + timedelta(days=i)) for i in range(10)]
+        client._ib.reqHistoricalData.side_effect = [page]
+
+        out = client.fetch_daily("AAPL", period="max", use_cache=True)
+
+        assert client._ib.reqHistoricalData.call_count == 1
+        assert len(out) == 10
+        reloaded = ibkr_data._load_cache("AAPL", ibkr_data.CACHE_DIR_DAILY)
+        assert len(reloaded) == 10
+
+    def test_uses_separate_cache_dir_from_hourly(self, tmp_path, monkeypatch):
+        """A daily fetch must never read or write the hourly cache dir, and
+        vice versa — the two are deliberately kept apart on disk."""
+        hourly_dir = tmp_path / "hourly"
+        daily_dir = tmp_path / "daily"
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR", hourly_dir)
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR_DAILY", daily_dir)
+
+        idx = pd.date_range("2026-01-01", periods=3, freq="D", tz="UTC")
+        cached = pd.DataFrame(
+            {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 100}, index=idx)
+        ibkr_data._save_cache("AAPL", cached, daily_dir)
+
+        assert (daily_dir / "AAPL.csv").exists()
+        assert not hourly_dir.exists()
+
+    def test_connection_failure_returns_none_when_no_cache(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR_DAILY", tmp_path)
+        client = IBKRDataClient()
+        client.connect = lambda: False
+        assert client.fetch_daily("AAPL", use_cache=True) is None
+
+
 class TestTruncateToPeriod:
     def test_clips_old_bars_to_period_window(self):
         """Cache with 3.5y of bars must be clipped to the requested 2y window at read time."""

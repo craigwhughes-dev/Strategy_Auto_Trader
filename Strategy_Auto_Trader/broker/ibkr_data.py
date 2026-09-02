@@ -36,6 +36,7 @@ from .symbols import ibkr_contract_params
 logger = logging.getLogger(__name__)
 
 CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "cache" / "ibkr_hourly"
+CACHE_DIR_DAILY = Path(__file__).resolve().parent.parent.parent / "data" / "cache" / "ibkr_daily"
 
 # 862-1123 bars/request measured live for SPY/HSBA.L at "6 M" — comfortably
 # under IBKR's ~2000-bar/request cap, cuts request count ~6x vs the old 30 D
@@ -76,12 +77,13 @@ def _period_to_days(period: str) -> int:
     raise ValueError(f"Unrecognized period format: {period!r}")
 
 
-def _cache_path(ticker: str) -> Path:
-    return CACHE_DIR / f"{ticker.replace('/', '-')}.csv"
+def _cache_path(ticker: str, cache_dir: Path | None = None) -> Path:
+    cache_dir = CACHE_DIR if cache_dir is None else cache_dir
+    return cache_dir / f"{ticker.replace('/', '-')}.csv"
 
 
-def _load_cache(ticker: str) -> pd.DataFrame | None:
-    path = _cache_path(ticker)
+def _load_cache(ticker: str, cache_dir: Path | None = None) -> pd.DataFrame | None:
+    path = _cache_path(ticker, cache_dir)
     if not path.exists():
         return None
     df = pd.read_csv(path, index_col=0, parse_dates=True)
@@ -92,8 +94,8 @@ def _load_cache(ticker: str) -> pd.DataFrame | None:
     return df
 
 
-def _save_cache(ticker: str, df: pd.DataFrame) -> None:
-    atomic_write_csv(_cache_path(ticker), df)
+def _save_cache(ticker: str, df: pd.DataFrame, cache_dir: Path | None = None) -> None:
+    atomic_write_csv(_cache_path(ticker, cache_dir), df)
 
 
 def _resample_30min_aligned(df: pd.DataFrame | None) -> pd.DataFrame | None:
@@ -174,7 +176,8 @@ class IBKRDataClient:
 
     def _fetch_pages(self, contract, what_to_show: str = "TRADES",
                       stop_at: pd.Timestamp | None = None,
-                      min_days: int | None = None) -> pd.DataFrame:
+                      min_days: int | None = None,
+                      bar_size: str = "1 hour") -> pd.DataFrame:
         """Page backward from now through reqHistoricalData.
 
         stop_at (incremental gap-fill): page only until a page's oldest bar
@@ -195,7 +198,7 @@ class IBKRDataClient:
         for _ in range(_MAX_PAGES):
             bars = self._ib.reqHistoricalData(
                 contract, endDateTime=end_dt, durationStr=_PAGE_DURATION,
-                barSizeSetting="1 hour", whatToShow=what_to_show, useRTH=True,
+                barSizeSetting=bar_size, whatToShow=what_to_show, useRTH=True,
             )
             if not bars:
                 break
@@ -295,6 +298,51 @@ class IBKRDataClient:
         if use_cache and not new_df.empty:
             _save_cache(ticker, merged)
         return _resample_30min_aligned(_truncate_to_period(merged, period))
+
+    def fetch_daily(self, ticker: str, period: str = "max", use_cache: bool = True,
+                     what_to_show: str = "TRADES") -> pd.DataFrame | None:
+        """Fetch daily OHLCV, same incremental-cache shape as fetch_hourly
+        (see its docstring) but barSizeSetting="1 day" and a separate,
+        never-merged cache dir (data/cache/ibkr_daily/) — kept apart from
+        the hourly cache so a daily fetch can never contaminate hourly bars
+        or vice versa. No 30-min bar-alignment resample: that fix is
+        specific to IBKR's hourly TRADES bar-boundary quirk and doesn't
+        apply to daily bars."""
+        cached = _load_cache(ticker, CACHE_DIR_DAILY) if use_cache else None
+
+        owns_connection = self._ib is None
+        if owns_connection and not self.connect():
+            return _truncate_to_period(cached, period)
+
+        try:
+            from ib_async import Stock
+            contract = Stock(*ibkr_contract_params(ticker))
+            if not self._qualify(ticker, contract):
+                return _truncate_to_period(cached, period)
+            if cached is not None:
+                new_df = self._fetch_pages(contract, what_to_show=what_to_show,
+                                            stop_at=cached.index[-1], bar_size="1 day")
+            else:
+                new_df = self._fetch_pages(contract, what_to_show=what_to_show,
+                                            min_days=_period_to_days(period), bar_size="1 day")
+        except Exception:
+            logger.warning("fetch_daily(%s) failed", ticker, exc_info=True)
+            return _truncate_to_period(cached, period)
+        finally:
+            if owns_connection:
+                self.disconnect()
+
+        if cached is not None:
+            merged = pd.concat([cached, new_df]) if not new_df.empty else cached
+            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+        else:
+            merged = new_df
+
+        if merged.empty:
+            return _truncate_to_period(cached, period)
+        if use_cache and not new_df.empty:
+            _save_cache(ticker, merged, CACHE_DIR_DAILY)
+        return _truncate_to_period(merged, period)
 
     def fetch_recent_raw(self, ticker: str, lookback_days: int,
                           what_to_show: str = "TRADES") -> pd.DataFrame | None:
