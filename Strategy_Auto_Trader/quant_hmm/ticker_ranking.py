@@ -192,6 +192,8 @@ def run_ticker_backtest(
     df: pd.DataFrame | None = None,
     use_persistent_cache: bool = True,
     client_id: int = 2,
+    hmm_cache_dir: Path | None = None,
+    historical_only: bool = False,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """Fetch data and run one ticker's full-history backtest.
 
@@ -215,6 +217,16 @@ def run_ticker_backtest(
     cache. position_sizer is also kept None (engine builds fresh per-call) so
     KellySizer state never leaks across synthetic paths.
 
+    hmm_cache_dir: override for _HMM_CACHE_DIR (default data/cache/hmm_cache/).
+    A synthetic-data caller that still wants persistent caching (rather than
+    use_persistent_cache=False) MUST point this at a directory outside the
+    real cache tree — e.g. data_synthetic/hmm_cache/ — since the cache key is
+    ticker name alone and a synthetic AAPL run would otherwise silently
+    corrupt the real AAPL cache file (see synthetic_backtest_data/generate.py).
+
+    historical_only: see quant_engine.fetch_hourly's docstring — skips the
+    live IBKR gap-fill when a cache already exists.
+
     Returns (detail_df, hourly_ohlc_df), or (None, None) on missing/insufficient
     data. The full OHLC frame (not just Close) is returned so callers needing
     High/Low (e.g. for rolling_trend_quality) don't have to re-fetch.
@@ -223,7 +235,8 @@ def run_ticker_backtest(
         # "max" only makes sense for the growing on-disk ibkr cache; yfinance's
         # own 1h history is hard-capped at ~730d by Yahoo regardless of period.
         period = "max" if source == "ibkr" else "730d"
-        df = fetch_hourly_cached(ticker, period=period, source=source, client_id=client_id)
+        df = fetch_hourly_cached(ticker, period=period, source=source, client_id=client_id,
+                                  historical_only=historical_only)
     if df is None or df.empty:
         return None, None
     if isinstance(df.columns, pd.MultiIndex):
@@ -233,8 +246,9 @@ def run_ticker_backtest(
 
     if use_persistent_cache:
         safe_ticker = ticker.replace("/", "-").replace("\\", "-")
+        cache_dir = hmm_cache_dir if hmm_cache_dir is not None else _HMM_CACHE_DIR
         regime_model = PersistentHMMRegimeModel(
-            _HMM_CACHE_DIR / f"{safe_ticker}.pkl",
+            cache_dir / f"{safe_ticker}.pkl",
             dates=df.index,
             closes=df["Close"].values,
         )
@@ -297,6 +311,8 @@ def fetch_and_extract(
     df: pd.DataFrame | None = None,
     use_persistent_cache: bool = True,
     client_id: int = 2,
+    hmm_cache_dir: Path | None = None,
+    historical_only: bool = False,
 ) -> list[Candidate]:
     """Run one ticker's full-history backtest and extract its round-trip trades.
 
@@ -304,12 +320,14 @@ def fetch_and_extract(
     (baked into every Entry class) — this is a bool, not a re-lookup, since
     the caller has usually already screened the ticker once (efficiency).
 
-    df / use_persistent_cache: see run_ticker_backtest's docstring.
+    df / use_persistent_cache / hmm_cache_dir / historical_only: see
+    run_ticker_backtest's docstring.
     """
     detail, _df = run_ticker_backtest(ticker, strategy_name, vol_filter_ok,
                                       use_seasonal_volume=use_seasonal_volume, source=source,
                                       df=df, use_persistent_cache=use_persistent_cache,
-                                      client_id=client_id)
+                                      client_id=client_id, hmm_cache_dir=hmm_cache_dir,
+                                      historical_only=historical_only)
     if detail is None:
         logger.info(f"  {ticker}: no data or insufficient data, skipping")
         return []
@@ -321,6 +339,8 @@ def fetch_extract_and_prices(
     use_seasonal_volume: bool = False, source: str = "ibkr",
     df: pd.DataFrame | None = None,
     use_persistent_cache: bool = True,
+    hmm_cache_dir: Path | None = None,
+    historical_only: bool = False,
 ) -> tuple[list[Candidate], pd.Series | None, pd.Series | None]:
     """Like fetch_and_extract, but also returns the ticker's close-price series
     (for mark-to-market valuation) and its rolling trend_quality series (for
@@ -328,12 +348,14 @@ def fetch_extract_and_prices(
     why a single "as of today" snapshot can't be used across a historical
     backtest). Top-level function so it's picklable for ProcessPoolExecutor.
 
-    df / use_persistent_cache: see run_ticker_backtest's docstring.
+    df / use_persistent_cache / hmm_cache_dir / historical_only: see
+    run_ticker_backtest's docstring.
     """
     detail, df_out = run_ticker_backtest(ticker, strategy_name, vol_filter_ok,
                                          use_seasonal_volume=use_seasonal_volume, source=source,
                                          df=df, use_persistent_cache=use_persistent_cache,
-                                         client_id=_worker_client_id)
+                                         client_id=_worker_client_id, hmm_cache_dir=hmm_cache_dir,
+                                         historical_only=historical_only)
     if detail is None:
         return [], None, None
     candidates = candidates_from_detail(ticker, detail, strategy_name, vol_filter_tag)
@@ -351,6 +373,8 @@ def generate_candidates(
     source: str = "ibkr",
     df_by_ticker: dict[str, pd.DataFrame] | None = None,
     use_persistent_cache: bool = True,
+    hmm_cache_dir: Path | None = None,
+    historical_only: bool = False,
 ) -> tuple[list[Candidate], dict[str, pd.Series], dict[str, pd.Series]]:
     """Generate one strategy's candidate trades across a ticker list, optionally
     in parallel, retaining each ticker's close-price series (mark-to-market)
@@ -369,8 +393,16 @@ def generate_candidates(
     paths (plain DataFrames, picklable across ProcessPoolExecutor without
     closure serialisation issues).
 
-    use_persistent_cache: passed through to run_ticker_backtest — set False for
-    Monte Carlo paths to avoid corrupting real on-disk HMM caches."""
+    use_persistent_cache / hmm_cache_dir: passed through to run_ticker_backtest
+    — set use_persistent_cache=False for Monte Carlo paths to avoid corrupting
+    real on-disk HMM caches, or pass hmm_cache_dir pointed outside the real
+    cache tree (e.g. data_synthetic/hmm_cache/) to keep caching enabled while
+    still isolated from real tickers' cache files.
+
+    historical_only: see quant_engine.fetch_hourly's docstring — a live_sim
+    backtest across the full universe doesn't need today's newest bar for
+    every ticker; skipping the live gap-fill avoids competing with the live
+    daemon's own IBKR polling for pacing-limit headroom."""
     all_candidates: list[Candidate] = []
     price_by_ticker: dict[str, pd.Series] = {}
     trend_quality_by_ticker: dict[str, pd.Series] = {}
@@ -389,7 +421,7 @@ def generate_candidates(
                     fetch_extract_and_prices, t, strategy_name, vol_filter_tag,
                     vol_filter_ok, use_seasonal_volume, source,
                     df_by_ticker.get(t) if df_by_ticker else None,
-                    use_persistent_cache,
+                    use_persistent_cache, hmm_cache_dir, historical_only,
                 ): t
                 for t in tickers
             }
@@ -406,7 +438,7 @@ def generate_candidates(
             cands, close, trend_quality = fetch_extract_and_prices(
                 ticker, strategy_name, vol_filter_tag, vol_filter_ok, use_seasonal_volume, source,
                 df_by_ticker.get(ticker) if df_by_ticker else None,
-                use_persistent_cache)
+                use_persistent_cache, hmm_cache_dir, historical_only)
             all_candidates.extend(cands)
             if close is not None:
                 price_by_ticker[ticker] = close

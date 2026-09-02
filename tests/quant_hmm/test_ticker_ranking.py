@@ -28,14 +28,16 @@ class TestRunTickerBacktestSource:
                         return_value=None) as mock_fetch:
             run_ticker_backtest("AAPL", "default", source="ibkr")
 
-        mock_fetch.assert_called_once_with("AAPL", period="max", source="ibkr", client_id=2)
+        mock_fetch.assert_called_once_with("AAPL", period="max", source="ibkr", client_id=2,
+                                            historical_only=False)
 
     def test_default_source_is_ibkr(self):
         with mock.patch("Strategy_Auto_Trader.quant_hmm.ticker_ranking.fetch_hourly_cached",
                         return_value=None) as mock_fetch:
             run_ticker_backtest("AAPL", "default")
 
-        mock_fetch.assert_called_once_with("AAPL", period="max", source="ibkr", client_id=2)
+        mock_fetch.assert_called_once_with("AAPL", period="max", source="ibkr", client_id=2,
+                                            historical_only=False)
 
 
 class _ImmediateExecutor:
@@ -106,7 +108,8 @@ class TestGenerateCandidates:
 
         def fake_fetch(ticker, strategy_name, vol_filter_tag, vol_filter_ok=True,
                       use_seasonal_volume=False, source="yfinance",
-                      df=None, use_persistent_cache=True):
+                      df=None, use_persistent_cache=True, hmm_cache_dir=None,
+                      historical_only=False):
             rec = TradeRecord(date_opened="2026-01-12", ticker=ticker, strategy=strategy_name,
                                entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
             cand = Candidate(
@@ -283,6 +286,36 @@ class TestRunTickerBacktestDISeam:
         m_fetch.assert_called_once()
         m_hmm.assert_called_once()
 
+    def test_hmm_cache_dir_override_used_instead_of_default(self, tmp_path):
+        """hmm_cache_dir must reach PersistentHMMRegimeModel's cache path
+        instead of the module-level _HMM_CACHE_DIR — this is the seam
+        synthetic_backtest_data needs to keep HMM caching isolated from
+        real tickers' cache files."""
+        fixture_df = _make_minimal_ohlcv()
+        with mock.patch(
+            "Strategy_Auto_Trader.quant_hmm.ticker_ranking.PersistentHMMRegimeModel"
+        ) as m_hmm:
+            with mock.patch("Strategy_Auto_Trader.quant_hmm.ticker_ranking.consolidated_backtest",
+                            return_value={"detail": pd.DataFrame()}):
+                run_ticker_backtest("AAPL", "default", df=fixture_df, hmm_cache_dir=tmp_path)
+        called_path = m_hmm.call_args[0][0]
+        assert called_path == tmp_path / "AAPL.pkl"
+
+    def test_hmm_cache_dir_none_falls_back_to_default(self, tmp_path, monkeypatch):
+        """Omitting hmm_cache_dir must preserve the original _HMM_CACHE_DIR
+        default, not silently break existing (non-synthetic) callers."""
+        import Strategy_Auto_Trader.quant_hmm.ticker_ranking as tr_module
+        monkeypatch.setattr(tr_module, "_HMM_CACHE_DIR", tmp_path)
+        fixture_df = _make_minimal_ohlcv()
+        with mock.patch(
+            "Strategy_Auto_Trader.quant_hmm.ticker_ranking.PersistentHMMRegimeModel"
+        ) as m_hmm:
+            with mock.patch("Strategy_Auto_Trader.quant_hmm.ticker_ranking.consolidated_backtest",
+                            return_value={"detail": pd.DataFrame()}):
+                run_ticker_backtest("AAPL", "default", df=fixture_df)
+        called_path = m_hmm.call_args[0][0]
+        assert called_path == tmp_path / "AAPL.pkl"
+
 
 class TestGenerateCandidatesDISeam:
     """df_by_ticker and use_persistent_cache thread correctly through generate_candidates."""
@@ -297,7 +330,8 @@ class TestGenerateCandidatesDISeam:
 
         def fake_fep(ticker, strategy_name, vol_filter_tag,
                      vol_filter_ok=True, use_seasonal_volume=False, source="yfinance",
-                     df=None, use_persistent_cache=True):
+                     df=None, use_persistent_cache=True, hmm_cache_dir=None,
+                     historical_only=False):
             received_dfs.append((ticker, df))
             rec = TradeRecord(date_opened="2026-01-12", ticker=ticker, strategy=strategy_name,
                               entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
@@ -331,7 +365,8 @@ class TestGenerateCandidatesDISeam:
 
         def fake_fep(ticker, strategy_name, vol_filter_tag,
                      vol_filter_ok=True, use_seasonal_volume=False, source="yfinance",
-                     df=None, use_persistent_cache=True):
+                     df=None, use_persistent_cache=True, hmm_cache_dir=None,
+                     historical_only=False):
             received[ticker] = df
             rec = TradeRecord(date_opened="2026-01-12", ticker=ticker, strategy=strategy_name,
                               entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
@@ -352,6 +387,24 @@ class TestGenerateCandidatesDISeam:
 
         assert received["A"] is fixture_df
         assert received["B"] is fixture_df
+
+    def test_hmm_cache_dir_passed_through_sequential(self, ts_base, tmp_path):
+        received: list = []
+
+        def fake_fep(ticker, strategy_name, vol_filter_tag,
+                     vol_filter_ok=True, use_seasonal_volume=False, source="yfinance",
+                     df=None, use_persistent_cache=True, hmm_cache_dir=None,
+                     historical_only=False):
+            received.append(hmm_cache_dir)
+            return [], pd.Series([100.0], index=[ts_base]), pd.Series([0.5], index=[ts_base])
+
+        with mock.patch(
+            "Strategy_Auto_Trader.quant_hmm.ticker_ranking.fetch_extract_and_prices",
+            side_effect=fake_fep,
+        ):
+            generate_candidates(["A"], "test", hmm_cache_dir=tmp_path)
+
+        assert received == [tmp_path]
 
 
 class TestTickerRankingScore:
