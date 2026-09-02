@@ -103,7 +103,7 @@ class OptimisedNewEntry:
     # 2026-09-02 rolling-Sharpe-volatility investigation found correlated
     # same-day entries/exits driving Sharpe swings, not yet confirmed this
     # cap actually helps without hurting return).
-    same_day_deployment_cap_pct: float | None = None
+    same_day_deployment_cap_pct: float | None = 0.50
     # overnight_scope.py stage-1 (per-market vol_screen) is redundant for this
     # strategy: vol_filter_ok is enforced per-bar at signal time, and
     # top_k_screen's hybrid score weights trend_quality at 0.7 — a third
