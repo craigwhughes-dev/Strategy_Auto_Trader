@@ -20,7 +20,8 @@ ENV/
 
 # Generated output and runtime artifacts
 data/
-data_synthetic/
+data_synthetic/*
+!data_synthetic/README.md
 logs/
 reports/
 state/
