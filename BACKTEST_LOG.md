@@ -6,6 +6,8 @@ Running log of every backtest/scan run â€” newest entry on top. One block per ru
 
 **Rule: any `live_sim.py` run (has a `position_summary.csv`) must ship a chart alongside the log entry.** 3-panel line chart, one line per strategy, all vs date: (1) deployed Â£ (amount committed to market), (2) total P&L Â£ (`portfolio_value - pot_size`), (3) `n_open` (number of live/open trades). Drop `date == 'SUMMARY'` rows first. Save to `reports/<journal_basename>_chart.png`, link it from the log entry (`Chart: <path>`). Isolated-pot runs (`full_scan.py`, no `position_summary.csv`) have no equity curve to chart â€” table only.
 
+**Rule: every entry must include (1) the exact command line(s) run (or the script invocation + what it internally runs), and (2) the actual data date range â€” first candidate date and last bar/run date from the results, not just the `--start-date` arg.**
+
 **Archive note (2026-07-27):** history before this date lives in `BACKTEST_LOG_ARCHIVE_pre20260727.md`, archived because most of its entries carried a "Return on max deployed"/"~Annualised" column that was misread as an achievable real-money return and confirmed wrong (panel-reviewed) â€” the underlying trades assume infinite capital was always available, so they don't hold for a real capital-constrained account. This file starts clean with the corrected format: capacity facts only, no derived "return". For "what would Â£X actually earn me": there is no shortcut metric â€” run `live_sim.py --initial-cash <X>` (or `--pot-sizes <X> <Y> ...` to sweep) on a curated ticker/strategy set for real entry arbitration and real position sizing off the actual pot.
 
 Template:
@@ -618,17 +620,42 @@ Conclusion: **the static once-only vol-filter run above should be treated as inv
 
 ---
 
-## 2026-09-02 — VIX portfolio-level risk-off gate: threshold sweep + validation
+## 2026-09-02 ï¿½ VIX portfolio-level risk-off gate: threshold sweep + validation
 
-**Context:** Synthetic Jan2008–Jul2009 stress test (previous entry) showed -90.7% return / -89.7% max drawdown for optimised_new at £100k, top-k=70. Per-position 8% stop-loss alone was insufficient — 429/765 trades stopped out correctly but compounding stop-outs through a sustained downtrend wiped the pot. Hypothesis: a portfolio-level VIX regime gate (block all new entries when market-wide fear is elevated) would have de-risked before the crash, not just responded to it per-position. Related to the rolling-Sharpe volatility investigation (same session): correlated same-day entry clustering driven by shared HMM regime signals is the same mechanism that VIX detects.
+**Context:** Synthetic Jan2008ï¿½Jul2009 stress test (previous entry) showed -90.7% return / -89.7% max drawdown for optimised_new at ï¿½100k, top-k=70. Per-position 8% stop-loss alone was insufficient ï¿½ 429/765 trades stopped out correctly but compounding stop-outs through a sustained downtrend wiped the pot. Hypothesis: a portfolio-level VIX regime gate (block all new entries when market-wide fear is elevated) would have de-risked before the crash, not just responded to it per-position. Related to the rolling-Sharpe volatility investigation (same session): correlated same-day entry clustering driven by shared HMM regime signals is the same mechanism that VIX detects.
 
-**What was built:** `vix_entry_gate_threshold` strategy-owned class attribute on `OptimisedNewEntry` (follows same pattern as `same_day_deployment_cap_pct`). `arbitrate()` in `live_sim.py` gains `vix_series: pd.Series | None` + `vix_entry_gate_threshold: float | None` params — before processing each day's candidates, checks `vix_series.asof(day) >= threshold`; if true, all entries for that day are blocked (counted in `n_rejected_vix`). Cash release for closing positions and equity-curve recording still happen on blocked days. Real `^VIX` daily history fetched once via `fetch_daily("^VIX")` (yfinance max period, back to 1993), used even in synthetic-data mode. 1534 tests pass.
+**What was built:** `vix_entry_gate_threshold` strategy-owned class attribute on `OptimisedNewEntry` (follows same pattern as `same_day_deployment_cap_pct`). `arbitrate()` in `live_sim.py` gains `vix_series: pd.Series | None` + `vix_entry_gate_threshold: float | None` params ï¿½ before processing each day's candidates, checks `vix_series.asof(day) >= threshold`; if true, all entries for that day are blocked (counted in `n_rejected_vix`). Cash release for closing positions and equity-curve recording still happen on blocked days. Real `^VIX` daily history fetched once via `fetch_daily("^VIX")` (yfinance max period, back to 1993), used even in synthetic-data mode. 1534 tests pass.
 
-**Sweep:** `scripts/run_vix_gate_sweep.ps1` — thresholds {None, 20, 25, 30, 35, 40} x 2 windows. `scripts/analyze_vix_gate_sweep.py` for results.
+**Sweep:** `scripts/run_vix_gate_sweep.ps1` ï¿½ thresholds {None, 20, 25, 30, 35, 40} x 2 windows. `scripts/analyze_vix_gate_sweep.py` for results.
 
-Tool: live_sim.py, optimised_new, £100k, top-k=70, full universe, --workers 4. Two windows:
-- **Window A (crash):** synthetic Jan2008–Jul2009 (450/600 tickers had synthetic coverage)
-- **Window B (normal):** real Nov2024–present, --source ibkr
+Tool: live_sim.py, optimised_new, ï¿½100k, top-k=70, full universe, --workers 4. Two windows:
+- **Window A (crash):** synthetic Jan2008ï¿½Jul2009 (450/600 tickers had synthetic coverage)
+- **Window B (normal):** real Nov2024ï¿½present, --source ibkr
+
+Commands (run via `powershell -File scripts/run_vix_gate_sweep.ps1`, repeated per threshold `<label>` in `{baseline,vix20,vix25,vix30,vix35,vix40}`):
+```
+# Window A -- synthetic crash
+uv run python -m Strategy_Auto_Trader.markov_cli.live_sim \r
+    --universe --strategies optimised_new \r
+    --initial-cash 100000 --top-k 70 --workers 4 \r
+    --start-date 2008-01-01 \r
+    --synthetic-data-dir data_synthetic/hourly \r
+    --synthetic-end-date 2009-07-31 \r
+    --journal data/journals/vix_sweep_<label>_synthetic.csv \r
+    --position-summary data/journals/vix_sweep_<label>_synthetic_equity.csv
+
+# Window B -- real IBKR data
+uv run python -m Strategy_Auto_Trader.markov_cli.live_sim \r
+    --universe --strategies optimised_new \r
+    --initial-cash 100000 --top-k 70 --source ibkr --workers 4 \r
+    --start-date 2024-11-21 \r
+    --journal data/journals/vix_sweep_<label>_real.csv \r
+    --position-summary data/journals/vix_sweep_<label>_real_equity.csv
+```
+
+Actual data date ranges:
+- Window A: synthetic bars 2008-01-01 to 2009-07-31; first admitted entry 2008-04-13 (HMM warmup consumes Jan-mid-Apr); last bar 2009-07-30
+- Window B: IBKR hourly cache 2024-11-21 to 2026-09-02 (run date)
 
 | Threshold | Crash return | Crash Sharpe | Crash Sortino | Normal return | Normal Sharpe | Normal Sortino | VIX-blocked (crash) | VIX-blocked (normal) |
 |---|---|---|---|---|---|---|---|---|
@@ -643,7 +670,7 @@ Tool: live_sim.py, optimised_new, £100k, top-k=70, full universe, --workers 4. T
 
 1. **vix20 chosen:** crash Sharpe -2.22 vs baseline -6.64 (+4.42 improvement), crash Sortino -1.31 vs -7.32 (+6.01). Normal-market cost: only -0.15 Sharpe (0.81 vs 0.96). The Sharpe cost is negligible; the tail protection is large.
 
-2. **vix25 is worst-of-both-worlds:** worst normal Sharpe (0.59) AND mediocre crash Sharpe (-3.42). The VIX 20–25 range contains net-negative entries on average in the real window — blocking them (vix20) outperforms letting them through (vix25). Do not use 25.
+2. **vix25 is worst-of-both-worlds:** worst normal Sharpe (0.59) AND mediocre crash Sharpe (-3.42). The VIX 20ï¿½25 range contains net-negative entries on average in the real window ï¿½ blocking them (vix20) outperforms letting them through (vix25). Do not use 25.
 
 3. **vix30 is runner-up:** good balance (crash Sharpe -3.85, normal Sharpe 0.83) but the crash Sortino (-3.54) is more than twice as bad as vix20 (-1.31) for only +0.02 normal Sharpe gained. Not worth the trade-off.
 
@@ -651,30 +678,55 @@ Tool: live_sim.py, optimised_new, £100k, top-k=70, full universe, --workers 4. T
 
 **Decision:** `OptimisedNewEntry.vix_entry_gate_threshold = 20.0`. Comment in strategy file explains validation result.
 
-**Not started:** Wiring VIX gate into the live daemon (`live_daemon.py`). The `live_sim.py` backtest path now has the gate; the daemon's entry path does not yet. Next step is adding a daily VIX check in the daemon's pre-entry logic using real-time `^VIX` (the existing `sentiment.py::vix_regime()` fetches 60d of VIX history — sufficient for a live check, just needs gating on `vix_current >= 20`).
+**Not started:** Wiring VIX gate into the live daemon (`live_daemon.py`). The `live_sim.py` backtest path now has the gate; the daemon's entry path does not yet. Next step is adding a daily VIX check in the daemon's pre-entry logic using real-time `^VIX` (the existing `sentiment.py::vix_regime()` fetches 60d of VIX history ï¿½ sufficient for a live check, just needs gating on `vix_current >= 20`).
 ---
 
-## 2026-09-03 — VIX gate full-history validation (2023-01-01 to present)
+## 2026-09-03 ï¿½ VIX gate full-history validation (2023-01-01 to present)
 
-**Context:** The VIX gate sweep (previous entry) used `--start-date 2024-11-21` — a short 10-month window that opens right before the Mar/Apr 2025 tariff shock, producing a pessimistic absolute Sharpe (0.96 baseline, 0.81 vix20). Re-ran with full IBKR hourly cache window (`--start-date 2023-01-01`, ~2.75yr) to validate gate cost over a more representative period including 2023-2024 bull years.
+**Context:** The VIX gate sweep (previous entry) used `--start-date 2024-11-21` ï¿½ a short 10-month window that opens right before the Mar/Apr 2025 tariff shock, producing a pessimistic absolute Sharpe (0.96 baseline, 0.81 vix20). Re-ran with full IBKR hourly cache window (`--start-date 2023-01-01`, ~2.75yr) to validate gate cost over a more representative period including 2023-2024 bull years.
 
 Tool: live_sim.py, optimised_new, `--pot-sizes 10000 100000`, `--top-k 70`, `--vol-weight 0.7`, `--win-rate-weight 0.3`, `--lookback-days 60`, `--workers 4`, `--cost-model ibkr_tiered_spread`, `--seasonal-volume`, `--start-date 2023-01-01`. Two runs: baseline (vix_entry_gate_threshold=None) and vix20 (=20.0).
 
+Commands (run via `powershell -File scripts/run_fullhist_compare.ps1`):
+```
+# baseline run (vix_entry_gate_threshold=None)
+uv run python -m Strategy_Auto_Trader.markov_cli.live_sim \r
+    --universe --strategies optimised_new \r
+    --start-date 2023-01-01 --pot-sizes 10000 100000 \r
+    --top-k 70 --vol-weight 0.7 --win-rate-weight 0.3 \r
+    --lookback-days 60 --workers 4 \r
+    --cost-model ibkr_tiered_spread --seasonal-volume \r
+    --journal data/journals/fullhist_baseline.csv \r
+    --position-summary data/journals/fullhist_baseline_equity.csv
+
+# vix20 run (vix_entry_gate_threshold=20.0)
+uv run python -m Strategy_Auto_Trader.markov_cli.live_sim \r
+    --universe --strategies optimised_new \r
+    --start-date 2023-01-01 --pot-sizes 10000 100000 \r
+    --top-k 70 --vol-weight 0.7 --win-rate-weight 0.3 \r
+    --lookback-days 60 --workers 4 \r
+    --cost-model ibkr_tiered_spread --seasonal-volume \r
+    --journal data/journals/fullhist_vix20.csv \r
+    --position-summary data/journals/fullhist_vix20_equity.csv
+```
+
+Actual data date ranges: `--start-date 2023-01-01`; IBKR hourly cache goes back ~2.9yr from run date so earliest candidates from ~mid-2023 for most tickers; last bar 2026-09-03 (run date).
+
 | Config | Pot | Return | Max DD | Sharpe | Sortino | Admitted | VIX-blocked |
 |---|---|---|---|---|---|---|---|
-| baseline | £10k | +27.6% | -9.0% | 1.03 | 1.42 | 603 | 0 |
-| baseline | £100k | +44.3% | -9.2% | 1.51 | 2.18 | 603 | 0 |
-| vix20 | £10k | +22.7% | -6.3% | 0.96 | 1.27 | 529 | 75 |
-| vix20 | £100k | +37.3% | -5.9% | 1.46 | 2.06 | 529 | 75 |
+| baseline | ï¿½10k | +27.6% | -9.0% | 1.03 | 1.42 | 603 | 0 |
+| baseline | ï¿½100k | +44.3% | -9.2% | 1.51 | 2.18 | 603 | 0 |
+| vix20 | ï¿½10k | +22.7% | -6.3% | 0.96 | 1.27 | 529 | 75 |
+| vix20 | ï¿½100k | +37.3% | -5.9% | 1.46 | 2.06 | 529 | 75 |
 
 **Key findings:**
 
-1. **Gate cost is modest over full history:** -0.05 Sharpe (1.51 ? 1.46), -0.12 Sortino (2.18 ? 2.06), -7.0pp return (+44.3% ? +37.3%) over 2.75yr ˜ -2.5pp/yr foregone. The short Nov2024 window overstated the cost (-0.15 Sharpe) because it started at an unlucky entry point.
+1. **Gate cost is modest over full history:** -0.05 Sharpe (1.51 ? 1.46), -0.12 Sortino (2.18 ? 2.06), -7.0pp return (+44.3% ? +37.3%) over 2.75yr ï¿½ -2.5pp/yr foregone. The short Nov2024 window overstated the cost (-0.15 Sharpe) because it started at an unlucky entry point.
 
-2. **Drawdown improvement is meaningful:** -9.2% ? -5.9% max drawdown at £100k (36% reduction). Real-money benefit even in a non-crash period.
+2. **Drawdown improvement is meaningful:** -9.2% ? -5.9% max drawdown at ï¿½100k (36% reduction). Real-money benefit even in a non-crash period.
 
-3. **75/603 candidates (12.4%) blocked** over 2.75yr — selective, not aggressive.
+3. **75/603 candidates (12.4%) blocked** over 2.75yr ï¿½ selective, not aggressive.
 
-4. **Sortino stays above 2.0** (2.06 vix20 vs 2.18 baseline). The "Sharpe over 2" from earlier runs was Sortino, not Sharpe — the true Sharpe on this 2.75yr window is 1.51 (baseline) / 1.46 (vix20).
+4. **Sortino stays above 2.0** (2.06 vix20 vs 2.18 baseline). The "Sharpe over 2" from earlier runs was Sortino, not Sharpe ï¿½ the true Sharpe on this 2.75yr window is 1.51 (baseline) / 1.46 (vix20).
 
-**Decision confirmed:** `vix_entry_gate_threshold = 20.0` on `OptimisedNewEntry` retained. Gate wired into live daemon as of 2026-09-03 commit `c2647be`. Forward-looking expectation at £100k: Sharpe ~1.46, Sortino ~2.06, max DD ~-6%, return ~+13.5%/yr (37.3% / 2.75yr).
+**Decision confirmed:** `vix_entry_gate_threshold = 20.0` on `OptimisedNewEntry` retained. Gate wired into live daemon as of 2026-09-03 commit `c2647be`. Forward-looking expectation at ï¿½100k: Sharpe ~1.46, Sortino ~2.06, max DD ~-6%, return ~+13.5%/yr (37.3% / 2.75yr).
