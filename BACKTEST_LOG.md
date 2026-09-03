@@ -652,3 +652,29 @@ Tool: live_sim.py, optimised_new, £100k, top-k=70, full universe, --workers 4. T
 **Decision:** `OptimisedNewEntry.vix_entry_gate_threshold = 20.0`. Comment in strategy file explains validation result.
 
 **Not started:** Wiring VIX gate into the live daemon (`live_daemon.py`). The `live_sim.py` backtest path now has the gate; the daemon's entry path does not yet. Next step is adding a daily VIX check in the daemon's pre-entry logic using real-time `^VIX` (the existing `sentiment.py::vix_regime()` fetches 60d of VIX history — sufficient for a live check, just needs gating on `vix_current >= 20`).
+---
+
+## 2026-09-03 — VIX gate full-history validation (2023-01-01 to present)
+
+**Context:** The VIX gate sweep (previous entry) used `--start-date 2024-11-21` — a short 10-month window that opens right before the Mar/Apr 2025 tariff shock, producing a pessimistic absolute Sharpe (0.96 baseline, 0.81 vix20). Re-ran with full IBKR hourly cache window (`--start-date 2023-01-01`, ~2.75yr) to validate gate cost over a more representative period including 2023-2024 bull years.
+
+Tool: live_sim.py, optimised_new, `--pot-sizes 10000 100000`, `--top-k 70`, `--vol-weight 0.7`, `--win-rate-weight 0.3`, `--lookback-days 60`, `--workers 4`, `--cost-model ibkr_tiered_spread`, `--seasonal-volume`, `--start-date 2023-01-01`. Two runs: baseline (vix_entry_gate_threshold=None) and vix20 (=20.0).
+
+| Config | Pot | Return | Max DD | Sharpe | Sortino | Admitted | VIX-blocked |
+|---|---|---|---|---|---|---|---|
+| baseline | £10k | +27.6% | -9.0% | 1.03 | 1.42 | 603 | 0 |
+| baseline | £100k | +44.3% | -9.2% | 1.51 | 2.18 | 603 | 0 |
+| vix20 | £10k | +22.7% | -6.3% | 0.96 | 1.27 | 529 | 75 |
+| vix20 | £100k | +37.3% | -5.9% | 1.46 | 2.06 | 529 | 75 |
+
+**Key findings:**
+
+1. **Gate cost is modest over full history:** -0.05 Sharpe (1.51 ? 1.46), -0.12 Sortino (2.18 ? 2.06), -7.0pp return (+44.3% ? +37.3%) over 2.75yr ˜ -2.5pp/yr foregone. The short Nov2024 window overstated the cost (-0.15 Sharpe) because it started at an unlucky entry point.
+
+2. **Drawdown improvement is meaningful:** -9.2% ? -5.9% max drawdown at £100k (36% reduction). Real-money benefit even in a non-crash period.
+
+3. **75/603 candidates (12.4%) blocked** over 2.75yr — selective, not aggressive.
+
+4. **Sortino stays above 2.0** (2.06 vix20 vs 2.18 baseline). The "Sharpe over 2" from earlier runs was Sortino, not Sharpe — the true Sharpe on this 2.75yr window is 1.51 (baseline) / 1.46 (vix20).
+
+**Decision confirmed:** `vix_entry_gate_threshold = 20.0` on `OptimisedNewEntry` retained. Gate wired into live daemon as of 2026-09-03 commit `c2647be`. Forward-looking expectation at £100k: Sharpe ~1.46, Sortino ~2.06, max DD ~-6%, return ~+13.5%/yr (37.3% / 2.75yr).
