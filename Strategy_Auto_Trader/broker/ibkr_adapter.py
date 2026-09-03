@@ -69,6 +69,7 @@ class IBKRAdapter:
         # TWS restart) before raising — our adapter already catches and re-logs
         # these as WARNING, so suppress the library's own noise.
         logging.getLogger("ib_async").setLevel(logging.CRITICAL)
+        logging.getLogger("ibapi").setLevel(logging.CRITICAL)
         self._ib = IB()
         self._ib.connect(self._host, self._port, clientId=self._client_id,
                          timeout=self._connect_timeout)

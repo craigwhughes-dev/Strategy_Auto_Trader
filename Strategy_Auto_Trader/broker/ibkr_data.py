@@ -161,12 +161,16 @@ class IBKRDataClient:
         except ImportError:
             return False
         try:
+            logging.getLogger("ib_async").setLevel(logging.CRITICAL)
+            logging.getLogger("ibapi").setLevel(logging.CRITICAL)
             self._ib = IB()
             self._ib.connect(self._host, self._port, clientId=self._client_id,
                              timeout=self._connect_timeout)
             return True
         except Exception:
             self._ib = None
+            logger.warning("IBKR gateway unreachable after %.0fs — will retry next cycle",
+                           self._connect_timeout)
             return False
 
     def disconnect(self) -> None:

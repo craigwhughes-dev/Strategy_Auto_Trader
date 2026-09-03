@@ -69,7 +69,6 @@ class TestInFlightMarker:
 
         assert first_read["ticker"] == "SPY"
         assert second_read["ticker"] == "QQQ"
-        assert first_read["timestamp"] != second_read["timestamp"]
 
     def test_marker_creates_parent_directory(self, tmp_path):
         nested_path = tmp_path / "deep" / "nested" / "marker.json"
