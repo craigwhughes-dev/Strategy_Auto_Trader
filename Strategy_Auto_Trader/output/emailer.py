@@ -495,7 +495,8 @@ def send_nightly_position_pnl(positions: list[dict]) -> None:
     state and a fresh broker quote per ticker (see check_nightly_reconciliation).
 
     Each position dict: ticker, entry_date, quantity, entry_price, current_price,
-    currency (pot-currency units, e.g. GBP pounds not LSE pence).
+    currency (pot-currency units, e.g. GBP pounds not LSE pence),
+    price_source ("live" | "last_close") — last_close renders a * marker.
     """
     if not positions:
         return
@@ -504,18 +505,28 @@ def send_nightly_position_pnl(positions: list[dict]) -> None:
     sorted_pos = sorted(positions, key=lambda p: p.get("pl_pct", 0), reverse=True)
 
     rows_html = ""
+    any_last_close = False
     for p in sorted_pos:
         sym = _CCY_SYMBOL.get(p.get("currency", ""), "")
         pl_pct = p.get("pl_pct", 0)
         pl_abs = p.get("pl_abs", 0)
         pl_colour = "#69f0ae" if pl_pct >= 0 else "#ef9a9a"
+        is_last_close = p.get("price_source") == "last_close"
+        if is_last_close:
+            any_last_close = True
+        price_label = (
+            f'{sym}{p.get("current_price", 0):,.3f}'
+            f'<span style="color:#666;font-size:0.8em"> *</span>'
+            if is_last_close
+            else f'{sym}{p.get("current_price", 0):,.3f}'
+        )
         rows_html += f"""<tr style="border-top:1px solid #2a2d3e">
           <td style="padding:6px 10px;color:#eee">{p['ticker']}</td>
           <td style="padding:6px 10px;color:#aaa;white-space:nowrap">{p.get('entry_date','?')}</td>
           <td style="padding:6px 10px;color:#ddd;text-align:right">{p.get('quantity',0):,}</td>
           <td style="padding:6px 10px;color:#ddd;text-align:right;white-space:nowrap">{sym}{p.get('entry_price',0):,.3f}</td>
           <td style="padding:6px 10px;color:#ddd;text-align:right;white-space:nowrap">{sym}{p.get('amount',0):,.2f}</td>
-          <td style="padding:6px 10px;color:#ddd;text-align:right;white-space:nowrap">{sym}{p.get('current_price',0):,.3f}</td>
+          <td style="padding:6px 10px;color:#ddd;text-align:right;white-space:nowrap">{price_label}</td>
           <td style="padding:6px 10px;color:#ddd;text-align:right;white-space:nowrap">{sym}{p.get('current_value',0):,.2f}</td>
           <td style="padding:6px 10px;color:{pl_colour};text-align:right;font-weight:bold;white-space:nowrap">{pl_pct:+.2f}%</td>
           <td style="padding:6px 10px;color:{pl_colour};text-align:right;white-space:nowrap">{sym}{pl_abs:+,.2f}</td>
@@ -542,7 +553,7 @@ def send_nightly_position_pnl(positions: list[dict]) -> None:
   </table>
 
   <div style="color:#555;font-size:0.8em;margin-top:20px;text-align:center">
-    Live broker quotes at send time — not investment advice
+    Live broker quotes at send time — not investment advice{"<br>* last cached close (market closed at send time)" if any_last_close else ""}
   </div>
 </div></body></html>"""
 

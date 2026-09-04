@@ -30,6 +30,8 @@ _IBKR_TRANSIENT_PATTERNS = (
     "forcibly closed",
     "ConnectionReset",
     "Connection reset",
+    "API connection failed",  # EClient pre-connect refusal during IBC restart window
+    "Make sure API port",     # ibapi companion hint line, same event
 )
 
 

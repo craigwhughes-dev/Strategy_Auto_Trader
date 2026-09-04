@@ -19,18 +19,22 @@ What changed vs. `optimised`, and why
   stop never got a chance to bind before the gate fired first. Turning the
   gate off is required for the ratchet mechanism to actually do anything.
 * `profit_stop_scale` raised 0.5 -> ... no, kept 0.5's *shape* but the base
-  mechanism (vol_stop_mult=2.0, unchanged from `optimised`) is what actually
-  determines the trailing distance — `profit_stop_scale=0.30` narrows it as
-  the trade becomes profitable. (A `trailing_stop=0.15` fixed-distance
-  override was tried in the same test session but is a no-op whenever
-  `vol_stop_mult>0`, per `core/exits.py::_effective_stop_for_bar` — the
-  vol-scaled branch always wins when active. Not carried into this file to
-  avoid a dead constant.)
+  mechanism (vol_stop_mult, see below) is what actually determines the
+  trailing distance — `profit_stop_scale=0.30` narrows it as the trade
+  becomes profitable. (A `trailing_stop=0.15` fixed-distance override was
+  tried in the same test session but is a no-op whenever `vol_stop_mult>0`,
+  per `core/exits.py::_effective_stop_for_bar` — the vol-scaled branch always
+  wins when active. Not carried into this file to avoid a dead constant.)
 * `min_stop_pct` tightened 0.04 -> 0.03 (the ratchet floor — never allow the
   trailing distance to narrow past this even at very high profit).
-* `stop_loss_pct` (0.08), `vol_stop_mult` (2.0), `vol_stop_window` (20),
-  `max_hold_days` (0) all unchanged from `optimised` — only the take-profit
-  ceiling, gate, profit-stop-scale and min-stop floor differ.
+* `vol_stop_mult` tightened 2.0 -> 1.0 (2026-09-03, swept — see the
+  OptimisedNewExit.__init__ comment and BACKTEST_LOG.md; the old 2.0 was
+  never backtested and was worst/near-worst on both a crash and a normal
+  window).
+* `stop_loss_pct` (0.08), `vol_stop_window` (20), `max_hold_days` (0) all
+  unchanged from `optimised` — only the take-profit ceiling, gate,
+  profit-stop-scale, min-stop floor, and (as of 2026-09-03) vol_stop_mult
+  differ.
 
 Single-ticker result so far: AAPL, 2023-08 to 2026-07, hourly bars —
 Sharpe 1.96 vs `optimised`'s 1.21 baseline on the same window, but only 28
@@ -51,8 +55,9 @@ still overridable back on via --plugin-gate quality for further comparison.
 Exit
 ----
 Hard stop-loss 8% (unchanged floor). No hard take-profit (999, effectively
-off). Vol-scaled trailing stop (vol_stop_mult=2.0, vol_stop_window=20),
-profit-stop tightening (profit_stop_scale=0.30, floor 3%). No max hold.
+off). Vol-scaled trailing stop (vol_stop_mult=1.0, vol_stop_window=20 —
+mult tightened from 2.0 2026-09-03, see BACKTEST_LOG.md), profit-stop
+tightening (profit_stop_scale=0.30, floor 3%). No max hold.
 
 All values above are this strategy's own defaults, not fixed — every one is
 overridable via the matching CLI flag regardless of --strategy selected.
@@ -118,6 +123,17 @@ class OptimisedNewEntry:
     # -0.15 Sharpe (0.81 vs 0.96). vix25 confirmed worst-of-both-worlds (real
     # Sharpe 0.59, mediocre crash Sharpe -3.42). See BACKTEST_LOG.md 2026-09-02.
     vix_entry_gate_threshold: float = 20.0
+    # Correlation-aware same-day admission gate: rejects a candidate whose
+    # trailing 60-day daily-return correlation to any ticker already admitted
+    # that calendar day is >= this threshold. Targets the rolling-30d-Sharpe
+    # volatility mechanism the (rejected) same_day_deployment_cap_pct $-cap
+    # couldn't fix — sector-bucket gating was considered and ruled out first
+    # (2026-09-03 spot-check: the largest same-day entry clusters span 15+
+    # sectors, so a per-sector cap wouldn't bind on the actual problem days;
+    # a direct correlation check on the same clusters showed real elevation
+    # vs random tickers instead, ~2x on some days). Off (None) until swept
+    # and validated — see BACKTEST_LOG.md correlation-cap entry.
+    max_correlation_to_admitted_today: float | None = None
     # overnight_scope.py stage-1 (per-market vol_screen) is redundant for this
     # strategy: vol_filter_ok is enforced per-bar at signal time, and
     # top_k_screen's hybrid score weights trend_quality at 0.7 — a third
@@ -228,7 +244,18 @@ class OptimisedNewExit:
             defaults={
                 "stop_loss_pct": self._stop,
                 "trailing_stop": 0.0,        # inert while vol_stop_mult>0 — see docstring
-                "vol_stop_mult": 2.0,        # 2 × realised-vol trailing stop (unchanged)
+                "vol_stop_mult": 1.0,        # 1 × realised-vol trailing stop — swept 2026-09-03
+                # (scripts/run_vol_stop_mult_sweep.ps1: {1.0,1.5,2.0,2.5} x
+                # {synthetic 2008 crash, real prev-2yr}). The old 2.0 default
+                # was never backtested — worst/near-worst on both windows: at
+                # 2.0 the trailing stop never once bound in the crash test
+                # (hard 8% stop always beat it there), vs 10 profitable fires
+                # at 1.0. Real window: 1.0 wins outright (+12.0% return/-6.3%
+                # max DD vs 2.0's +10.4%/-8.2%). 1.5 was marginally better in
+                # the crash window (-8.8% vs 1.0's -10.2%) but gave back real-
+                # window upside (+9.8%); 1.0 chosen since crash tail risk is
+                # already covered by vix_entry_gate_threshold. See
+                # BACKTEST_LOG.md 2026-09-03 vol_stop_mult sweep entry.
                 "vol_stop_window": 20,
                 "profit_stop_scale": 0.30,   # tighten trail as profit grows (was 0.5)
                 "min_stop_pct": 0.03,        # floor: never tighter than 3% (was 0.04)

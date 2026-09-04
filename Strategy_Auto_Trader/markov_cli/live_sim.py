@@ -67,8 +67,15 @@ from ..core.cli_logging import setup_cli_logger
 from ..strategy.base.registry import STRATEGY_REGISTRY, wants_low_trend_quality
 from ..quant_hmm.quant_engine import fetch_daily
 from ..synthetic_backtest_data.generate import SYNTHETIC_HMM_CACHE_DIR, load_synthetic_hourly
+from ..synthetic_backtest_data.stooq_daily import load_stooq_daily
 
 _SYNTHETIC_JOURNAL_DIR = Path(__file__).resolve().parent.parent.parent / "data_synthetic" / "journals"
+
+#: Trailing-day window for the correlation admission gate (see
+#: max_correlation_to_admitted_today). Fixed, not a strategy-owned knob —
+#: nothing in the diagnosis motivates varying it, see BACKTEST_LOG.md
+#: correlation-cap entry.
+_CORRELATION_LOOKBACK_DAYS = 60
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +141,53 @@ def resolve_vix_entry_gate_threshold(strategy_name: str) -> float | None:
     return getattr(entry_cls, "vix_entry_gate_threshold", None)
 
 
+def resolve_correlation_cap(strategy_name: str) -> float | None:
+    """Strategy-owned max_correlation_to_admitted_today, read off the
+    strategy's registered Entry class (default None = gate disabled). When
+    set, arbitrate() rejects a candidate whose trailing-return correlation to
+    any ticker already admitted that day is >= this threshold. Not a CLI
+    flag — see .claude/rules/strategy.md Strategy-Owned Admission Attributes
+    section."""
+    entry_cls = STRATEGY_REGISTRY.get(strategy_name, {}).get("entry")
+    return getattr(entry_cls, "max_correlation_to_admitted_today", None)
+
+
+def _build_daily_returns_cache(tickers: list[str]) -> dict[str, pd.Series]:
+    """Daily pct-change return series per ticker, from the local Stooq daily
+    dump (see synthetic_backtest_data/stooq_daily.py — same data already used
+    by the synthetic-backtest pipeline, no new fetch). Tickers with no Stooq
+    coverage are simply absent from the returned dict; the correlation gate
+    treats a missing series as gate-not-triggered for that ticker, same
+    fallback contract as the VIX gate's NaN handling."""
+    cache: dict[str, pd.Series] = {}
+    for ticker in tickers:
+        df = load_stooq_daily(ticker)
+        if df is None or df.empty:
+            continue
+        closes = df["Close"]
+        if getattr(closes.index, "tz", None) is not None:
+            closes = closes.tz_localize(None)
+        cache[ticker] = closes.pct_change().dropna()
+    return cache
+
+
+def _pairwise_correlation(
+    returns_a: pd.Series, returns_b: pd.Series, as_of: pd.Timestamp,
+) -> float | None:
+    """Pearson correlation of two tickers' daily returns over the trailing
+    _CORRELATION_LOOKBACK_DAYS trading-day window strictly before as_of (no
+    lookahead — as_of is the candidate's entry day). Returns None if fewer
+    than 20 overlapping observations are available (insufficient history to
+    trust a correlation estimate), in which case the gate doesn't trigger."""
+    a = returns_a[returns_a.index < as_of].tail(_CORRELATION_LOOKBACK_DAYS)
+    b = returns_b[returns_b.index < as_of].tail(_CORRELATION_LOOKBACK_DAYS)
+    joined = pd.concat([a, b], axis=1, join="inner")
+    if len(joined) < 20:
+        return None
+    corr = joined.iloc[:, 0].corr(joined.iloc[:, 1])
+    return float(corr) if pd.notna(corr) else None
+
+
 def arbitrate(
     candidates: list[Candidate],
     initial_cash: float,
@@ -144,6 +198,8 @@ def arbitrate(
     same_day_deployment_cap_pct: float | None = None,
     vix_series: pd.Series | None = None,
     vix_entry_gate_threshold: float | None = None,
+    daily_returns_by_ticker: dict[str, pd.Series] | None = None,
+    max_correlation_to_admitted_today: float | None = None,
 ) -> dict:
     """Walk candidates day-by-day (event days only: opens/closes), arbitrating
     entries against one shared, mutating cash pot. No position-count cap —
@@ -174,6 +230,19 @@ def arbitrate(
     closing positions and equity-curve recording still happen on a VIX-blocked
     day — only new entries are suppressed.
 
+    daily_returns_by_ticker / max_correlation_to_admitted_today are an OPTIONAL
+    fifth gate: rejects a candidate whose trailing _CORRELATION_LOOKBACK_DAYS
+    daily-return correlation to ANY ticker already admitted that same day is
+    >= max_correlation_to_admitted_today. Strategy-owned — resolved from the
+    Entry class attribute and passed in by main(). daily_returns_by_ticker
+    comes from the local Stooq daily dump (_build_daily_returns_cache), built
+    once per run and reused across strategies/pot-sizes. A candidate whose
+    ticker (or an already-admitted ticker) has no/insufficient return history
+    is never rejected on this gate — missing data means gate-not-triggered,
+    same fallback contract as the VIX gate's NaN handling. Like every other
+    gate here, this narrows admission from the bottom of the entry_score sort
+    and never reorders it.
+
     A candidate with kelly_fraction <= 0 is rejected outright, not sized via
     a flat fallback — this matches live's PortfolioManager.compute_quantity(),
     which returns 0 for kelly_fraction <= 0 and never places the order.
@@ -194,7 +263,9 @@ def arbitrate(
     sized due to insufficient cash), n_rejected_kelly (candidates with
     kelly_fraction <= 0), n_rejected_concentration (candidates that would
     have exceeded same_day_deployment_cap_pct), n_rejected_vix (candidates
-    blocked because VIX >= vix_entry_gate_threshold on their entry day).
+    blocked because VIX >= vix_entry_gate_threshold on their entry day),
+    n_rejected_correlation (candidates too correlated to something already
+    admitted that day).
 
     Note: equity_curve is sampled at trade-event days only, not every calendar
     day — for strategies with infrequent trades this is a sparse series. Do
@@ -211,6 +282,7 @@ def arbitrate(
             "final_cash": initial_cash, "n_candidates": 0, "n_admitted": 0,
             "n_rejected_cash": 0, "n_rejected_kelly": 0,
             "n_rejected_concentration": 0, "n_rejected_vix": 0,
+            "n_rejected_correlation": 0,
         }
 
     by_day: dict[pd.Timestamp, list[Candidate]] = {}
@@ -234,6 +306,7 @@ def arbitrate(
     n_rejected_kelly = 0
     n_rejected_concentration = 0
     n_rejected_vix = 0
+    n_rejected_correlation = 0
     prev_day = None
 
     for day in all_days:
@@ -258,6 +331,7 @@ def arbitrate(
         day_candidates = sorted(by_day.get(day, []), key=lambda c: -c.entry_score)
         taken = 0
         deployed_today = 0.0
+        admitted_today: list[str] = []
         daily_cap = (same_day_deployment_cap_pct * initial_cash
                      if same_day_deployment_cap_pct else None)
 
@@ -272,6 +346,23 @@ def arbitrate(
             if not cand.kelly_fraction or cand.kelly_fraction <= 0:
                 n_rejected_kelly += 1
                 continue
+
+            if (max_correlation_to_admitted_today is not None
+                    and daily_returns_by_ticker and admitted_today):
+                cand_returns = daily_returns_by_ticker.get(cand.ticker)
+                if cand_returns is not None:
+                    max_corr = 0.0
+                    for other_ticker in admitted_today:
+                        other_returns = daily_returns_by_ticker.get(other_ticker)
+                        if other_returns is None:
+                            continue
+                        c = _pairwise_correlation(cand_returns, other_returns, day)
+                        if c is not None:
+                            max_corr = max(max_corr, c)
+                    if max_corr >= max_correlation_to_admitted_today:
+                        n_rejected_correlation += 1
+                        continue
+
             price = sizing_price(cand.ticker, cand.record.entry_price)
             if price <= 0 or cash < price or cash <= trade_cost:
                 n_rejected_cash += 1
@@ -320,6 +411,7 @@ def arbitrate(
             taken += 1
             n_admitted += 1
             deployed_today += alloc
+            admitted_today.append(cand.ticker)
 
         skipped = len(day_candidates) - taken
         if taken or skipped:
@@ -349,6 +441,7 @@ def arbitrate(
         "n_rejected_kelly": n_rejected_kelly,
         "n_rejected_concentration": n_rejected_concentration,
         "n_rejected_vix": n_rejected_vix,
+        "n_rejected_correlation": n_rejected_correlation,
     }
 
 
@@ -364,6 +457,7 @@ def simulate_strategy(
     currency: str = "GBP",
     vix_series: pd.Series | None = None,
     vix_entry_gate_threshold: float | None = None,
+    daily_returns_by_ticker: dict[str, pd.Series] | None = None,
 ) -> list[TradeRecord]:
     """Run one strategy across all tickers with a shared capital pool. Returns executed TradeRecords.
 
@@ -399,6 +493,8 @@ def simulate_strategy(
         same_day_deployment_cap_pct=resolve_same_day_deployment_cap(strategy_name),
         vix_series=vix_series,
         vix_entry_gate_threshold=vix_entry_gate_threshold,
+        daily_returns_by_ticker=daily_returns_by_ticker,
+        max_correlation_to_admitted_today=resolve_correlation_cap(strategy_name),
     )
 
     executed = result["executed"]
@@ -543,6 +639,7 @@ def main(argv: list[str] | None = None) -> int:
     summary_rows: list[dict] = []
 
     _vix_series_cache: pd.Series | None = None  # fetched once, reused across strategies
+    _daily_returns_cache: dict[str, pd.Series] | None = None  # built once, reused across strategies
 
     for strategy_name in args.strategies:
         exempt = args.no_vol_filter or strategy_name in args.vol_filter_exempt
@@ -636,6 +733,15 @@ def main(argv: list[str] | None = None) -> int:
                 logger.info(f"  vix_entry_gate_threshold={vix_threshold} (strategy-owned), "
                             f"latest VIX={vix_series.iloc[-1]:.1f}")
 
+        corr_cap = resolve_correlation_cap(strategy_name)
+        if corr_cap is not None:
+            if _daily_returns_cache is None:
+                _daily_returns_cache = _build_daily_returns_cache(list(args.tickers))
+                logger.info(f"  correlation gate: daily-return cache built for "
+                            f"{len(_daily_returns_cache)}/{len(args.tickers)} tickers (Stooq coverage)")
+            logger.info(f"  max_correlation_to_admitted_today={corr_cap} (strategy-owned, "
+                        f"{strategy_name}.max_correlation_to_admitted_today)")
+
         for pot_size in pot_sizes:
             result = arbitrate(
                 candidates,
@@ -647,6 +753,8 @@ def main(argv: list[str] | None = None) -> int:
                 same_day_deployment_cap_pct=same_day_cap,
                 vix_series=vix_series,
                 vix_entry_gate_threshold=vix_threshold,
+                daily_returns_by_ticker=_daily_returns_cache,
+                max_correlation_to_admitted_today=corr_cap,
             )
             all_executed.extend(result["executed"])
 
@@ -655,11 +763,13 @@ def main(argv: list[str] | None = None) -> int:
             max_dd = _max_drawdown([row["portfolio_value"] for row in result["equity_curve"]])
             vix_rej_str = (f", {result['n_rejected_vix']} rejected for VIX gate"
                            if result['n_rejected_vix'] else "")
+            corr_rej_str = (f", {result['n_rejected_correlation']} rejected for correlation cap"
+                            if result['n_rejected_correlation'] else "")
             logger.info(f"  pot £{pot_size:,.0f}: {len(result['executed'])}/{result['n_candidates']} admitted "
                   f"({result['n_rejected_cash']} rejected for cash, "
                   f"{result['n_rejected_kelly']} rejected for kelly<=0, "
                   f"{result['n_rejected_concentration']} rejected for concentration cap"
-                  f"{vix_rej_str}), "
+                  f"{vix_rej_str}{corr_rej_str}), "
                   f"final £{result['final_cash']:,.2f} (P&L £{total_pnl:+,.2f}, "
                   f"peak deployed £{peak_deployed:,.2f}, max drawdown {max_dd*100:.1f}%)")
 
@@ -675,6 +785,7 @@ def main(argv: list[str] | None = None) -> int:
                 "n_rejected_kelly": result["n_rejected_kelly"],
                 "n_rejected_concentration": result["n_rejected_concentration"],
                 "n_rejected_vix": result["n_rejected_vix"],
+                "n_rejected_correlation": result["n_rejected_correlation"],
                 "max_drawdown": max_dd,
             })
 

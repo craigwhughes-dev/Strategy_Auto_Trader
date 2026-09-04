@@ -109,7 +109,8 @@ class IBKRAdapter:
             return float(mid)
         if tdata.last and tdata.last > 0:
             return float(tdata.last)
-        return float(tdata.close or 0.0)
+        close = tdata.close
+        return float(close) if close and close > 0 else 0.0
 
     def place_order(self, req: OrderRequest) -> FillResult | None:
         """Submit a market order and wait for fill (up to self._timeout seconds).

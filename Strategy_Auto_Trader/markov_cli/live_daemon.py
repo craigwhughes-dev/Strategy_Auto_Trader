@@ -1803,24 +1803,44 @@ def _send_nightly_roundup(config: dict, logger: logging.Logger) -> None:
         logger.debug("No ticker results to send in nightly roundup")
 
 
+def _last_close_from_cache(ticker: str, logger: logging.Logger) -> float:
+    """Return last cached close price (pot-currency units) for ticker, or 0.0."""
+    try:
+        from ..quant_hmm.quant_engine import fetch_hourly
+        from ..broker.symbols import sizing_price
+        df = fetch_hourly(ticker, historical_only=True)
+        if df is not None and not df.empty and "Close" in df.columns:
+            raw = float(df["Close"].iloc[-1])
+            if raw > 0:
+                return sizing_price(ticker, raw)
+    except Exception as e:
+        logger.warning(f"Nightly P&L: cache close fallback failed for {ticker}: {e}")
+    return 0.0
+
+
 def _build_nightly_pnl_positions(portfolio: object, broker: object, logger: logging.Logger) -> list[dict]:
     """Snapshot each open position with a fresh broker quote for the nightly P&L email.
 
-    A per-ticker quote failure is skipped (logged), not fatal — one bad quote
-    should not suppress the whole nightly report.
+    Falls back to the last cached close when the live quote is unavailable
+    (e.g. market closed at nightly reconciliation time). A per-ticker failure
+    on both paths is skipped, not fatal.
     """
     from ..broker.symbols import sizing_price
 
     rows: list[dict] = []
     for ticker, pos in portfolio.positions.items():
+        price_source = "live"
         try:
             raw_price = broker.get_last_price(ticker)
             current_price = sizing_price(ticker, raw_price)
         except Exception as e:
             logger.warning(f"Nightly P&L: quote failed for {ticker}: {e}")
-            continue
-        if current_price <= 0:
-            logger.warning(f"Nightly P&L: no usable quote for {ticker}")
+            current_price = 0.0
+        if not (current_price > 0):
+            current_price = _last_close_from_cache(ticker, logger)
+            price_source = "last_close"
+        if not (current_price > 0):
+            logger.warning(f"Nightly P&L: no usable price for {ticker}, skipping")
             continue
 
         entry_price = pos["fill_price"]
@@ -1838,6 +1858,7 @@ def _build_nightly_pnl_positions(portfolio: object, broker: object, logger: logg
             "currency": pos.get("currency", ""),
             "pl_pct": (current_price - entry_price) / entry_price * 100 if entry_price else 0.0,
             "pl_abs": current_value - amount,
+            "price_source": price_source,
         })
     return rows
 

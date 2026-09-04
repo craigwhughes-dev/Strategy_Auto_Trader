@@ -620,7 +620,7 @@ _EMPTY_ARBITRATE_RESULT = {
     "executed": [], "equity_curve": [], "total_interest": 0.0,
     "final_cash": 0.0, "n_candidates": 0, "n_admitted": 0,
     "n_rejected_cash": 0, "n_rejected_kelly": 0, "n_rejected_concentration": 0,
-    "n_rejected_vix": 0,
+    "n_rejected_vix": 0, "n_rejected_correlation": 0,
 }
 
 
@@ -1184,6 +1184,138 @@ class TestArbitrate:
 
         assert without_prices["n_admitted"] == with_prices["n_admitted"]
         assert without_prices["n_rejected_concentration"] == with_prices["n_rejected_concentration"]
+
+
+class TestCorrelationCap:
+
+    def _make_candidates(self, tickers, entry_scores, ts_base, kelly=0.1, entry_price=10.0):
+        from Strategy_Auto_Trader.markov_cli.live_sim import Candidate
+
+        cands = []
+        for ticker, score in zip(tickers, entry_scores):
+            rec = TradeRecord(date_opened="2026-01-12", ticker=ticker, strategy="test",
+                               entry_score=score, kelly_fraction=kelly,
+                               return_pct=0.05, entry_price=entry_price)
+            cands.append(Candidate(
+                ticker=ticker, date_opened=ts_base, date_closed=ts_base + pd.Timedelta(days=5),
+                entry_score=score, kelly_fraction=kelly, return_pct=0.05, record=rec,
+            ))
+        return cands
+
+    def _returns_series(self, values, ts_base):
+        """30 naive business-day daily-return observations ending the day
+        before ts_base — mirrors what _build_daily_returns_cache produces
+        (tz-naive index, no lookahead into the entry day)."""
+        dates = pd.bdate_range(end=ts_base.tz_localize(None) - pd.Timedelta(days=1), periods=30)
+        return pd.Series(values, index=dates, dtype=float)
+
+    def test_correlation_cap_none_is_noop(self, ts_base):
+        """max_correlation_to_admitted_today=None (or omitted) must be a true
+        no-op — same safety contract as the other strategy-owned gates."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate
+
+        candidates = self._make_candidates(["T0", "T1"], [2.0, 1.0], ts_base)
+        identical = self._returns_series(list(range(30)), ts_base)
+        daily_returns = {"T0": identical, "T1": identical}
+
+        omitted = arbitrate(candidates, initial_cash=100_000.0, trade_cost=0.0,
+                             daily_returns_by_ticker=daily_returns)
+        explicit_none = arbitrate(candidates, initial_cash=100_000.0, trade_cost=0.0,
+                                   daily_returns_by_ticker=daily_returns,
+                                   max_correlation_to_admitted_today=None)
+
+        assert omitted["n_admitted"] == explicit_none["n_admitted"] == 2
+        assert omitted["n_rejected_correlation"] == explicit_none["n_rejected_correlation"] == 0
+
+    def test_rejects_candidate_perfectly_correlated_to_admitted(self, ts_base):
+        """T0 (higher entry_score) is admitted first with nothing yet to
+        compare against; T1's returns are identical to T0's (correlation
+        exactly 1.0) — must be rejected once the 0.5 threshold is checked."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate
+
+        candidates = self._make_candidates(["T0", "T1"], [2.0, 1.0], ts_base)
+        identical = self._returns_series(list(range(30)), ts_base)
+        daily_returns = {"T0": identical, "T1": identical}
+
+        result = arbitrate(candidates, initial_cash=100_000.0, trade_cost=0.0,
+                            daily_returns_by_ticker=daily_returns,
+                            max_correlation_to_admitted_today=0.5)
+
+        assert result["n_admitted"] == 1
+        assert result["n_rejected_correlation"] == 1
+        assert {r.ticker for r in result["executed"]} == {"T0"}
+
+    def test_admits_candidate_anti_correlated_to_admitted(self, ts_base):
+        """T1's return series is the exact reverse of T0's — Pearson
+        correlation -1.0, well under any positive threshold, so T1 must still
+        be admitted alongside T0."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate
+
+        candidates = self._make_candidates(["T0", "T1"], [2.0, 1.0], ts_base)
+        base_vals = list(range(30))
+        daily_returns = {
+            "T0": self._returns_series(base_vals, ts_base),
+            "T1": self._returns_series(list(reversed(base_vals)), ts_base),
+        }
+
+        result = arbitrate(candidates, initial_cash=100_000.0, trade_cost=0.0,
+                            daily_returns_by_ticker=daily_returns,
+                            max_correlation_to_admitted_today=0.5)
+
+        assert result["n_admitted"] == 2
+        assert result["n_rejected_correlation"] == 0
+
+    def test_missing_return_history_not_rejected(self, ts_base):
+        """A candidate ticker absent from daily_returns_by_ticker (no Stooq
+        coverage) must never be rejected on this gate — missing data means
+        gate-not-triggered, same fallback contract as the VIX gate's NaN
+        handling, not a silent admission block."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate
+
+        candidates = self._make_candidates(["T0", "T1"], [2.0, 1.0], ts_base)
+        daily_returns = {"T0": self._returns_series(list(range(30)), ts_base)}  # T1 missing
+
+        result = arbitrate(candidates, initial_cash=100_000.0, trade_cost=0.0,
+                            daily_returns_by_ticker=daily_returns,
+                            max_correlation_to_admitted_today=0.1)
+
+        assert result["n_admitted"] == 2
+        assert result["n_rejected_correlation"] == 0
+
+    def test_insufficient_overlap_not_rejected(self, ts_base):
+        """Fewer than 20 overlapping trailing observations (short history) —
+        correlation isn't trusted, gate doesn't trigger."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate
+
+        candidates = self._make_candidates(["T0", "T1"], [2.0, 1.0], ts_base)
+        short = self._returns_series(list(range(30)), ts_base).tail(10)
+        daily_returns = {"T0": short, "T1": short}
+
+        result = arbitrate(candidates, initial_cash=100_000.0, trade_cost=0.0,
+                            daily_returns_by_ticker=daily_returns,
+                            max_correlation_to_admitted_today=0.5)
+
+        assert result["n_admitted"] == 2
+        assert result["n_rejected_correlation"] == 0
+
+    def test_rejection_narrows_from_bottom_never_reorders(self, ts_base):
+        """3 candidates same day, T1 and T2 both highly correlated to T0
+        (highest entry_score). The gate must reject T1/T2 — the lowest-
+        priority candidates — never admit them ahead of T0 or reorder the
+        entry_score priority."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import arbitrate
+
+        candidates = self._make_candidates(["T0", "T1", "T2"], [3.0, 2.0, 1.0], ts_base)
+        identical = self._returns_series(list(range(30)), ts_base)
+        daily_returns = {"T0": identical, "T1": identical, "T2": identical}
+
+        result = arbitrate(candidates, initial_cash=100_000.0, trade_cost=0.0,
+                            daily_returns_by_ticker=daily_returns,
+                            max_correlation_to_admitted_today=0.5)
+
+        assert result["n_admitted"] == 1
+        assert result["n_rejected_correlation"] == 2
+        assert {r.ticker for r in result["executed"]} == {"T0"}
 
 
 class TestMarkToMarket:
