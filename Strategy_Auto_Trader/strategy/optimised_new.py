@@ -1,12 +1,15 @@
-"""Optimised-new strategy — ratchet-only exit variant of "optimised", for comparison.
+"""Optimised-new strategy — ratchet-only exit variant of "optimised", now
+diverged on entry weights/thresholds too after the 2026-09-03/04
+exit-parameter audit (see below). Live-daemon strategy as of 2026-07-31.
 
->>> UNVALIDATED — single-ticker sanity test only, not a live-capital candidate <<<
-Same entry logic as `optimised` (identical weights/thresholds/vetoes — see
-strategy/optimised.py), copied standalone rather than shared so each can
-evolve independently. The only difference is the exit shape, testing a
-YouTube-inspired idea: instead of a hard take-profit ceiling, let a
-profit-ratcheting trailing stop be the sole determinant of when a winning
-trade closes (the hard stop-loss remains as the initial risk floor).
+Originally copied standalone from `optimised` (strategy/optimised.py) rather
+than shared so each could evolve independently — the initial difference was
+just the exit shape, testing a YouTube-inspired idea: instead of a hard
+take-profit ceiling, let a profit-ratcheting trailing stop be the sole
+determinant of when a winning trade closes (the hard stop-loss remains as
+the initial risk floor). Entry weights/thresholds no longer match `optimised`
+one-for-one — see the Entry section below and BACKTEST_LOG.md's 2026-09-04
+entries for what changed and why.
 
 What changed vs. `optimised`, and why
 --------------------------------------
@@ -31,26 +34,32 @@ What changed vs. `optimised`, and why
   OptimisedNewExit.__init__ comment and BACKTEST_LOG.md; the old 2.0 was
   never backtested and was worst/near-worst on both a crash and a normal
   window).
-* `stop_loss_pct` (0.08), `vol_stop_window` (20), `max_hold_days` (0) all
-  unchanged from `optimised` — only the take-profit ceiling, gate,
-  profit-stop-scale, min-stop floor, and (as of 2026-09-03) vol_stop_mult
-  differ.
+* `trend` weight lowered 2.0 -> 1.0, `sell_threshold` tightened -4.5 -> -6.0
+  (2026-09-04, swept together — see the `weights`/`sell_threshold` class
+  attribute comments and BACKTEST_LOG.md's 2-way-combo entry). Isolation
+  testing found `_RSI_OVERBOUGHT` also helps alone but dominates/overrides
+  `sell_threshold`'s contribution once combined with it — left at 70
+  (`optimised`'s value), not adopted alongside this pair.
+* `stop_loss_pct` (0.08), `vol_stop_window` (20), `max_hold_days` (0),
+  `_RSI_OVERBOUGHT` (70) all unchanged from `optimised`.
 
-Single-ticker result so far: AAPL, 2023-08 to 2026-07, hourly bars —
-Sharpe 1.96 vs `optimised`'s 1.21 baseline on the same window, but only 28
-trades vs 50 (fewer, larger-ratchet-managed trades). Not tested across a
-universe, not tested for the tighter gate-driven whipsaw protection that
-`optimised` relies on being permanently off — treat as an open comparison,
-not a validated improvement (see choppy_vol.py for what a decisively-tested
-regression looks like; this one just hasn't been tested broadly yet either
-way).
+Original single-ticker result (AAPL, 2023-08 to 2026-07): Sharpe 1.96 vs
+`optimised`'s 1.21 baseline, but only 28 trades vs 50. The full-universe,
+multi-window validation this needed came later, piecemeal, via the
+2026-09-03/04 exit-parameter audit (BACKTEST_LOG.md) — `vol_stop_mult`,
+`profit_stop_scale`/`min_stop_pct`, `trend` weight, and `sell_threshold` are
+all now swept and either confirmed-good or improved on real full-universe
+£100k backtests across a synthetic 2008 crash window and a real prev-2yr
+window, not a single-ticker sanity check.
 
 Entry
 -----
-Identical to `optimised`: HMM (2.0) + RSI (1.0) + SMA200 (3.0) + trend
-SMA20/50 (2.0) + volume (1.0). Buy threshold 6.0, sell -4.5. RSI>70 and
-regime_signal<=0 entry vetoes. Quality gate defaults OFF (see above) but is
-still overridable back on via --plugin-gate quality for further comparison.
+HMM (2.0) + RSI (1.0) + SMA200 (3.0) + trend SMA20/50 (1.0, lowered from
+`optimised`'s 2.0 — see below) + volume (1.0). Buy threshold 6.0 (unchanged
+from `optimised`), sell -6.0 (stricter than `optimised`'s -4.5 — see below).
+RSI>70 and regime_signal<=0 entry vetoes. Quality gate defaults OFF (see
+above) but is still overridable back on via --plugin-gate quality for
+further comparison.
 
 Exit
 ----
@@ -85,13 +94,25 @@ class OptimisedNewEntry:
     weights: dict[str, float] = {
         "markov": 0.0,
         "rsi":    1.0,
-        "trend":  2.0,
+        "trend":  1.0,   # lowered 2.0 -> 1.0 2026-09-04, swept (see below)
         "sma200": 3.0,
         "volume": 1.0,
         "hmm":    2.0,
     }
     buy_threshold: float = 6.0
-    sell_threshold: float = -4.5
+    sell_threshold: float = -6.0
+    # trend/sell_threshold both swept 2026-09-04 (scripts/run_exit_param_audit.ps1
+    # + run_2way_combo_check.ps1, £100k/top-70/full-universe, synthetic
+    # 2008 crash + real prev-2yr windows). Old (trend=2.0, sell_threshold=-4.5):
+    # crash -10.2%/-13.8% DD, real +12.2%/-6.3% DD. This config (trend=1.0,
+    # sell_threshold=-6.0, RSI_OVERBOUGHT left at 70): crash -7.5%/-11.1% DD,
+    # real +22.5%/-3.8% DD — beats every individual single-parameter change on
+    # crash, keeps almost all of sell_threshold-alone's real-return edge
+    # (+22.5% vs +25.2% alone). Also swept: RSI_OVERBOUGHT=60 alone helps too
+    # (+15.2% real) but combining it here caps the real-return gain (it
+    # dominates/overrides sell_threshold's contribution once both active,
+    # confirmed via 2-way isolation) — left at 70, not adopted with this pair.
+    # See BACKTEST_LOG.md 2026-09-04 entries.
     #: Defaults OFF here (unlike optimised.py) — the gate's adverse-exit
     #: escalation dominated every exit in testing, leaving the ratchet stop
     #: below no chance to ever bind.

@@ -30,6 +30,26 @@ Net P&L is the sum of N *independent* backtests, each with unlimited capital and
 
 ---
 
+## 2026-09-04 — Combined-winners + 2-way combo check: isolates RSI as the real-return-eating component
+
+**Context:** Follow-up to the exit-parameter audit's three validated-but-unapplied items (`sell_threshold=-6.0`, `trend=1.0/sma200=3.0`, `_RSI_OVERBOUGHT=60`) — tested individually, they showed large real-window gains (up to +25.2%). Combining all 3 (`scripts/run_combined_winners_check.ps1`) still beat current on every metric but the real-return gain shrank to +15.3%, well below any individual result — flagged as needing isolation before deciding what to adopt. Ran `scripts/run_2way_combo_check.ps1` (sell_threshold+weights, sell_threshold+RSI, both windows) to find which pairing was diluting it.
+
+| Config | Crash return | Crash max DD | Real return | Real max DD |
+|---|---|---|---|---|
+| current | -10.2% | -13.8% | +12.2% | -6.3% |
+| sell_threshold=-6.0 alone | -8.6% | -12.3% | +25.2% | -4.4% |
+| trend=1.0/sma200=3.0 alone | -9.0% | -12.7% | +20.2% | -4.3% |
+| RSI_OVERBOUGHT=60 alone | N/A (real-window-only test) | N/A | +15.2% | -3.8% |
+| **sell_threshold + weights** | **-7.5%** | **-11.1%** | **+22.5%** | -3.8% |
+| sell_threshold + RSI | -9.2% | -12.8% | +15.2% | -3.6% |
+| all 3 combined | -5.7% | -10.1% | +15.3% | -3.6% |
+
+**Result: RSI is the dilutor, not the weights.** `sell_threshold+RSI`'s real return (+15.2%) lands almost exactly on RSI-alone's (+15.2%) — the RSI veto dominates and overrides sell_threshold's contribution to trade selection once both gate the same entries. `sell_threshold+weights` keeps nearly all of sell_threshold's real-return edge (+22.5% vs +25.2% alone, only -2.7pp) while improving crash performance beyond either individual component (-7.5%/-11.1%, better than sell_threshold-alone's -8.6%/-12.3% and weights-alone's -9.0%/-12.7%). Full 3-way combined still has the best crash number (-5.7%/-10.1%) but caps real return at +15.3% via the same RSI-dominance mechanism.
+
+**Not yet decided which config to adopt** — `sell_threshold+weights` (best real/crash balance, no RSI change) vs `sell_threshold` alone (best raw real return, worse crash) vs all 3 (best crash, capped real return) are the live candidates. Also flagged: every parameter in this whole 2026-09-03/04 audit was tuned against the same 2 windows (2008 synthetic crash, prev-2yr real) — multiple-comparisons/overfitting-to-the-test-set risk across the sequence of picks. Next step agreed: warm the synthetic HMM cache for 2000-2026 (currently only Jan2008-Jul2009) and re-validate the shortlisted config(s) against a much larger, mostly-untouched window before finalizing anything.
+
+---
+
 ## 2026-09-04 — #4 trend/sma200 weight grid crash-window follow-up: t1s3 confirmed, not a fluke
 
 **Context:** The weight-grid entry below was real-window-only (9 cells, no crash cross-check) and noisy/non-monotonic, so its standout cell (t1s3: trend=1.0, sma200=3.0, +20.2% real return vs current t2s3's +12.2%) needed a crash-window check before being decision-ready. Ran `scripts/run_weight_grid_crash_followup.ps1` — 2 runs, crash window only, t1s3 vs current (t2s3), same £100k/top-70/full-universe setup.

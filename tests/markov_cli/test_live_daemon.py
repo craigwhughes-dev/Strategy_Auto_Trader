@@ -1710,6 +1710,9 @@ class TestBuildNightlyPnlPositions:
         assert row["pl_abs"] == pytest.approx(11.54 * 677 - 8191.70)
 
     def test_skips_ticker_on_quote_failure_without_raising(self):
+        """Live quote fails AND the last-close cache fallback has nothing
+        either — only then is the ticker skipped (see
+        _build_nightly_pnl_positions' docstring)."""
         portfolio = self._portfolio({
             "AV.L": {"entry_date": "2026-08-28", "fill_price": 7.272,
                      "quantity": 1020, "cost_value": 7417.44, "currency": "GBP"},
@@ -1717,11 +1720,14 @@ class TestBuildNightlyPnlPositions:
         broker = mock.Mock()
         broker.get_last_price.side_effect = ConnectionError("TWS gone")
 
-        rows = live_daemon._build_nightly_pnl_positions(portfolio, broker, mock.Mock())
+        with mock.patch.object(live_daemon, "_last_close_from_cache", return_value=0.0):
+            rows = live_daemon._build_nightly_pnl_positions(portfolio, broker, mock.Mock())
 
         assert rows == []
 
     def test_skips_ticker_on_zero_quote(self):
+        """Same as above via a zero live quote instead of an exception —
+        still skipped only because the cache fallback also has nothing."""
         portfolio = self._portfolio({
             "AV.L": {"entry_date": "2026-08-28", "fill_price": 7.272,
                      "quantity": 1020, "cost_value": 7417.44, "currency": "GBP"},
@@ -1729,9 +1735,29 @@ class TestBuildNightlyPnlPositions:
         broker = mock.Mock()
         broker.get_last_price.return_value = 0.0
 
-        rows = live_daemon._build_nightly_pnl_positions(portfolio, broker, mock.Mock())
+        with mock.patch.object(live_daemon, "_last_close_from_cache", return_value=0.0):
+            rows = live_daemon._build_nightly_pnl_positions(portfolio, broker, mock.Mock())
 
         assert rows == []
+
+    def test_falls_back_to_last_close_on_quote_failure(self):
+        """When the live quote fails but the last-close cache has a usable
+        price, the position is included with price_source='last_close', not
+        skipped — the fallback this class's other two tests didn't cover."""
+        portfolio = self._portfolio({
+            "AV.L": {"entry_date": "2026-08-28", "fill_price": 7.272,
+                     "quantity": 1020, "cost_value": 7417.44, "currency": "GBP"},
+        })
+        broker = mock.Mock()
+        broker.get_last_price.side_effect = ConnectionError("TWS gone")
+
+        with mock.patch.object(live_daemon, "_last_close_from_cache", return_value=7.30):
+            rows = live_daemon._build_nightly_pnl_positions(portfolio, broker, mock.Mock())
+
+        assert len(rows) == 1
+        assert rows[0]["ticker"] == "AV.L"
+        assert rows[0]["current_price"] == pytest.approx(7.30)
+        assert rows[0]["price_source"] == "last_close"
 
     def test_multiple_positions_mixed_currency(self):
         portfolio = self._portfolio({
