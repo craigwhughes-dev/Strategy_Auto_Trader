@@ -1915,12 +1915,17 @@ def check_nightly_reconciliation(
                 logger.error(f"Nightly roundup email failed: {e}", exc_info=True)
 
             # Send nightly open-position P&L email (qty, amount, current value, P&L)
-            try:
-                from ..output.emailer import send_nightly_position_pnl
-                pnl_positions = _build_nightly_pnl_positions(portfolio, broker, logger)
-                send_nightly_position_pnl(pnl_positions)
-            except Exception as e:
-                logger.error(f"Nightly position P&L email failed: {e}", exc_info=True)
+            if daemon_state.get("last_pnl_email_date") != today:
+                try:
+                    from ..output.emailer import send_nightly_position_pnl
+                    pnl_positions = _build_nightly_pnl_positions(portfolio, broker, logger)
+                    send_nightly_position_pnl(pnl_positions)
+                    daemon_state["last_pnl_email_date"] = today
+                    save_state(daemon_state)
+                except Exception as e:
+                    logger.error(f"Nightly position P&L email failed: {e}", exc_info=True)
+            else:
+                logger.debug(f"Nightly position P&L email already sent today ({today}), skipping")
         elif outcome == "error":
             # Count at most one error per calendar day — the run window can
             # retry every ~60s for 30+ minutes, and that retry storm must not
