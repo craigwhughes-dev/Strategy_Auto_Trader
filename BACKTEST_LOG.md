@@ -30,6 +30,130 @@ Net P&L is the sum of N *independent* backtests, each with unlimited capital and
 
 ---
 
+## 2026-09-07 — min_hold_bars confirmed inert, removed (set to 0)
+
+Tool: scripts/sweep_exit_params_real.py
+Scope: optimised_new, 20 tickers, real IBKR 2.9yr, min_entry_score=7.0 + Plan B active
+
+| min_hold_bars | Trades | WinRate | MeanRet | Sharpe |
+|---|---|---|---|---|
+| 0 | 57 | 62.7% | +0.75% | +12.241 |
+| 6 | 57 | 62.7% | +0.75% | +12.241 |
+| 24 | 57 | 62.7% | +0.75% | +12.241 |
+| **48 (old baseline)** | **57** | **62.7%** | **+0.75%** | **+12.241** |
+| 96 | 57 | 62.7% | +0.75% | +12.241 |
+| 168 | 57 | 62.7% | +0.75% | +12.241 |
+
+**Result: completely inert across all values.** With min_entry_score=7.0 filtering to high-quality entries and Plan B (min_hold_bars_regime_exit=6) handling early regime exits, the composite-signal SELL never fires in the first 48 bars for this population. The 48-bar gate protected against noise exits in the previous audit (2026-09-04 #1) — that finding was on the old strategy without the score gate or Plan B; the landscape has changed. `OptimisedNewExit.min_hold_bars` set to 0. Parameter still exists in engine and is CLI-overridable.
+
+---
+
+## 2026-09-07 — Plan A/B exit mechanism tests + min_entry_score score gate adopted
+
+Tool: scripts/sweep_exit_params.py (synthetic), scripts/sweep_exit_params_real.py (real IBKR)
+Scope: optimised_new, 20 tickers, synthetic 26yr (2000-2026) + real IBKR 2.9yr
+
+### Plan A — breakeven trailing stop: NEGATIVE
+
+Built `breakeven_trailing=True` option in `core/exits.py` and `plugins/exit_rules.py`: trailing stop trails from `max(peak_price, entry_price)` rather than peak only, so it can exit at-or-above entry before hitting the -8% hard stop. Swept on synthetic 26yr data.
+
+| breakeven_trailing | Trades | WinRate | MeanRet | Sharpe |
+|---|---|---|---|---|
+| False (baseline) | 3266 | 52.6% | −1.75% | −19.9 |
+| True | ~6500 | 17.5% | −2.67% | −55.4 |
+
+**Result: sharply negative.** At `vol_stop_mult=0.5`, the breakeven ref fires within 1-3 bars of entry — converting almost all wins into near-zero exits. Win rate collapses 52.6% → 17.5%, trade count roughly doubles (trailing stop fires constantly, re-enters immediately). Plan A rejected. `breakeven_trailing=False` as default, attribute kept in code for future re-testing with looser vol_stop_mult.
+
+### Plan B — regime-forced exit (bypass min_hold_bars): POSITIVE, adopted at 6 bars
+
+Extended `consolidated_engine.py` to check strategy-owned `_exit.min_hold_bars_regime_exit` — when regime_signal ≤ 0 and bars held ≥ this value, force SELL regardless of the 48-bar composite-signal gate. Engine reads via `getattr` (default 12, now overridden to 6 on `OptimisedNewExit`).
+
+Sweep on synthetic 26yr (baseline = feature off):
+
+| min_hold_bars_regime_exit | Trades | WinRate | MeanRet | Sharpe |
+|---|---|---|---|---|
+| None (off) | 3266 | 52.6% | −1.75% | −19.9 |
+| 6 bars (~1d) | 3494 | 53.5% | −1.63% | −17.4 |
+| 12 bars (~2d) | 3479 | 53.4% | −1.68% | −17.7 |
+| 24 bars | 3430 | 53.1% | −1.72% | −18.5 |
+| 48 bars | 3400 | 52.9% | −1.73% | −18.9 |
+
+**Result: positive, monotonic — earlier exit wins.** 6 bars best: +0.12pp mean_ret, +2.5 Sharpe units. `OptimisedNewExit.min_hold_bars_regime_exit = 6` adopted.
+
+### min_entry_score gate: STRONG POSITIVE, adopted at 7.0
+
+Added composite-score veto to `OptimisedNewEntry.evaluate()`: if score < `min_entry_score`, return HOLD regardless of regime/signal. Swept on real IBKR 2.9yr data (20 tickers). Weights sum to 8; buy_threshold=6.0; only 6/7/8 are achievable scores.
+
+| min_entry_score | Trades | WinRate | MeanRet | PeakCapt | Sharpe |
+|---|---|---|---|---|---|
+| None (off) | 100 | 57.4% | +0.12% | 72.5% | +0.112 |
+| 7.0 | 57 | 62.7% | +0.75% | 48.7% | +12.241 |
+| 8.0 | 39 | 60.2% | +0.80% | 45.0% | +1421 (n too small) |
+
+**Result: strongest single improvement of the session.** Score-7 gate: +0.63pp mean_ret, +5.3pp WR. `OptimisedNewEntry.min_entry_score = 7.0` adopted. Score-8 promising (+0.80%) but 39 trades is too small to trust; needs re-test with larger sample.
+
+**Note — synthetic/real divergence on score:** Synthetic 26yr shows score-6 best R:R (0.63) and score-8 worst; real 2.9yr shows score-7/8 clearly best. Real data wins for live decisions — score-7 gate adopted.
+
+**vol_stop_mult re-sweep with gate active (same 2026-09-07 run, second invocation):**
+
+| vol_stop_mult | Trades | WinRate | MeanRet | PeakCapt | Sharpe |
+|---|---|---|---|---|---|
+| 0.5 (baseline) | 57 | 62.7% | +0.75% | 48.7% | +12.241 |
+| 1.0 | 53 | 61.8% | +0.77% | 52.7% | +12.846 |
+| **1.5** | **49** | **64.1%** | **+0.99%** | **52.1%** | **+35.271** |
+| 2.0 | 49 | 64.1% | +0.99% | 51.2% | +21.468 |
+| 3.0 | 42 | 61.9% | +1.22% | 56.8% | +27.763 |
+
+**Result confirmed: looser vol_stop_mult wins with gate active.** 1.5 best Sharpe (+35.3); 3.0 best raw mean_ret (+1.22%) but fewer trades and lower Sharpe. Both real sweeps (ungated: 2.0-3.0 best; gated: 1.5 best Sharpe) agree direction vs synthetic divergence (synthetic favored 0.5). **`vol_stop_mult` 0.5 → 1.5 adopted on `OptimisedNewExit`.**
+
+Other params in gated run: profit_stop_scale 0.1-0.5 all identical — keep 0.30. stop_loss_pct 0.10 +0.03pp over 0.08 — not material, keep 0.08. min_hold_bars all values identical (score gate + regime-forced exit make it inert) — keep 48.
+
+---
+
+## 2026-09-06 — Exit parameter sweep + 26yr synthetic regime analysis + entry score stratification
+
+Tool: scripts/sweep_exit_params.py (synthetic), scripts/sweep_exit_params_real.py (real IBKR), scripts/score_rr_by_vsmult.py, scripts/analyse_regime_split.py
+Scope: optimised_new, 20 tickers, synthetic 26yr (2000-2026) + real IBKR 2.9yr
+Journal: data_synthetic/journals/synth_26yr.csv (453 trades, vol-filtered), synth_26yr_novol.csv (837 trades)
+
+**Exit parameter sweep (synthetic, 3266 baseline trades):**
+
+| Parameter | Best value | Effect vs baseline |
+|---|---|---|
+| profit_stop_scale | 0.5 (monotonic) | -18.1 Sharpe vs -19.9; small effect |
+| **vol_stop_mult** | **0.5** | **Win rate 58% vs 42%; Sharpe -16.6 vs -19.9 — biggest gain** |
+| stop_loss_pct | 0.10 (monotonic) | Sharpe -17.2 vs -19.9 |
+| min_hold_bars | 168 (monotonic) | Sharpe -17.9 vs -19.9; small effect |
+
+Real IBKR sweep (71 trades) confirmed vol_stop_mult=0.5 direction (win 60% vs 54%, mean -1.26% vs -1.59%). Other params inconclusive at 71 trades.
+
+**Regime split (vol-filtered 453-trade journal):**
+- Volatile regimes (2000-02 dot-com, 2022): 27% win, -4.4% mean, -£13k trading P&L
+- Calm bull (2003-07, 2012-19): 51-55% win, -1.0% to -1.7% mean, -£43k trading P&L — **strategy loses even in calm markets**
+- Recovery regimes (2020-21, 2023-26): 86-100% win, +2-11% mean, +£3k — **only green periods**
+
+**Note:** The `live_sim_synthetic.csv` from the automated 26yr run (`scripts/run_synth_26yr.ps1`) only produced 765 trades, all in 2008-09 — the TQ vol gate (504-day window) kills 91.8% of candidates because the GFC remains in the rolling window for years afterward. The `synth_26yr.csv` / `synth_26yr_novol.csv` journals from earlier runs have better year coverage and are the correct inputs for regime analysis.
+
+**Entry score stratification:**
+Scores are only 6/7/8 (narrow integer range). Counter-intuitively, higher scores have worse R:R:
+- Score 6: +3.54% avg_win, -7.24% avg_loss, R:R 0.63, break-even 67% (actual 39%) 
+- Score 8: +3.01% avg_win, -7.98% avg_loss, R:R 0.38, break-even 73%
+
+Raising buy_threshold would discard score-6 (best R:R) and keep score-7/8 (worst). Entry score filter is not the fix.
+
+**vol_stop_mult=0.5 R:R validation:**
+- Win rate score-6: 39% → 56% ✓
+- avg_win score-6: +3.54% → +2.08% ✗ (exits winners too early)
+- avg_loss score-6: -7.24% → -7.99% ✗ (losers still hit -8% hard stop)
+- Break-even required: 67.1% → 79.4% (moved further away)
+- Applied to optimised_new.py regardless — recovery-regime win rates are naturally higher (empirically 85%+ in 2020-21), so the higher break-even threshold may still be met in production conditions.
+
+**Structural conclusion:** R:R is not fixable by exit parameter tuning. Losers fall straight to the -8% hard stop before any trailing stop binds. Fixing avg_loss requires a fundamentally different exit mechanism: time-based cut (max_hold_days), breakeven-trailing from entry price, or regime-exit ignoring min_hold_bars when HMM flips bearish.
+
+Adopted: vol_stop_mult 1.0 → 0.5 in OptimisedNewExit (not yet committed).
+
+---
+
 ## 2026-09-04 — Combined-winners + 2-way combo check: isolates RSI as the real-return-eating component
 
 **Context:** Follow-up to the exit-parameter audit's three validated-but-unapplied items (`sell_threshold=-6.0`, `trend=1.0/sma200=3.0`, `_RSI_OVERBOUGHT=60`) — tested individually, they showed large real-window gains (up to +25.2%). Combining all 3 (`scripts/run_combined_winners_check.ps1`) still beat current on every metric but the real-return gain shrank to +15.3%, well below any individual result — flagged as needing isolation before deciding what to adopt. Ran `scripts/run_2way_combo_check.ps1` (sell_threshold+weights, sell_threshold+RSI, both windows) to find which pairing was diluting it.

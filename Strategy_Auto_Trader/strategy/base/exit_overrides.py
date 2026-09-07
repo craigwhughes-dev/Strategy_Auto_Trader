@@ -22,6 +22,7 @@ from ...plugins.exit_rules import StandardExitRules
 _STANDARD_EXIT_RULES_PARAMS = (
     "stop_loss_pct", "trailing_stop", "vol_stop_mult", "vol_stop_window",
     "profit_stop_scale", "min_stop_pct", "max_hold_days",
+    "breakeven_trailing",
     "exit_on_macd_cross", "exit_on_rsi_reversal", "exit_on_consolidation",
     "use_sar_stop",
 )

@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import pandas as pd
 
-_REPLACE_RETRIES = 3
-_REPLACE_RETRY_DELAY_SECONDS = 0.05
+_REPLACE_RETRIES = 10
+_REPLACE_RETRY_DELAY_SECONDS = 0.1  # linear backoff: 100ms..1000ms ≈ 5.5s total budget
 
 
 def _atomic_replace(temp_path: str, path: Path) -> None:

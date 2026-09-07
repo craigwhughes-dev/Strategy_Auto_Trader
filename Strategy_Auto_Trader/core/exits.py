@@ -52,16 +52,17 @@ def _check_exit_conditions(
     peak_price_since_entry: float,
     max_hold_days: int,
     days_in_trade: int,
-    use_sar_stop: bool,
-    sar_val: float | None,
-    need_exit: bool,
-    macd_bearish_cross: bool,
-    exit_on_macd_cross: bool,
-    exit_on_rsi_reversal: bool,
-    rsi_overbought_exit: bool,
-    rsi_momentum_loss: bool,
-    exit_on_consolidation: bool,
-    consolidating: bool,
+    breakeven_trailing: bool = False,
+    use_sar_stop: bool = False,
+    sar_val: float | None = None,
+    need_exit: bool = False,
+    macd_bearish_cross: bool = False,
+    exit_on_macd_cross: bool = False,
+    exit_on_rsi_reversal: bool = False,
+    rsi_overbought_exit: bool = False,
+    rsi_momentum_loss: bool = False,
+    exit_on_consolidation: bool = False,
+    consolidating: bool = False,
 ) -> tuple[bool, str, float, int]:
     """Check every exit condition for one bar, in priority order:
     R:R stop/target > trailing stop > max-hold-days > SAR stop > exit indicators.
@@ -87,18 +88,28 @@ def _check_exit_conditions(
             gain_pct = (cur_close - entry_price) / entry_price * 100
             sell_reason = f"rr_take_profit({gain_pct:.1f}% gain, target={rr_risk*rr_ratio*100:.0f}%)"
 
-    # Trailing stop (profit protection only). Only fires when the trade has
-    # been profitable AND current price is still above entry — if price has
-    # fallen below entry, the R:R stop handles it.
     if effective_stop > 0.0 and not trailing_stop_hit:
         peak_price_since_entry = max(peak_price_since_entry, cur_close)
-        if peak_price_since_entry > entry_price and cur_close >= entry_price:
-            drop_from_peak = (peak_price_since_entry - cur_close) / peak_price_since_entry
-            if drop_from_peak >= effective_stop:
+        if breakeven_trailing:
+            # Trail from entry_price as minimum reference — exits losers before hard stop.
+            # Fires whenever price drops >= effective_stop from max(peak, entry).
+            peak_ref = max(peak_price_since_entry, entry_price)
+            drop_from_ref = (peak_ref - cur_close) / peak_ref
+            if drop_from_ref >= effective_stop:
                 trailing_stop_hit = True
                 gain_pct = (cur_close - entry_price) / entry_price * 100
-                sell_reason = (f"trailing_stop({drop_from_peak*100:.1f}% from peak, "
-                              f"still +{gain_pct:.1f}% from entry)")
+                sell_reason = (f"trailing_stop_be({drop_from_ref*100:.1f}% from ref, "
+                              f"{gain_pct:+.1f}% from entry)")
+        else:
+            # Profit-protection only: only fires when trade has been profitable
+            # and price is still above entry — below-entry losses go to the R:R stop.
+            if peak_price_since_entry > entry_price and cur_close >= entry_price:
+                drop_from_peak = (peak_price_since_entry - cur_close) / peak_price_since_entry
+                if drop_from_peak >= effective_stop:
+                    trailing_stop_hit = True
+                    gain_pct = (cur_close - entry_price) / entry_price * 100
+                    sell_reason = (f"trailing_stop({drop_from_peak*100:.1f}% from peak, "
+                                  f"still +{gain_pct:.1f}% from entry)")
 
     # Max hold days
     if max_hold_days > 0 and not trailing_stop_hit:

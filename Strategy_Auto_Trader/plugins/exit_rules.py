@@ -27,6 +27,7 @@ class StandardExitRules:
         profit_stop_scale: float = 0.0,
         min_stop_pct: float = 0.05,
         max_hold_days: int = 0,
+        breakeven_trailing: bool = False,
         exit_on_macd_cross: bool = False,
         exit_on_rsi_reversal: bool = False,
         exit_on_consolidation: bool = False,
@@ -39,6 +40,7 @@ class StandardExitRules:
         self._profit_stop_scale = profit_stop_scale
         self._min_stop_pct = min_stop_pct
         self._max_hold_days = max_hold_days
+        self._breakeven_trailing = breakeven_trailing
         self._exit_on_macd_cross = exit_on_macd_cross
         self._exit_on_rsi_reversal = exit_on_rsi_reversal
         self._exit_on_consolidation = exit_on_consolidation
@@ -77,6 +79,7 @@ class StandardExitRules:
             peak_price_since_entry=trade.peak_price_since_entry,
             max_hold_days=self._max_hold_days,
             days_in_trade=trade.days_in_trade,
+            breakeven_trailing=self._breakeven_trailing,
             use_sar_stop=bar.use_sar_stop,
             sar_val=bar.sar_val,
             need_exit=bar.need_exit,

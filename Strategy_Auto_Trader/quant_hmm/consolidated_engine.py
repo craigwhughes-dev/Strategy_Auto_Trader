@@ -589,13 +589,22 @@ def consolidated_backtest(
             if exit_hit:
                 trade_event = "SELL"
             else:
-                sig_in = _entry.evaluate(regime_state, mom_snap, cur_vol_ratio, currently_in=True)
-                if sig_in.flag == "SELL":
-                    hold_req = _min_hold_bars
-                    if bars_held >= hold_req:
-                        trade_event = "SELL"
-                        sell_reason = sig_in.reason or "signal"
-                        exit_hit = True
+                _min_hold_regime = getattr(_exit, "min_hold_bars_regime_exit", 12)
+                if (_min_hold_regime is not None
+                        and regime_state.regime_signal is not None
+                        and regime_state.regime_signal <= 0
+                        and bars_held >= _min_hold_regime):
+                    trade_event = "SELL"
+                    sell_reason = f"regime_forced(signal={regime_state.regime_signal:.2f})"
+                    exit_hit = True
+                if not exit_hit:
+                    sig_in = _entry.evaluate(regime_state, mom_snap, cur_vol_ratio, currently_in=True)
+                    if sig_in.flag == "SELL":
+                        hold_req = _min_hold_bars
+                        if bars_held >= hold_req:
+                            trade_event = "SELL"
+                            sell_reason = sig_in.reason or "signal"
+                            exit_hit = True
 
             if exit_hit:
                 trade_pl = (cur_close - entry_price) / entry_price

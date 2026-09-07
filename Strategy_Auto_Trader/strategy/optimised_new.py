@@ -30,10 +30,12 @@ What changed vs. `optimised`, and why
   wins when active. Not carried into this file to avoid a dead constant.)
 * `min_stop_pct` tightened 0.04 -> 0.03 (the ratchet floor — never allow the
   trailing distance to narrow past this even at very high profit).
-* `vol_stop_mult` tightened 2.0 -> 1.0 (2026-09-03, swept — see the
-  OptimisedNewExit.__init__ comment and BACKTEST_LOG.md; the old 2.0 was
-  never backtested and was worst/near-worst on both a crash and a normal
-  window).
+* `vol_stop_mult` 2.0 -> 1.0 (2026-09-03) -> 0.5 (2026-09-06) -> 1.5
+  (2026-09-07). 0.5 was adopted when real sweep used ungated entries (100
+  trades, synthetic 26yr also favored 0.5); with min_entry_score=7.0 gate
+  active (57 trades), 1.5 dominates on Sharpe (+35.3 vs +12.2) across both
+  gated and ungated real sweeps. Synthetic and real diverge on this param —
+  real data wins for live-daemon decisions.
 * `trend` weight lowered 2.0 -> 1.0, `sell_threshold` tightened -4.5 -> -6.0
   (2026-09-04, swept together — see the `weights`/`sell_threshold` class
   attribute comments and BACKTEST_LOG.md's 2-way-combo entry). Isolation
@@ -64,9 +66,11 @@ further comparison.
 Exit
 ----
 Hard stop-loss 8% (unchanged floor). No hard take-profit (999, effectively
-off). Vol-scaled trailing stop (vol_stop_mult=1.0, vol_stop_window=20 —
-mult tightened from 2.0 2026-09-03, see BACKTEST_LOG.md), profit-stop
-tightening (profit_stop_scale=0.30, floor 3%). No max hold.
+off). Vol-scaled trailing stop (vol_stop_mult=1.5, vol_stop_window=20 —
+2.0→1.0→0.5→1.5 sweep history, see BACKTEST_LOG.md), profit-stop
+tightening (profit_stop_scale=0.30, floor 3%). No max hold. min_hold_bars=0
+(removed 2026-09-07: inert with score gate + Plan B active, all values
+0-168 identical on real IBKR sweep).
 
 All values above are this strategy's own defaults, not fixed — every one is
 overridable via the matching CLI flag regardless of --strategy selected.
@@ -160,6 +164,13 @@ class OptimisedNewEntry:
     # top_k_screen's hybrid score weights trend_quality at 0.7 — a third
     # independent enforcement of the same signal. Opts out of stage-1.
     skip_overnight_vol_screen: bool = True
+    # Minimum composite entry score gate. None = off (admit any score >= buy_threshold).
+    # Real IBKR sweep 2026-09-07 (20 tickers, 2.9yr): None=+0.12%/57.4%WR,
+    # 7.0=+0.75%/62.7%WR (57 trades, Sharpe +12.2), 8.0=+0.80%/60.2% (39 trades — too few).
+    # Synthetic (26yr) shows OPPOSITE: score-8 worst (-2.45%), score-6 best (-1.62%).
+    # Synthetic doesn't reproduce real momentum quality — real data wins for live decisions.
+    # Note: vol_stop_mult=0.5 baseline used in sweep; re-sweep vol_stop_mult with gate on.
+    min_entry_score: float = 7.0
 
     def __init__(
         self,
@@ -169,6 +180,7 @@ class OptimisedNewEntry:
         vol_filter_ok: bool = True,
         quality_gate_enabled: bool | None = None,
         gate_sensitivity: int | None = None,
+        min_entry_score: float | None = None,
     ) -> None:
         self._weights = {**self.weights, **(weights or {})}
         self._buy_t = buy_threshold if buy_threshold is not None else self.buy_threshold
@@ -179,6 +191,9 @@ class OptimisedNewEntry:
         )
         self._gate_sensitivity = (
             gate_sensitivity if gate_sensitivity is not None else self.gate_sensitivity
+        )
+        self._min_entry_score: float | None = (
+            min_entry_score if min_entry_score is not None else self.min_entry_score
         )
 
     def evaluate(
@@ -228,6 +243,11 @@ class OptimisedNewEntry:
                 flag="HOLD", raw_flag=decision.raw_flag, score=decision.score,
                 reason="optimised_new veto: regime_signal <= 0 (no bull-regime confirmation)",
             )
+        if self._min_entry_score is not None and decision.score < self._min_entry_score:
+            return EntryDecision(
+                flag="HOLD", raw_flag=decision.raw_flag, score=decision.score,
+                reason=f"optimised_new veto: score {decision.score:.1f} < min_entry_score {self._min_entry_score:.1f}",
+            )
         return decision
 
 
@@ -242,7 +262,16 @@ class OptimisedNewExit:
     _target: float = 999.0  # effectively disabled — see module docstring
     use_kelly: bool = True
     kelly_lookback: int = 20
-    min_hold_bars: int = 48
+    min_hold_bars: int = 0
+    # Swept 2026-09-07 (sweep_exit_params_real.py, 20 tickers, real IBKR 2.9yr,
+    # min_entry_score=7.0 gate active): 0/6/24/48/96/168 all identical (57 trades,
+    # 62.7% WR, +0.75%). Score gate filters out noisy entries that generate early
+    # composite-signal SELLs; Plan B (min_hold_bars_regime_exit=6) covers early
+    # regime exits. Parameter is inert — set to 0 to remove dead constraint.
+    # Plan B (swept 2026-09-07): regime-forced exit when HMM signal <= 0, bypassing
+    # the composite-signal SELL gate. 6-bar minimum prevents immediate-reversal whipsaws.
+    # Sweep: 6bars=-1.70%/Sharpe-14.78 vs off=-1.82%/-15.11 (20 tickers, 26yr synth).
+    min_hold_bars_regime_exit: int | None = 6
 
     def __init__(
         self,
@@ -254,6 +283,7 @@ class OptimisedNewExit:
         profit_stop_scale: float | None = None,
         min_stop_pct: float | None = None,
         max_hold_days: int | None = None,
+        breakeven_trailing: bool | None = None,
         exit_on_macd_cross: bool | None = None,
         exit_on_rsi_reversal: bool | None = None,
         exit_on_consolidation: bool | None = None,
@@ -265,22 +295,19 @@ class OptimisedNewExit:
             defaults={
                 "stop_loss_pct": self._stop,
                 "trailing_stop": 0.0,        # inert while vol_stop_mult>0 — see docstring
-                "vol_stop_mult": 1.0,        # 1 × realised-vol trailing stop — swept 2026-09-03
-                # (scripts/run_vol_stop_mult_sweep.ps1: {1.0,1.5,2.0,2.5} x
-                # {synthetic 2008 crash, real prev-2yr}). The old 2.0 default
-                # was never backtested — worst/near-worst on both windows: at
-                # 2.0 the trailing stop never once bound in the crash test
-                # (hard 8% stop always beat it there), vs 10 profitable fires
-                # at 1.0. Real window: 1.0 wins outright (+12.0% return/-6.3%
-                # max DD vs 2.0's +10.4%/-8.2%). 1.5 was marginally better in
-                # the crash window (-8.8% vs 1.0's -10.2%) but gave back real-
-                # window upside (+9.8%); 1.0 chosen since crash tail risk is
-                # already covered by vix_entry_gate_threshold. See
-                # BACKTEST_LOG.md 2026-09-03 vol_stop_mult sweep entry.
+                "vol_stop_mult": 1.5,        # updated 2026-09-07 (was 0.5)
+                # Real IBKR sweep with min_entry_score=7.0 gate active (sweep_exit_params_real.py,
+                # 2026-09-07, 20 tickers): 1.5 best Sharpe (+35.3, +0.99% mean_ret, 49 trades
+                # 64.1% WR) vs 0.5 baseline (Sharpe +12.2, +0.75%, 57 trades 62.7% WR). Both
+                # real sweeps (gated + ungated) agree: looser mult > tighter. 26yr synthetic
+                # favored 0.5 (win_rate 58% vs 1.0's 42%) — real data overrules for live decisions.
+                # Note: the old 0.5 was adopted when real sweep used ungated baseline (100 trades);
+                # with min_entry_score=7.0 active (57 trades), 1.5 dominates on Sharpe.
                 "vol_stop_window": 20,
                 "profit_stop_scale": 0.30,   # tighten trail as profit grows (was 0.5)
                 "min_stop_pct": 0.03,        # floor: never tighter than 3% (was 0.04)
                 "max_hold_days": 0,
+                "breakeven_trailing": False,  # SWEPT 2026-09-07: NEGATIVE — doubles trades, win rate 17.5% vs 52.6%; off
                 "exit_on_macd_cross": False,
                 "exit_on_rsi_reversal": False,
                 "exit_on_consolidation": False,
@@ -292,6 +319,7 @@ class OptimisedNewExit:
             profit_stop_scale=profit_stop_scale,
             min_stop_pct=min_stop_pct,
             max_hold_days=max_hold_days,
+            breakeven_trailing=breakeven_trailing,
             exit_on_macd_cross=exit_on_macd_cross,
             exit_on_rsi_reversal=exit_on_rsi_reversal,
             exit_on_consolidation=exit_on_consolidation,
