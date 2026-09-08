@@ -35,15 +35,22 @@ def generate_bridge_path(
     sigma: float,
     n_steps: int,
     rng: np.random.Generator,
+    sigma_scale: float = 1.0,
 ) -> np.ndarray:
     """Return `n_steps` synthetic closes bridging prev_close -> next_close
     in log-space. Index 0 of the result is the first synthetic hourly bar
     (prev_close itself is not re-emitted); the last element always equals
     `next_close` exactly.
+
+    sigma_scale: multiplier on sigma before drawing increments. Set to
+    1/sqrt(n_steps) to match Brownian motion scaling (per-step std =
+    daily_vol/sqrt(n_steps) = real hourly vol). Default 1.0 preserves
+    legacy behaviour (daily vol applied per step, ~2.6x over-dispersed
+    for n_steps=7).
     """
     l0, l1 = np.log(prev_close), np.log(next_close)
 
-    increments = rng.normal(loc=0.0, scale=sigma, size=n_steps)
+    increments = rng.normal(loc=0.0, scale=sigma * sigma_scale, size=n_steps)
     w = np.cumsum(increments)
     bridge = w - (np.arange(1, n_steps + 1) / n_steps) * w[-1]
 
@@ -61,21 +68,27 @@ def build_hourly_ohlcv_for_day(
     n_bars: int,
     rng: np.random.Generator,
     daily_volume: float | None = None,
+    sigma_scale: float = 1.0,
 ) -> pd.DataFrame:
     """Synthesize one trading day's hourly OHLCV rows. Caller supplies
     `sigma` (must be finite — filter out NaN/inf rolling-vol warmup rows
     before calling) and sets the returned frame's index.
 
+    sigma_scale: passed through to generate_bridge_path; also applied to
+    the intrabar H/L noise so High/Low spread scales consistently with the
+    bridge path variance. Set to 1/sqrt(n_bars) in generate.py.
+
     daily_volume: the day's real total volume, distributed across bars
     proportional to |Close - Open| (see module docstring). None, NaN, or
     <= 0 falls back to a flat _PLACEHOLDER_VOLUME for every bar.
     """
-    close = generate_bridge_path(prev_close, next_close, sigma, n_bars, rng)
+    close = generate_bridge_path(prev_close, next_close, sigma, n_bars, rng,
+                                  sigma_scale=sigma_scale)
     open_ = np.empty(n_bars)
     open_[0] = prev_close
     open_[1:] = close[:-1]
 
-    noise = np.abs(rng.normal(loc=0.0, scale=sigma * _INTRABAR_NOISE_FRACTION, size=n_bars))
+    noise = np.abs(rng.normal(loc=0.0, scale=sigma * sigma_scale * _INTRABAR_NOISE_FRACTION, size=n_bars))
     bar_max = np.maximum(open_, close)
     bar_min = np.minimum(open_, close)
     high = bar_max * (1 + noise)

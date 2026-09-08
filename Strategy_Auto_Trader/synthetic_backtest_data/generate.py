@@ -54,6 +54,8 @@ import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -127,6 +129,7 @@ def generate_synthetic_hourly(
             n_bars=bars_per_day,
             rng=rng,
             daily_volume=volumes[i] if volumes is not None else None,
+            sigma_scale=1.0 / math.sqrt(bars_per_day),
         )
         end = timestamps[i]
         day_df.index = pd.date_range(end=end, periods=bars_per_day, freq="1h")

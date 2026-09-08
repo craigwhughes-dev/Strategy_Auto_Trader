@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -2097,6 +2098,7 @@ def main(argv: list[str] | None = None) -> int:
     _recon_fail_count = 0
     _recon_first_fail_at = None
     _recon_unreachable_alerted = False
+    _recon_bounced = False
     if not dry_run:
         logger.warning("New entries halted pending startup reconciliation")
 
@@ -2139,6 +2141,7 @@ def main(argv: list[str] | None = None) -> int:
                         _recon_fail_count = 0
                         _recon_first_fail_at = None
                         _recon_unreachable_alerted = False
+                        _recon_bounced = False
                         daemon_state["needs_reconciliation"] = False
                         save_daemon_state(daemon_state)
                         logger.info("Startup reconciliation complete — resuming normal entry evaluation")
@@ -2164,6 +2167,31 @@ def main(argv: list[str] | None = None) -> int:
                             except Exception as _e:
                                 logger.error(f"TWS-unreachable alert email failed: {_e}")
                             _recon_unreachable_alerted = True
+
+                        # Auto-bounce: after 10+ consecutive off-hours failures (50 min),
+                        # trigger bounce_ibc.ps1 once so the daemon self-heals without
+                        # manual intervention. Only fires when all markets are closed —
+                        # avoids bouncing TWS while trades could be in flight.
+                        _AUTO_BOUNCE_AFTER_FAILURES = 10
+                        if (
+                            _recon_fail_count >= _AUTO_BOUNCE_AFTER_FAILURES
+                            and not _recon_bounced
+                            and not _any_market_open
+                        ):
+                            bounce_script = ROOT / "scripts" / "bounce_ibc.ps1"
+                            logger.warning(
+                                "Auto-bouncing IBC after %d consecutive failures — running %s",
+                                _recon_fail_count, bounce_script,
+                            )
+                            try:
+                                subprocess.Popen(
+                                    ["powershell", "-NonInteractive", "-File", str(bounce_script)],
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                )
+                                _recon_bounced = True
+                            except Exception as _be:
+                                logger.error("Auto-bounce failed to launch: %s", _be)
 
                 # Nightly broker/state reconciliation (real broker only)
                 if not dry_run:

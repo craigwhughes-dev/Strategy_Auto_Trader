@@ -169,8 +169,11 @@ class IBKRDataClient:
             return True
         except Exception:
             self._ib = None
-            logger.warning("IBKR gateway unreachable after %.0fs — will retry next cycle",
-                           self._connect_timeout)
+            logger.warning(
+                "IBKR gateway unreachable (%.0fs timeout configured, failed immediately on port-refused) "
+                "— will retry next cycle",
+                self._connect_timeout,
+            )
             return False
 
     def disconnect(self) -> None:
