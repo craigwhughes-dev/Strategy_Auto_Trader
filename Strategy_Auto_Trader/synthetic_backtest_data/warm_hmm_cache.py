@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -105,7 +106,10 @@ def main(argv: list[str] | None = None) -> None:
         data = json.loads(_UNIVERSE_FILE.read_text(encoding="utf-8"))
         tickers = data["tickers"]
 
+    counts = {"ok": 0, "no_data": 0, "error": 0}
+
     def _report(result: dict) -> None:
+        counts[result["status"]] += 1
         if result["status"] == "ok":
             print(f"{result['ticker']}: warmed {result['n_bars']} bars")
         else:
@@ -114,15 +118,19 @@ def main(argv: list[str] | None = None) -> None:
     if args.workers == 1:
         for ticker in tickers:
             _report(warm_hmm_cache_for_ticker(ticker, args.start_date, args.end_date, args.strategy))
-        return
+    else:
+        with ProcessPoolExecutor(max_workers=args.workers) as executor:
+            futures = {
+                executor.submit(warm_hmm_cache_for_ticker, t, args.start_date, args.end_date, args.strategy): t
+                for t in tickers
+            }
+            for future in as_completed(futures):
+                _report(future.result())
 
-    with ProcessPoolExecutor(max_workers=args.workers) as executor:
-        futures = {
-            executor.submit(warm_hmm_cache_for_ticker, t, args.start_date, args.end_date, args.strategy): t
-            for t in tickers
-        }
-        for future in as_completed(futures):
-            _report(future.result())
+    print(f"done: {counts['ok']} ok, {counts['no_data']} no_data, {counts['error']} error "
+          f"(of {len(tickers)} requested)")
+    if counts["error"] > 0:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

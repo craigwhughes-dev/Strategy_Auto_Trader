@@ -51,6 +51,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -192,7 +193,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    counts = {"ok": 0, "no_data": 0, "error": 0}
+
     def _report(result: dict) -> None:
+        counts[result["status"]] += 1
         if result["status"] == "ok":
             print(f"{result['ticker']}: {result['n_bars']} synthetic hourly bars -> {result['path']}")
         elif result["status"] == "no_data":
@@ -204,25 +208,29 @@ def main(argv: list[str] | None = None) -> None:
         for ticker in args.tickers:
             _report(_generate_and_write_worker(
                 ticker, args.vol_window, args.bars_per_day, args.seed, output_dir))
-        return
-
-    executor = ProcessPoolExecutor(max_workers=args.workers)
-    try:
-        futures = {
-            executor.submit(
-                _generate_and_write_worker,
-                ticker, args.vol_window, args.bars_per_day, args.seed, output_dir,
-            ): ticker
-            for ticker in args.tickers
-        }
-        for future in as_completed(futures):
-            _report(future.result())
-    except KeyboardInterrupt:
-        logger.warning("Interrupted; canceling remaining tickers...")
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise
     else:
-        executor.shutdown()
+        executor = ProcessPoolExecutor(max_workers=args.workers)
+        try:
+            futures = {
+                executor.submit(
+                    _generate_and_write_worker,
+                    ticker, args.vol_window, args.bars_per_day, args.seed, output_dir,
+                ): ticker
+                for ticker in args.tickers
+            }
+            for future in as_completed(futures):
+                _report(future.result())
+        except KeyboardInterrupt:
+            logger.warning("Interrupted; canceling remaining tickers...")
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown()
+
+    print(f"done: {counts['ok']} ok, {counts['no_data']} no_data, {counts['error']} error "
+          f"(of {len(args.tickers)} requested)")
+    if counts["error"] > 0:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
