@@ -74,6 +74,17 @@ def fetch_daily(ticker: str) -> pd.DataFrame | None:
     return df
 
 
+def fetch_vix_ibkr(client_id: int = 2, historical_only: bool = False) -> pd.DataFrame | None:
+    """Fetch VIX daily OHLCV from IBKR (Index VIX/CBOE/USD), incremental cache.
+
+    historical_only=True skips the live gap-fill — use in live_sim backtests
+    to avoid competing with the daemon for IBKR's pacing limit."""
+    from ..broker.ibkr_data import IBKRDataClient
+    return IBKRDataClient(client_id=client_id).fetch_index_daily(
+        "VIX", "CBOE", "USD", historical_only=historical_only
+    )
+
+
 def fit_hmm_expanding(
     returns: np.ndarray,
     n_components: int = 3,
@@ -162,6 +173,45 @@ def hmm_regime_probabilities(
     return probs
 
 
+def _bootstrap_log_alpha(model, returns: np.ndarray, t: int) -> np.ndarray:
+    """Cold-start log_alpha (causal filtered posterior at bar t-1) via one
+    call to hmmlearn's compiled forward pass, instead of a per-bar Python
+    loop over the whole expanding window.
+
+    Mathematically identical to running this module's own per-step
+    renormalized recursion bar-by-bar from bar 0: _hmmc.forward_log's
+    unnormalized joint log-alpha, row-normalized, gives the same causal
+    P(state_t | obs_1..t) as the step-wise-renormalized recursion, because
+    renormalizing at each step only ever subtracts a constant shared across
+    all K states at that step (verified numerically to ~1e-12, floating-point
+    noise, across multiple tickers/window sizes up to 113k bars — see
+    plan.md's HMM fit-speed section). Only the final row is needed: callers
+    extend one bar at a time via the else-branch below from here on.
+
+    This was previously a Python-level loop re-walking the entire history on
+    every refit (O(t) per refit, growing without bound as the window
+    expands) — profiling showed it costing as much as or more than the
+    3-seed EM refit itself at production-scale windows (tens of thousands of
+    bars), dwarfing the true O(K²) incremental cost this function is named
+    for.
+    """
+    from hmmlearn import _hmmc
+    from scipy.special import logsumexp
+    from scipy.stats import norm
+
+    K = model.n_components
+    n = max(1, min(t, len(returns)))  # always process at least bar 0
+    obs = returns[:n]
+    means = model.means_[:, 0]
+    stds = np.sqrt(np.array([model.covars_[k].flatten()[0] for k in range(K)]))
+    framelogprob = norm.logpdf(obs[:, None], means[None, :], stds[None, :])
+    # _hmmc.forward_log takes RAW startprob_/transmat_ (not their logs) --
+    # it logs them internally (see hmmlearn/base.py's own _score_log call).
+    _, fwdlattice = _hmmc.forward_log(model.startprob_, model.transmat_, framelogprob)
+    last_row = fwdlattice[-1]
+    return last_row - logsumexp(last_row)
+
+
 def _forward_step_incremental(
     model, order: np.ndarray, returns: np.ndarray, t: int,
     log_alpha: np.ndarray | None,
@@ -184,15 +234,7 @@ def _forward_step_incremental(
         ])
 
     if log_alpha is None:
-        # Bootstrap from the start up to t
-        log_alpha = np.log(model.startprob_ + 1e-300) + _log_emit(0)
-        log_alpha -= np.logaddexp.reduce(log_alpha)
-        for s in range(1, min(t, len(returns))):
-            le = _log_emit(s)
-            la_new = np.empty(K)
-            for k in range(K):
-                la_new[k] = np.logaddexp.reduce(log_alpha + log_transmat[:, k]) + le[k]
-            log_alpha = la_new - np.logaddexp.reduce(la_new)
+        log_alpha = _bootstrap_log_alpha(model, returns, t)
     else:
         # Single step extension
         obs_idx = t - 1  # returns[t-1] is the return from close[t-1] to close[t]
@@ -419,8 +461,15 @@ def _simulate_portfolio_value(
     total_interest = 0.0
     current_date = None
 
-    for idx, row in detail.iterrows():
+    # itertuples(), not iterrows(): iterrows() reconstructs a full (object-
+    # dtype, since this frame's columns are mixed types) Series per row,
+    # which profiling showed costing real time at production scale (tens of
+    # thousands of rows) purely from pandas indexing overhead, not the actual
+    # arithmetic below.
+    has_kelly = "kelly_fraction" in detail.columns
+    for row in detail.itertuples():
         # Accrue daily interest on first bar of new day
+        idx = row.Index
         bar_date = idx.date() if hasattr(idx, 'date') else None
         if bar_date and bar_date != current_date:
             if current_date is not None:  # Skip first day
@@ -429,16 +478,16 @@ def _simulate_portfolio_value(
                 total_interest += daily_interest
             current_date = bar_date
 
-        if row["trade_event"] in ("BUY", "SELL"):
+        if row.trade_event in ("BUY", "SELL"):
             if cost_model is None:
                 fee = trade_cost
             else:
-                stake = float(row.get("kelly_fraction", 0.0) or 0.0) * cash
-                fee = cost_model.cost(stake, row["trade_event"] == "BUY")
+                stake = float((row.kelly_fraction if has_kelly else 0.0) or 0.0) * cash
+                fee = cost_model.cost(stake, row.trade_event == "BUY")
             cash -= fee
             total_costs += fee
 
-        cash *= (1 + float(row["strategy_return"]))
+        cash *= (1 + float(row.strategy_return))
         portfolio_values.append(round(cash, 2))
 
     return portfolio_values, total_costs, round(total_interest, 2)

@@ -138,22 +138,31 @@ def _precompute_hourly_vote_series(
         sar_full = compute_parabolic_sar(close_s, af_start=sar_af_start,
                                          af_step=sar_af_step, af_max=sar_af_max)
 
+    def _arr(s):
+        """Series -> raw numpy array (or None). The per-bar loop indexes
+        these tens of thousands of times; pandas .iloc[]/slicing carries per-
+        call overhead (index alignment, isinstance checks) that dominated
+        profiling at production scale (~54% of total per-ticker time,
+        despite each individual slice being 5 elements) -- plain numpy
+        indexing is the same values, no per-call overhead."""
+        return s.to_numpy() if s is not None else None
+
     return {
-        "rsi_full": rsi_full,
-        "sma20_full": sma20_full,
-        "sma50_full": sma50_full,
-        "sma200_full": sma200_full,
-        "rolling_vol_full": rolling_vol_full,
-        "rsi_x_above_50": rsi_x_above_50,
-        "rsi_x_below_40": rsi_x_below_40,
+        "rsi_full": _arr(rsi_full),
+        "sma20_full": _arr(sma20_full),
+        "sma50_full": _arr(sma50_full),
+        "sma200_full": _arr(sma200_full),
+        "rolling_vol_full": _arr(rolling_vol_full),
+        "rsi_x_above_50": _arr(rsi_x_above_50),
+        "rsi_x_below_40": _arr(rsi_x_below_40),
         "vol_ratio_full": vol_ratio_full,
         "need_exit": need_exit,
-        "macd_bear_x": macd_bear_x,
-        "rsi_ob_exit": rsi_ob_exit,
-        "rsi_mom_loss": rsi_mom_loss,
-        "consol_full": consol_full,
-        "bb_pctb_full": bb_pctb_full,
-        "sar_full": sar_full,
+        "macd_bear_x": _arr(macd_bear_x),
+        "rsi_ob_exit": _arr(rsi_ob_exit),
+        "rsi_mom_loss": _arr(rsi_mom_loss),
+        "consol_full": _arr(consol_full),
+        "bb_pctb_full": _arr(bb_pctb_full),
+        "sar_full": _arr(sar_full),
     }
 
 
@@ -169,8 +178,8 @@ def _build_mom_snap(
     sma50_full  = pre["sma50_full"]
     sma200_full = pre["sma200_full"]
 
-    cur_sma20 = float(sma20_full.iloc[t])
-    cur_sma50 = float(sma50_full.iloc[t])
+    cur_sma20 = float(sma20_full[t])
+    cur_sma50 = float(sma50_full[t])
 
     snap: dict = {
         "above_sma20": cur_close > cur_sma20,
@@ -178,32 +187,32 @@ def _build_mom_snap(
     }
 
     if rsi_full is not None:
-        snap["cur_rsi"] = float(rsi_full.iloc[t])
+        snap["cur_rsi"] = float(rsi_full[t])
         snap["recent_cross_above_50"] = bool(
-            pre["rsi_x_above_50"].iloc[max(0, t - rsi_cross_lookback): t + 1].any())
+            pre["rsi_x_above_50"][max(0, t - rsi_cross_lookback): t + 1].any())
         snap["recent_cross_below_40"] = bool(
-            pre["rsi_x_below_40"].iloc[max(0, t - rsi_cross_lookback): t + 1].any())
+            pre["rsi_x_below_40"][max(0, t - rsi_cross_lookback): t + 1].any())
 
     if pre["vol_ratio_full"] is not None and t < len(pre["vol_ratio_full"]):
         vr = pre["vol_ratio_full"][t]
         snap["volume_ratio"] = float(vr) if np.isfinite(vr) else None
 
-    sma200_s = pre["sma200_full"]
-    if sma200_s is not None and t < len(sma200_s):
-        sv = sma200_s.iloc[t]
-        if pd.notna(sv):
+    sma200_arr = pre["sma200_full"]
+    if sma200_arr is not None and t < len(sma200_arr):
+        sv = sma200_arr[t]
+        if not np.isnan(sv):
             snap["above_sma200"] = cur_close > float(sv)
 
     consol_full = pre.get("consol_full")
     if consol_full is not None and t < len(consol_full):
-        cv = consol_full.iloc[t]
-        if pd.notna(cv):
+        cv = consol_full[t]
+        if not np.isnan(cv):
             snap["consolidation"] = bool(cv)
 
     bb_pctb_full = pre.get("bb_pctb_full")
     if bb_pctb_full is not None and t < len(bb_pctb_full):
-        bv = bb_pctb_full.iloc[t]
-        if pd.notna(bv):
+        bv = bb_pctb_full[t]
+        if not np.isnan(bv):
             snap["bb_pctb"] = float(bv)
 
     return snap
@@ -549,11 +558,11 @@ def consolidated_backtest(
 
         # 5. Precompute exit-indicator booleans for this bar
         need_exit = pre["need_exit"]
-        macd_bc = bool(pre["macd_bear_x"].iloc[t]) if (need_exit and pre["macd_bear_x"] is not None) else False
-        rsi_ob  = bool(pre["rsi_ob_exit"].iloc[t]) if (need_exit and pre["rsi_ob_exit"] is not None) else False
-        rsi_ml  = bool(pre["rsi_mom_loss"].iloc[t]) if (need_exit and pre["rsi_mom_loss"] is not None) else False
-        consol  = bool(pre["consol_full"].iloc[t]) if (need_exit and pre["consol_full"] is not None) else False
-        sar_val = float(pre["sar_full"].iloc[t]) if (use_sar_stop and pre["sar_full"] is not None) else None
+        macd_bc = bool(pre["macd_bear_x"][t]) if (need_exit and pre["macd_bear_x"] is not None) else False
+        rsi_ob  = bool(pre["rsi_ob_exit"][t]) if (need_exit and pre["rsi_ob_exit"] is not None) else False
+        rsi_ml  = bool(pre["rsi_mom_loss"][t]) if (need_exit and pre["rsi_mom_loss"] is not None) else False
+        consol  = bool(pre["consol_full"][t]) if (need_exit and pre["consol_full"] is not None) else False
+        sar_val = float(pre["sar_full"][t]) if (use_sar_stop and pre["sar_full"] is not None) else None
 
         # 6. Exit checks (only while in a position)
         exit_hit = False
@@ -570,7 +579,7 @@ def consolidated_backtest(
             bar_data = BarData(
                 t=t,
                 cur_close=cur_close,
-                daily_vol_t=float(pre["rolling_vol_full"].iloc[t]),
+                daily_vol_t=float(pre["rolling_vol_full"][t]),
                 use_sar_stop=use_sar_stop,
                 sar_val=sar_val,
                 need_exit=need_exit,

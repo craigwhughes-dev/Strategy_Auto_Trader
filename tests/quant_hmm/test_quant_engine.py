@@ -183,6 +183,37 @@ class TestQuantEngine:
             assert abs(p_bull - batch_probs[t - 1, 2]) < 1e-8
             assert abs(p_bear - batch_probs[t - 1, 0]) < 1e-8
 
+    def test_forward_step_incremental_cold_start_mid_sequence(self):
+        """A cold-start bootstrap (log_alpha=None) at t > 1 -- the case that
+        happens after every HMM refit in production, when _log_alpha is
+        deliberately reset -- must match the batch forward filter exactly,
+        not just the degenerate single-frame case (t=1) the other test
+        exercises. _bootstrap_log_alpha replaced a per-bar Python loop with
+        hmmlearn's compiled forward pass; this is the regression test for
+        that swap actually exercising the transition matrix."""
+        from Strategy_Auto_Trader.quant_hmm.quant_engine import (
+            hmm_regime_probabilities, _forward_step_incremental,
+        )
+
+        class MockModel:
+            n_components = 3
+            means_ = np.array([[-0.02], [0.0], [0.02]])
+            covars_ = np.array([[[0.001]], [[0.001]], [[0.001]]])
+            transmat_ = np.array([[0.7, 0.2, 0.1],
+                                  [0.1, 0.7, 0.2],
+                                  [0.2, 0.1, 0.7]])
+            startprob_ = np.array([0.34, 0.33, 0.33])
+
+        model = MockModel()
+        order = np.array([0, 1, 2])
+        returns = np.random.default_rng(2).normal(0, 0.01, 200)
+        batch_probs = hmm_regime_probabilities(model, order, returns)
+
+        for t in (2, 17, 100, 200):
+            p_bull, p_bear, _ = _forward_step_incremental(model, order, returns, t, None)
+            assert abs(p_bull - batch_probs[t - 1, 2]) < 1e-8
+            assert abs(p_bear - batch_probs[t - 1, 0]) < 1e-8
+
     # -- quant_backtest: structural / empty-input behaviour ------------------
 
     def test_quant_backtest_too_short_returns_empty(self):
