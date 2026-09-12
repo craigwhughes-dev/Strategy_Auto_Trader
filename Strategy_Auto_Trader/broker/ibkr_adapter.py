@@ -316,8 +316,16 @@ class IBKRAdapter:
                 order_status = trade.orderStatus.status
 
             if order_status not in ("PreSubmitted", "Submitted", "Acknowledged"):
+                log_entries = getattr(trade, "log", None) or []
+                last_log = log_entries[-1] if log_entries else None
+                error_detail = (
+                    f"errorCode={getattr(last_log, 'errorCode', None)} "
+                    f"msg={getattr(last_log, 'message', None)}"
+                    if last_log else "no trade log entries"
+                )
                 logger.warning(
-                    f"Stop order not accepted for {req.ticker}: status={order_status}"
+                    f"Stop order not accepted for {req.ticker}: status={order_status}, "
+                    f"exchange_stop={exchange_stop}, min_tick={min_tick}, {error_detail}"
                 )
                 return None
 

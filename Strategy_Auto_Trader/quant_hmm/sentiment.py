@@ -127,8 +127,6 @@ def vix_regime() -> dict:
       - vix_signal: +1 (low vol, safe to enter), -1 (high vol, caution), 0 (neutral)
       - vix_term_structure: "contango" (normal, calm) or "backwardation" (fear, near > far)
     """
-    import yfinance as yf
-
     result = {
         "vix_current": None, "vix_sma20": None,
         "vix_regime": None, "vix_signal": 0,
@@ -136,14 +134,12 @@ def vix_regime() -> dict:
     }
 
     try:
-        vix = yf.download("^VIX", period="60d", progress=False, auto_adjust=True)
-        if vix.empty:
+        from ..broker.ibkr_data import IBKRDataClient
+        vix_df = IBKRDataClient(client_id=2).fetch_index_daily("VIX", "CBOE", "USD")
+        if vix_df is None or vix_df.empty:
             return result
 
-        if isinstance(vix.columns, pd.MultiIndex):
-            vix.columns = vix.columns.get_level_values(0)
-
-        close = vix["Close"].dropna()
+        close = vix_df["Close"].dropna().tail(60)
         if close.empty:
             return result
 
@@ -168,6 +164,7 @@ def vix_regime() -> dict:
 
         # VIX term structure: compare VIX to VIX3M (3-month)
         try:
+            import yfinance as yf
             vix3m = yf.download("^VIX3M", period="5d", progress=False, auto_adjust=True)
             if not vix3m.empty:
                 if isinstance(vix3m.columns, pd.MultiIndex):

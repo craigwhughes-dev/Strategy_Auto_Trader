@@ -35,6 +35,7 @@ if (-not $files) {
 
 $results = foreach ($file in $files) {
     Select-String -Path $file.FullName -Pattern $pattern -CaseSensitive:$false |
+        Where-Object { $_.Line -notmatch 'NativeCommandError|FullyQualifiedErrorId\s*:\s*NativeCommandError|CategoryInfo.*NativeCommandError' } |
         Select-Object @{n='File';e={$file.Name}}, LineNumber, @{n='Text';e={$_.Line.Trim()}}
 }
 

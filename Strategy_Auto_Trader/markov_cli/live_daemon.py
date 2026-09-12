@@ -1324,18 +1324,38 @@ def check_ibkr_data_reconciliation(
         return
 
     if now.hour == run_hour and now.minute >= run_minute:
-        logger.info("Running IBKR data reconciliation...")
+        logger.info(
+            "Running IBKR data reconciliation (attempt %d/3, last_success=%s)...",
+            fail_count + 1,
+            daemon_state.get("last_ibkr_data_reconcile_date", "never"),
+        )
         t0 = time.time()
         try:
             run_reconcile(config, cfg)
             daemon_state["last_ibkr_data_reconcile_date"] = today
+            daemon_state.pop("ibkr_reconcile_first_fail_ts", None)
             save_state(daemon_state)
             logger.info(f"IBKR data reconciliation complete ({time.time() - t0:.0f}s)")
         except Exception as e:
-            logger.error(f"Error in IBKR data reconciliation: {e}")
-            daemon_state["last_ibkr_reconcile_fail_ts"] = time.time()
+            now_ts = time.time()
+            first_fail_ts = (
+                daemon_state.get("ibkr_reconcile_first_fail_ts", now_ts)
+                if fail_date == today else now_ts
+            )
+            outage_min = int((now_ts - first_fail_ts) / 60)
+            logger.error(
+                f"Error in IBKR data reconciliation (unreachable for ~{outage_min}m so far): {e}"
+            )
+            new_fail_count = fail_count + 1
+            daemon_state["last_ibkr_reconcile_fail_ts"] = now_ts
+            daemon_state["ibkr_reconcile_first_fail_ts"] = first_fail_ts
             daemon_state["ibkr_reconcile_fail_date"] = today
-            daemon_state["ibkr_reconcile_fail_count"] = fail_count + 1
+            daemon_state["ibkr_reconcile_fail_count"] = new_fail_count
+            if new_fail_count >= 3:
+                logger.warning(
+                    "IBKR data reconciliation giving up for today after %d failures",
+                    new_fail_count,
+                )
             save_state(daemon_state)
 
 
@@ -2098,6 +2118,7 @@ def main(argv: list[str] | None = None) -> int:
     _recon_fail_count = 0
     _recon_first_fail_at = None
     _recon_unreachable_alerted = False
+    _recon_alert_attempts = 0
     _recon_bounced = False
     if not dry_run:
         logger.warning("New entries halted pending startup reconciliation")
@@ -2141,6 +2162,7 @@ def main(argv: list[str] | None = None) -> int:
                         _recon_fail_count = 0
                         _recon_first_fail_at = None
                         _recon_unreachable_alerted = False
+                        _recon_alert_attempts = 0
                         _recon_bounced = False
                         daemon_state["needs_reconciliation"] = False
                         save_daemon_state(daemon_state)
@@ -2157,6 +2179,7 @@ def main(argv: list[str] | None = None) -> int:
                         if _recon_first_fail_at is None:
                             _recon_first_fail_at = datetime.now(timezone.utc)
                         _ALERT_AFTER_FAILURES = 5
+                        _RECON_ALERT_MAX_ATTEMPTS = 3
                         if _recon_fail_count >= _ALERT_AFTER_FAILURES and not _recon_unreachable_alerted:
                             elapsed_min = int((datetime.now(timezone.utc) - _recon_first_fail_at).total_seconds() // 60)
                             try:
@@ -2164,9 +2187,19 @@ def main(argv: list[str] | None = None) -> int:
                                 send_tws_unreachable_alert(
                                     broker._host, broker._port, elapsed_min
                                 )
+                                _recon_unreachable_alerted = True
                             except Exception as _e:
-                                logger.error(f"TWS-unreachable alert email failed: {_e}")
-                            _recon_unreachable_alerted = True
+                                _recon_alert_attempts += 1
+                                logger.error(
+                                    f"TWS-unreachable alert email failed "
+                                    f"(attempt {_recon_alert_attempts}/{_RECON_ALERT_MAX_ATTEMPTS}): {_e}"
+                                )
+                                if _recon_alert_attempts >= _RECON_ALERT_MAX_ATTEMPTS:
+                                    logger.error(
+                                        "TWS-unreachable alert: giving up after "
+                                        f"{_recon_alert_attempts} failed send attempts"
+                                    )
+                                    _recon_unreachable_alerted = True
 
                         # Auto-bounce: after 10+ consecutive off-hours failures (50 min),
                         # trigger bounce_ibc.ps1 once so the daemon self-heals without

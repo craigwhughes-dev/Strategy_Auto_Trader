@@ -1,4 +1,4 @@
-# Runs at 03:00 daily after IBC's own AutoRestartTime (02:30).
+# Runs at 03:00 daily after IBC's own AutoRestartTime (01:30 AM).
 # Only starts IBGatewayIBC if port 4002 is not listening - avoids
 # double-starting IBC when the nightly restart succeeded normally.
 

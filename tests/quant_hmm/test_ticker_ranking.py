@@ -7,8 +7,11 @@ import pandas as pd
 import pytest
 
 from Strategy_Auto_Trader.output.journal import TradeRecord
+import numpy as np
+
 from Strategy_Auto_Trader.quant_hmm.ticker_ranking import (
     Candidate,
+    _price_momentum_normalized,
     filter_candidates_by_top_tickers,
     generate_candidates,
     rank_universe,
@@ -109,7 +112,7 @@ class TestGenerateCandidates:
         def fake_fetch(ticker, strategy_name, vol_filter_tag, vol_filter_ok=True,
                       use_seasonal_volume=False, source="yfinance",
                       df=None, use_persistent_cache=True, hmm_cache_dir=None,
-                      historical_only=False):
+                      historical_only=False, vol_window=504):
             rec = TradeRecord(date_opened="2026-01-12", ticker=ticker, strategy=strategy_name,
                                entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
             cand = Candidate(
@@ -331,7 +334,7 @@ class TestGenerateCandidatesDISeam:
         def fake_fep(ticker, strategy_name, vol_filter_tag,
                      vol_filter_ok=True, use_seasonal_volume=False, source="yfinance",
                      df=None, use_persistent_cache=True, hmm_cache_dir=None,
-                     historical_only=False):
+                     historical_only=False, vol_window=504):
             received_dfs.append((ticker, df))
             rec = TradeRecord(date_opened="2026-01-12", ticker=ticker, strategy=strategy_name,
                               entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
@@ -366,7 +369,7 @@ class TestGenerateCandidatesDISeam:
         def fake_fep(ticker, strategy_name, vol_filter_tag,
                      vol_filter_ok=True, use_seasonal_volume=False, source="yfinance",
                      df=None, use_persistent_cache=True, hmm_cache_dir=None,
-                     historical_only=False):
+                     historical_only=False, vol_window=504):
             received[ticker] = df
             rec = TradeRecord(date_opened="2026-01-12", ticker=ticker, strategy=strategy_name,
                               entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
@@ -394,7 +397,7 @@ class TestGenerateCandidatesDISeam:
         def fake_fep(ticker, strategy_name, vol_filter_tag,
                      vol_filter_ok=True, use_seasonal_volume=False, source="yfinance",
                      df=None, use_persistent_cache=True, hmm_cache_dir=None,
-                     historical_only=False):
+                     historical_only=False, vol_window=504):
             received.append(hmm_cache_dir)
             return [], pd.Series([100.0], index=[ts_base]), pd.Series([0.5], index=[ts_base])
 
@@ -414,3 +417,98 @@ class TestTickerRankingScore:
         score = ticker_ranking_score("AAPL", [cand], {}, ts_base, vol_weight=0.7, win_rate_weight=0.3)
         # tq defaults 0.5, win_rate for a single winning trade = 1.0
         assert score == pytest.approx(0.7 * 0.5 + 0.3 * 1.0)
+
+    def test_momentum_weight_zero_no_change(self, base_record, ts_base):
+        cand = make_candidate("NVDA", 0, 1.0, 0.1, 0.05, base_record, ts_base)
+        base = ticker_ranking_score("NVDA", [cand], {}, ts_base)
+        with_mom = ticker_ranking_score("NVDA", [cand], {}, ts_base, momentum_weight=0.0)
+        assert base == pytest.approx(with_mom)
+
+    def test_momentum_weight_positive_raises_score(self, base_record, ts_base):
+        price = pd.Series([100.0, 150.0], index=[ts_base - pd.Timedelta(days=365), ts_base])
+        cand = make_candidate("NVDA", 0, 1.0, 0.1, 0.05, base_record, ts_base)
+        base = ticker_ranking_score("NVDA", [cand], {}, ts_base, momentum_weight=0.0)
+        with_mom = ticker_ranking_score(
+            "NVDA", [cand], {}, ts_base,
+            momentum_weight=0.3, price_by_ticker={"NVDA": price}, momentum_lookback_days=365,
+        )
+        assert with_mom > base
+
+    def test_momentum_weight_high_beats_low_momentum(self, base_record, ts_base):
+        """Rising ticker ranks higher than flat ticker when momentum_weight > 0."""
+        price_rising = pd.Series([100.0, 200.0], index=[ts_base - pd.Timedelta(days=365), ts_base])
+        price_flat = pd.Series([100.0, 100.0], index=[ts_base - pd.Timedelta(days=365), ts_base])
+        cand_a = make_candidate("RISING", 0, 1.0, 0.1, 0.05, base_record, ts_base)
+        cand_b = make_candidate("FLAT", 0, 1.0, 0.1, 0.05, base_record, ts_base)
+        pbt = {"RISING": price_rising, "FLAT": price_flat}
+        score_rising = ticker_ranking_score(
+            "RISING", [cand_a, cand_b], {}, ts_base,
+            momentum_weight=0.3, price_by_ticker=pbt, momentum_lookback_days=365,
+        )
+        score_flat = ticker_ranking_score(
+            "FLAT", [cand_a, cand_b], {}, ts_base,
+            momentum_weight=0.3, price_by_ticker=pbt, momentum_lookback_days=365,
+        )
+        assert score_rising > score_flat
+
+
+class TestPriceMomentumNormalized:
+
+    def _price_series(self, dates, prices):
+        return pd.Series(prices, index=pd.to_datetime(dates))
+
+    def test_neutral_zero_return(self):
+        s = self._price_series(["2022-01-01", "2023-01-01"], [100.0, 100.0])
+        score = _price_momentum_normalized("A", pd.Timestamp("2023-01-01"), {"A": s}, 365)
+        assert score == pytest.approx(0.5)
+
+    def test_positive_return_above_half(self):
+        s = self._price_series(["2022-01-01", "2023-01-01"], [100.0, 150.0])
+        score = _price_momentum_normalized("A", pd.Timestamp("2023-01-01"), {"A": s}, 365)
+        assert score > 0.5
+
+    def test_negative_return_below_half(self):
+        s = self._price_series(["2022-01-01", "2023-01-01"], [100.0, 60.0])
+        score = _price_momentum_normalized("A", pd.Timestamp("2023-01-01"), {"A": s}, 365)
+        assert score < 0.5
+
+    def test_unknown_ticker_returns_half(self):
+        score = _price_momentum_normalized("UNKNOWN", pd.Timestamp("2023-01-01"), {}, 365)
+        assert score == pytest.approx(0.5)
+
+    def test_missing_historical_price_returns_half(self):
+        s = self._price_series(["2023-01-01"], [100.0])  # no data 365 days ago
+        score = _price_momentum_normalized("A", pd.Timestamp("2023-01-01"), {"A": s}, 365)
+        assert score == pytest.approx(0.5)
+
+    def test_bounded_to_zero_one(self):
+        s = self._price_series(["2022-01-01", "2023-01-01"], [1.0, 10_000.0])
+        score = _price_momentum_normalized("A", pd.Timestamp("2023-01-01"), {"A": s}, 365)
+        assert 0.0 <= score <= 1.0
+
+
+class TestScoreLookbackDays:
+
+    def test_score_lookback_none_is_all_time(self, base_record, ts_base):
+        old = make_candidate("OLD", 0, 1.0, 0.1, 0.05, base_record, ts_base - pd.Timedelta(days=500))
+        new = make_candidate("NEW", 0, 1.0, 0.1, 0.05, base_record, ts_base)
+        _, scores_all = filter_candidates_by_top_tickers([old, new], {}, top_k=2, score_lookback_days=None)
+        _, scores_recent = filter_candidates_by_top_tickers([old, new], {}, top_k=2, score_lookback_days=400)
+        # With lookback=400, OLD's candidate date is >400 days before NEW's, so not in scoring window
+        assert "OLD" not in scores_recent
+        assert "OLD" in scores_all
+
+    def test_score_lookback_excludes_old_candidates_from_scoring(self, base_record, ts_base):
+        strong_old = make_candidate("STRONG_OLD", 0, 1.0, 0.5, 0.50, base_record, ts_base - pd.Timedelta(days=800))
+        weak_new = make_candidate("WEAK_NEW", 0, 0.1, 0.1, -0.10, base_record, ts_base)
+        # Without lookback: STRONG_OLD wins top-1
+        filtered_all, _ = filter_candidates_by_top_tickers(
+            [strong_old, weak_new], {}, top_k=1, score_lookback_days=None
+        )
+        assert any(c.ticker == "STRONG_OLD" for c in filtered_all)
+        # With lookback=400: STRONG_OLD outside window, WEAK_NEW is only scorer
+        filtered_recent, scores = filter_candidates_by_top_tickers(
+            [strong_old, weak_new], {}, top_k=1, score_lookback_days=400
+        )
+        assert "STRONG_OLD" not in scores  # excluded from scoring
+        assert any(c.ticker == "WEAK_NEW" for c in filtered_recent)

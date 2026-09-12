@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import time
@@ -12,8 +13,58 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import pandas as pd
 
+logger = logging.getLogger(__name__)
+
 _REPLACE_RETRIES = 10
 _REPLACE_RETRY_DELAY_SECONDS = 0.1  # linear backoff: 100ms..1000ms ≈ 5.5s total budget
+
+
+_HOLDER_SCAN_SCRIPT = """
+import json, sys
+import psutil
+target = sys.argv[1]
+holders = []
+for proc in psutil.process_iter(["pid", "name"]):
+    try:
+        for f in proc.open_files():
+            if f.path == target:
+                holders.append(f"{proc.info['name']}(pid={proc.info['pid']})")
+                break
+    except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+        continue
+print(json.dumps(holders))
+"""
+
+
+def _find_file_holders(path: Path) -> list[str]:
+    """Best-effort: list processes with an open handle on path, for diagnosing
+    a PermissionError on os.replace (WinError 5).
+
+    Runs in a subprocess, not in-process: psutil's Windows open_files() scan
+    has been observed to raise a native access violation (not a catchable
+    Python exception) on this host — isolating it means a crash there kills
+    a short-lived helper process, never the live daemon.
+    """
+    import subprocess
+    import sys
+    import json as _json
+
+    try:
+        target = str(path.resolve())
+    except OSError:
+        target = str(path)
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", _HOLDER_SCAN_SCRIPT, target],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            logger.warning(f"File-holder scan subprocess failed: {result.stderr[-500:]}")
+            return []
+        return _json.loads(result.stdout.strip() or "[]")
+    except Exception as e:
+        logger.warning(f"File-holder scan failed: {e}")
+        return []
 
 
 def _atomic_replace(temp_path: str, path: Path) -> None:
@@ -27,6 +78,11 @@ def _atomic_replace(temp_path: str, path: Path) -> None:
             return
         except PermissionError:
             if attempt == _REPLACE_RETRIES - 1:
+                holders = _find_file_holders(path)
+                logger.warning(
+                    f"os.replace blocked on {path} after {_REPLACE_RETRIES} retries, "
+                    f"held by: {holders if holders else 'unknown (no psutil match — may be AV/kernel)'}"
+                )
                 raise
             time.sleep(_REPLACE_RETRY_DELAY_SECONDS * (attempt + 1))
 

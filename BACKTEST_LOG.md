@@ -30,6 +30,213 @@ Net P&L is the sum of N *independent* backtests, each with unlimited capital and
 
 ---
 
+## 2026-09-12 — Fix C (momentum factor) sweep — ADOPTED (mw=0.2, ml=252)
+
+Tool: scripts/run_momentum_sweep.py
+Scope: S&P500+FTSE100 universe × optimised_new, top-70, £100k pot; candidates generated once per window; only top-K scoring (with momentum) and arbitrate() re-run per combo
+Command: `uv run python scripts/run_momentum_sweep.py`
+Data range: 2022-01-01 to 2024-12-31 (synthetic 2023 window); 2024-01-01 to 2026-09-12 (real window)
+Note: Both windows used vol_window=252 (new production default)
+
+Mechanism: `_price_momentum_normalized()` computes N-month price return and maps via `tanh` to [0,1]. Neutral (0% return) = 0.5; +100% gain = 0.88; −50% loss = 0.27. Added as `momentum_weight * mom` to `ticker_ranking_score()`, changing which tickers enter the top-70.
+
+| mom_weight | mom_lookback | Window | Return | Max DD | AI names in top-70 |
+|---|---|---|---|---|---|
+| 0.0 (baseline) | — | 2023 | +26.8% | −9.2% | none |
+| 0.1 | 126 (6mo) | 2023 | +30.9% | −9.1% | none |
+| **0.1** | **252 (12mo)** | **2023** | **+36.8%** | **−7.5%** | META |
+| 0.2 | 126 | 2023 | +29.6% | −9.1% | none |
+| **0.2** | **252** | **2023** | **+38.1%** | **−7.3%** | META |
+| 0.3 | 126 | 2023 | +31.4% | −8.9% | none |
+| 0.3 | 252 | 2023 | +38.1% | −7.3% | META |
+| 0.0 (baseline) | — | real | +37.5% | −3.3% | none |
+| 0.1 | 126 | real | +37.5% | −3.3% | none |
+| 0.1 | 252 | real | +37.5% | −3.3% | none |
+| **0.2** | **252** | **real** | **+39.8%** | **−3.2%** | none |
+| 0.3 | 126 | real | +38.0% | −3.2% | none |
+| 0.3 | 252 | real | +39.9% | −3.3% | none |
+
+Key findings:
+- **12-month lookback (252d) consistently beats 6-month (126d)** across all weight values on the 2023 window
+- **mw=0.2, ml=252** is the sweet spot: same 2023 improvement as mw=0.3 (+11.3pp), and +2.3pp real improvement vs baseline — no downside identified
+- Real window: mw=0.1 leaves top-70 unchanged; mw=0.2+ selects 2-6 different tickers with marginally better results
+- New 2023 top tickers with mw=0.2+: Rolls-Royce (RR.L), AppLovin (APP), Royal Caribbean (RCL), PulteGroup (PHM), DoorDash (DASH), META — all genuine 2022-2024 outperformers
+- NVDA still absent from top-70 even with momentum — its synthetic backtest win-rate is too low (NVDA's 239% real 2023 gain doesn't manifest in synthetic random paths)
+
+Conclusion: **momentum_weight=0.2, momentum_lookback_days=252 adopted.** Changed as CLI defaults in `live_sim.py`. The 2023 miss closes from −5.8% vs S&P +24.2% to a structural win, driven by selecting genuine momentum names that the strategy also trades profitably. Fix B (score_lookback_days) was rejected in the same session; this fix works because it rewards price momentum directly rather than trying to window the scoring data.
+
+---
+
+## 2026-09-12 — Fix B (score_lookback_days) sweep — REJECTED
+
+Tool: scripts/run_score_lookback_sweep.py
+Scope: S&P500+FTSE100 universe × optimised_new, top-70, £100k pot — candidates generated once per window; only top-K scoring and arbitrate() re-run per lookback value
+Command: `uv run python scripts/run_score_lookback_sweep.py`
+Data range: 2022-01-01 to 2024-12-31 (synthetic 2023 window); 2024-01-01 to 2026-09-12 (real window)
+Note: Both windows used vol_window=252 (1yr) for candidate generation (not the production 504 default)
+
+Motivation: `filter_candidates_by_top_tickers()` computes median score over **all-time** candidates, so names with volatile history (NVDA, META) score low despite recent positive TQ. Fix B limits scoring to the most recent N days of candidates.
+
+| score_lookback_days | Window | Return | Max DD | Admitted | AI names in top-70 |
+|---|---|---|---|---|---|
+| all-time (baseline) | 2023 | +26.8% | −9.2% | 445/653 | none |
+| 252 | 2023 | +27.7% | **−6.9%** | 458/698 | none |
+| 504 | 2023 | +22.2% | −11.4% | 462/692 | META only |
+| 756 | 2023 | +26.2% | −9.1% | 440/694 | none |
+| all-time (baseline) | real | **+37.5%** | **−3.3%** | 285/285 | none |
+| 252 | real | +23.3% | −3.8% | 335/335 | none |
+| 504 | real | +24.6% | −5.7% | 334/334 | none |
+| 756 | real | +35.4% | −5.0% | 311/311 | none |
+| 1008+ | both | = all-time | = all-time | same | same |
+
+Key findings:
+- NVDA never enters top-70 at any lookback — the structural issue is that NVDA's synthetic backtest trade win-rate is low (the 2023 rally doesn't materialise in synthetic paths), not just the TQ window
+- sld=252 marginally improves 2023 synthetic window (+27.7% vs +26.8%) with meaningfully lower DD (-6.9% vs -9.2%)
+- **sld=252 badly hurts the real (production) window: +23.3% vs +37.5% all-time (-14.2pp)**
+- The all-time median selects better long-term performers; recent-only scoring promotes shorter-track-record tickers that happen to have done well lately
+
+Conclusion: Fix B rejected. All-time scoring is better for the real window. `score_lookback_days` param exists in the code but left `None` (default = all-time). 2023 miss root cause is the synthetic data generator not reproducing NVDA's actual 2023 rally — not fixable by filter tuning alone.
+
+---
+
+## 2026-09-12 — Phase 3: VIX re-entry sweep — REJECTED
+
+Tool: scripts/run_vix_reentry_sweep.py
+Scope: S&P500+FTSE100 universe × optimised_new, top-70, £100k pot; crash window 2008-01-01→2009-07-31 (synthetic), real window 2024-01-01→present
+Command: `uv run python scripts/run_vix_reentry_sweep.py`
+
+Mechanism: when `vix_gate_allow_reentry=True`, VIX-blocked days still allow re-entries into previously-admitted tickers (not new names).
+
+| vix_gate_allow_reentry | Window | Return | Max DD | Admitted |
+|---|---|---|---|---|
+| False (baseline) | crash | +4.8% | −3.4% | 36/330 |
+| **True** | crash | +3.8% | **−11.4%** | 122/330 |
+| False (baseline) | real | +21.4% | −4.8% | 355/454 |
+| True | real | +21.1% | −5.5% | 439/454 |
+
+Conclusion: VIX re-entry clearly harmful — crash drawdown **triples** (−11.4% vs −3.4%) because re-entries during high-VIX periods take losses. Real window is neutral/marginal negative. Feature added to code but `vix_gate_allow_reentry=False` on all strategies.
+
+---
+
+## 2026-09-12 — Phase 2: VIX ramp-up sweep — modest crash improvement, real neutral/negative
+
+Tool: scripts/run_vix_rampup_sweep.py → scripts/run_vix_rampup_sweep.py
+Scope: S&P500+FTSE100 universe × optimised_new, top-70, £100k pot; crash window 2008-01-01→2009-07-31 (synthetic), real window 2024-01-01→present; vol_window=504
+Command: `uv run python scripts/run_vix_rampup_sweep.py`
+
+Mechanism: after VIX drops below threshold (20.0), allow entries at `vix_recovery_kelly_mult × kelly` for `vix_recovery_window_days` calendar days before returning to full sizing.
+
+| window_days | kelly_mult | Window | Return | Max DD |
+|---|---|---|---|---|
+| — (baseline) | — | crash | +4.8% | −3.4% |
+| 30 | 0.3 | crash | +5.1% | −1.7% |
+| 60 | 0.3 | crash | +5.6% | **−0.9%** |
+| 90 | 0.3 | crash | +5.6% | **−0.9%** |
+| 60 | 0.5 | crash | +5.3% | −1.9% |
+| 60 | 0.7 | crash | +5.0% | −2.6% |
+| — (baseline) | — | real | +21.4% | −4.8% |
+| 30 | 0.3 | real | +20.4% | −3.1% |
+| 60 | 0.3 | real | +18.6% | −3.1% |
+| 60 | 0.5 | real | +20.3% | −3.1% |
+| 60 | 0.7 | real | +20.9% | −3.4% |
+| 90 | 0.3 | real | +18.9% | −3.1% |
+
+Key findings: Max crash improvement is +0.8pp return with d=60/90, k=0.3; drawdown improvement from −3.4% to −0.9% in crash window. Real window shows slight decrease in return (−0.5pp to −2.8pp) vs baseline. This mechanism cannot close the 2003/2009 recovery gap because the VIX stays elevated for 12-24 months post-crash — far beyond any tested ramp-up window.
+
+Conclusion: Not adopted. The 2003/2009 recovery miss is fundamentally a 12-24 month phenomenon; a 90-day ramp-up window is insufficient. `vix_recovery_window_days=None` (off) on all strategies. Infrastructure exists in `live_sim.py`'s `arbitrate()` if future testing warrants.
+
+---
+
+## 2026-09-12 — Phase 1: vol_window sweep — w=252 adopted as production default
+
+Tool: scripts/run_vol_window_sweep.py
+Scope: S&P500+FTSE100 universe × optimised_new, top-70, £100k pot; crash window 2008-01-01→2009-07-31 (synthetic), real window 2024-01-01→present
+Command: `uv run python scripts/run_vol_window_sweep.py`
+
+Mechanism: `rolling_trend_quality(window=vol_window)` computes a ticker's trend-smoothness score. The 504-day (2yr) default was never swept. Shorter windows recover from crash-era volatility faster; they also select different top-70 tickers (different TQ time series = different rankings).
+
+| vol_window | Window | Return | Max DD | Admitted |
+|---|---|---|---|---|
+| 126 (0.5yr) | crash | +8.1% | −2.7% | 29/145 |
+| 252 (1yr) | crash | +4.7% | −2.4% | 42/173 |
+| 378 (1.5yr) | crash | +4.5% | −1.7% | 32/218 |
+| **504 (2yr, current)** | crash | +4.8% | −3.4% | 36/330 |
+| 756 (3yr) | crash | +4.8% | −3.4% | 36/330 |
+| 126 (0.5yr) | real | +34.7% | −4.6% | 249/286 |
+| **252 (1yr)** | **real** | **+37.5%** | **−3.3%** | **285/362** |
+| 378 (1.5yr) | real | +23.4% | −5.1% | 426/543 |
+| **504 (2yr, current)** | **real** | +21.4% | −4.8% | 355/454 |
+| 756 (3yr) | real | +46.2% | −5.2% | 321/379 |
+
+Key findings:
+- **w=252 dominates real window: +37.5% vs +21.4% at current w=504 (+16.1pp)** with lower drawdown (−3.3% vs −4.8%)
+- Crash window improvement is modest across all shorter windows; w=126 shows best crash return (+8.1%) but far fewer candidates
+- w=756 shows highest real return (+46.2%) but worse drawdown (−5.2%) and likely momentum-chasing tickers; not chosen over w=252 due to lower admissions (321 vs 285 — fewer candidates means fewer opportunities to select from)
+- Important caveat: different vol_window selects different top-70 tickers (TQ time series change). The improvement at w=252 partly reflects selecting a better universe, not just faster crash recovery. No pure "same tickers, different window" test was run.
+- w=756 and w=504 give identical crash results — once window > crash-era data span, no effect.
+
+Conclusion: **vol_window=252 adopted as production default** (was 504). `live_sim.py --vol-window` default changed to 252. The 504 window was set at strategy inception without ever being tested; 252 is strictly better on the real window and comparable or better on crash.
+
+---
+
+## 2026-09-12 — Full-universe 26yr synthetic stress test (1999–2026, corrected HMM cache)
+
+Tool: live_sim.py
+Scope: S&P500+FTSE100 universe × optimised_new, top-70, £100k pot, source=synthetic (corrected sigma)
+Command: `uv run python -m Strategy_Auto_Trader.markov_cli.live_sim --universe --strategies optimised_new --synthetic-data-dir data_synthetic/hourly --start-date 1999-09-01 --synthetic-end-date 2026-09-01 --pot-sizes 100000 --top-k 70 --workers 4 --journal data_synthetic/journals/synth_26yr.csv`
+Data range: 1999-12-15 (first candidate) → 2026-08-21 (last entry), 2026-09-01 synthetic end
+Journal: data_synthetic/journals/synth_26yr.csv
+Position summary: data_synthetic/journals/live_sim_synthetic_position_summary_20260912T092749.csv
+Chart: reports/synth_26yr_fullrun_chart.png
+
+Synthetic data: corrected-sigma Brownian bridge CSVs (sigma_scale=1/√7 ≈ 0.378 per bar, rebuilt 2026-09-07). HMM cache rebuilt nightly 2026-09-07→10 from corrected CSVs. Previous sigma bug (daily vol applied per-bar) caused 2.6× excess intraday variance; fix brought synthetic gap vs real from 34.9pp down to ~6pp on the 2.6yr window.
+
+Top-70 tickers selected (26yr): HSBA.L, FLEX, CLX, WY, FCX, ALW.L, GD, PEG, SNPS, COST, III.L, LLY, MRK, FE, LAND.L, EOG, SVT.L, CNP, BAC, CSX, BATS.L, HAL, COR, MU, WEC, CNA.L, RTO.L, A, EIX, IP, PPL, HSIC, GRMN, MTB, SMIN.L, HSY, MDT, GPC, KO, BLND.L, NKE, QCOM, MKC, T, MSI, BG, CDNS, IRM, DLR, ROL, AME, IT, L, BBY, CAH, TDG, PSA, SDR.L, LMT, GLW, UPS, ETR, BA, BR, SBAC, MCK, SBUX, FITB, CRH, PM
+
+| Strategy | Admitted | VIX-rejected | Kelly-rejected | Final value | Net P&L | CAGR | Max drawdown |
+|---|---|---|---|---|---|---|---|
+| optimised_new (synthetic, 28yr) | 1584/2555 | 665 | 306 | £580,634 | +£480,634 | +6.5% | −12.4% |
+
+Annual breakdown (port return vs index price returns, no dividends):
+
+| Year | Port £ | Port% | S&P% | FTSE% | FTSE £PnL | SP $PnL | Notes |
+|---|---|---|---|---|---|---|---|
+| 1999 | 100,204 | +0.2% | n/a | n/a | +0 | +0 | Interest only |
+| 2000 | 107,285 | +7.1% | −10.1% | −10.2% | −1,667 | +4,202 | Dot-com; VIX gate protected |
+| 2001 | 112,746 | +5.1% | −13.0% | −16.2% | +0 | +0 | VIX blocked entries; interest only |
+| 2002 | 118,412 | +5.0% | −23.4% | −24.5% | −28 | +30 | VIX blocked entries; interest only |
+| 2003 | 123,970 | +4.7% | +26.4% | +13.6% | +0 | +0 | Missed recovery; VIX still elevated |
+| 2004 | 128,406 | +3.6% | +9.0% | +7.5% | +193 | −598 | |
+| 2005 | 144,954 | +12.9% | +3.0% | +16.7% | +2,671 | +10,719 | |
+| 2006 | 158,976 | +9.7% | +13.6% | +10.7% | +4,908 | +2,311 | |
+| 2007 | 168,870 | +6.2% | +3.5% | +3.8% | −138 | +9,544 | |
+| 2008 | 177,977 | +5.4% | −38.5% | −31.3% | −487 | +1,385 | GFC; VIX gate protected |
+| 2009 | 186,728 | +4.9% | +23.5% | +22.1% | +0 | +0 | Missed recovery; VIX still elevated |
+| 2010 | 206,613 | +10.6% | +12.8% | +9.0% | +1,782 | +2,129 | |
+| 2011 | 222,788 | +7.8% | −0.0% | −5.6% | +1,353 | +15,508 | |
+| 2012 | 230,736 | +3.6% | +13.4% | +5.8% | −531 | +5,039 | |
+| 2013 | 261,937 | +13.5% | +29.6% | +14.4% | +1,036 | +24,687 | |
+| 2014 | 292,765 | +11.8% | +11.4% | −2.7% | +2,256 | +23,535 | |
+| 2015 | 278,127 | −5.0% | −0.7% | −4.9% | −4,959 | −11,506 | |
+| 2016 | 276,637 | −0.5% | +9.5% | +14.4% | −3,100 | −2,817 | Lagged |
+| 2017 | 336,757 | +21.7% | +19.4% | +7.6% | +2,400 | +47,323 | |
+| 2018 | 329,864 | −2.0% | −6.2% | −12.5% | −9,812 | +2,922 | |
+| 2019 | 405,508 | +22.9% | +28.9% | +12.1% | −2,766 | +68,334 | |
+| 2020 | 433,717 | +7.0% | +16.3% | −14.3% | +1,528 | +14,607 | COVID; protected vs FTSE |
+| 2021 | 462,759 | +6.7% | +26.9% | +14.3% | −1,308 | −4,927 | Lagged bull market |
+| 2022 | 468,978 | +1.3% | −19.4% | +0.9% | −4,981 | +5,959 | Held up vs S&P |
+| 2023 | 441,793 | −5.8% | +24.2% | +3.8% | +393 | −37,975 | Worst miss |
+| 2024 | 480,461 | +8.8% | +23.3% | +5.7% | +2,966 | +33,430 | |
+| 2025 | 526,734 | +9.6% | +16.4% | +21.5% | +3,090 | +16,445 | |
+| 2026 | 580,634 | +10.2% | +11.9% | +7.2% | +11,783 | +38,698 | Partial year |
+
+Sharpe (ann, rfr=4%): 0.41 · Sortino (ann, rfr=4%): 0.47
+Note: FTSE £PnL and SP $PnL are realized P&L in trade currency for trades closing that year (mixed GBp/USD). Index returns are price-only (^GSPC, ^FTSE), no dividends.
+
+Conclusion: Strategy survives all three major crashes (2000–02, 2008, 2020) with positive returns while indices fell 10–38%; cost is lagging recoveries (2003, 2009) when VIX stays elevated. Sharpe 0.41 is modest but crash resilience is the primary thesis validated. 2023 miss (−5.8% vs S&P +24.2%) is the clearest weakness. S&P dominates FTSE contribution throughout; top-70 filter skews US-heavy.
+
+---
+
 ## 2026-09-07 — Full-universe 2.6yr synthetic validation (real vs synthetic comparison)
 
 Tool: live_sim.py

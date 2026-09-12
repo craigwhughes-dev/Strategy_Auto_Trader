@@ -68,11 +68,14 @@ class TestSentiment:
 
     # -- vix_regime -------------------------------------------------------------
 
-    def _fake_vix_download(self, vix_level, vix3m_level):
+    def _fake_vix_df(self, vix_level, periods=30):
+        idx = pd.date_range("2024-01-01", periods=periods, freq="D", tz="UTC")
+        return pd.DataFrame({"Open": vix_level, "High": vix_level, "Low": vix_level,
+                              "Close": np.full(periods, float(vix_level)), "Volume": 0},
+                            index=idx)
+
+    def _fake_vix3m_download(self, vix3m_level):
         def _download(ticker, period=None, **kwargs):
-            if ticker == "^VIX":
-                idx = pd.date_range("2024-01-01", periods=30, freq="D")
-                return pd.DataFrame({"Close": np.full(30, vix_level)}, index=idx)
             if ticker == "^VIX3M":
                 idx = pd.date_range("2024-01-01", periods=5, freq="D")
                 return pd.DataFrame({"Close": np.full(5, vix3m_level)}, index=idx)
@@ -81,7 +84,10 @@ class TestSentiment:
 
     def test_vix_regime_low_vol(self):
         from Strategy_Auto_Trader.quant_hmm.sentiment import vix_regime
-        with mock.patch("yfinance.download", side_effect=self._fake_vix_download(12.0, 14.0)):
+        vix_df = self._fake_vix_df(12.0)
+        with mock.patch("Strategy_Auto_Trader.broker.ibkr_data.IBKRDataClient.fetch_index_daily",
+                        return_value=vix_df), \
+             mock.patch("yfinance.download", side_effect=self._fake_vix3m_download(14.0)):
             result = vix_regime()
         assert result["vix_regime"] == "low_vol"
         assert result["vix_signal"] == 1
@@ -89,7 +95,10 @@ class TestSentiment:
 
     def test_vix_regime_crisis(self):
         from Strategy_Auto_Trader.quant_hmm.sentiment import vix_regime
-        with mock.patch("yfinance.download", side_effect=self._fake_vix_download(45.0, 30.0)):
+        vix_df = self._fake_vix_df(45.0)
+        with mock.patch("Strategy_Auto_Trader.broker.ibkr_data.IBKRDataClient.fetch_index_daily",
+                        return_value=vix_df), \
+             mock.patch("yfinance.download", side_effect=self._fake_vix3m_download(30.0)):
             result = vix_regime()
         assert result["vix_regime"] == "crisis"
         assert result["vix_signal"] == -1
@@ -97,14 +106,17 @@ class TestSentiment:
 
     def test_vix_regime_normal(self):
         from Strategy_Auto_Trader.quant_hmm.sentiment import vix_regime
-        with mock.patch("yfinance.download", side_effect=self._fake_vix_download(20.0, 21.0)):
+        vix_df = self._fake_vix_df(20.0)
+        with mock.patch("Strategy_Auto_Trader.broker.ibkr_data.IBKRDataClient.fetch_index_daily",
+                        return_value=vix_df):
             result = vix_regime()
         assert result["vix_regime"] == "normal"
         assert result["vix_signal"] == 0
 
     def test_vix_regime_no_data_returns_defaults(self):
         from Strategy_Auto_Trader.quant_hmm.sentiment import vix_regime
-        with mock.patch("yfinance.download", return_value=pd.DataFrame()):
+        with mock.patch("Strategy_Auto_Trader.broker.ibkr_data.IBKRDataClient.fetch_index_daily",
+                        return_value=None):
             result = vix_regime()
         assert result["vix_current"] is None
         assert result["vix_signal"] == 0

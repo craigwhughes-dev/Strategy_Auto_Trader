@@ -52,6 +52,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", choices=["yfinance", "ibkr"], default="ibkr",
                         help="Hourly data source: local incremental IBKR-backed cache (default) "
                              "or yfinance. IBKR falls back to yfinance if no cache exists.")
+    parser.add_argument("--vol-window", type=int, default=252,
+                        help="Rolling window (trading days) for trend_quality computation "
+                             "(default: 252 ≈ 1yr, swept 2026-09-12). Must match live_sim.py "
+                             "--vol-window to keep daemon ranking consistent with backtest top-K.")
     args = parser.parse_args(argv)
 
     if args.tickers:
@@ -67,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         workers=args.workers,
         use_seasonal_volume=args.seasonal_volume,
         source=args.source,
+        vol_window=args.vol_window,
     )
 
     output_path = Path(args.output)

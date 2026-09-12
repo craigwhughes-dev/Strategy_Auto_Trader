@@ -184,7 +184,8 @@ class IBKRDataClient:
     def _fetch_pages(self, contract, what_to_show: str = "TRADES",
                       stop_at: pd.Timestamp | None = None,
                       min_days: int | None = None,
-                      bar_size: str = "1 hour") -> pd.DataFrame:
+                      bar_size: str = "1 hour",
+                      page_duration: str | None = None) -> pd.DataFrame:
         """Page backward from now through reqHistoricalData.
 
         stop_at (incremental gap-fill): page only until a page's oldest bar
@@ -198,13 +199,14 @@ class IBKRDataClient:
         """
         from ib_async import util
 
+        duration = page_duration if page_duration is not None else _PAGE_DURATION
         frames: list[pd.DataFrame] = []
         end_dt = ""
         days_covered = 0
-        page_days = _duration_str_to_days(_PAGE_DURATION)
+        page_days = _duration_str_to_days(duration)
         for _ in range(_MAX_PAGES):
             bars = self._ib.reqHistoricalData(
-                contract, endDateTime=end_dt, durationStr=_PAGE_DURATION,
+                contract, endDateTime=end_dt, durationStr=duration,
                 barSizeSetting=bar_size, whatToShow=what_to_show, useRTH=True,
             )
             if not bars:
@@ -365,6 +367,57 @@ class IBKRDataClient:
         if use_cache and not new_df.empty:
             _save_cache(ticker, merged, CACHE_DIR_DAILY)
         return _truncate_to_period(merged, period)
+
+    def fetch_index_daily(self, symbol: str, exchange: str, currency: str = "USD",
+                          historical_only: bool = False) -> pd.DataFrame | None:
+        """Fetch daily OHLCV for a market index (e.g. VIX on CBOE).
+
+        Same incremental-cache shape as fetch_daily but uses an Index contract.
+        Cache key is INDEX_{symbol} to avoid collision with same-named stock tickers.
+        historical_only: skip the live gap-fill when a cache exists — set True
+        for pure backtests so live_sim doesn't compete with the daemon for pacing.
+
+        Bootstrap uses "5 Y" pages (vs "6 M" for hourly) — 10× fewer requests,
+        stays well under IBKR's 6-req/min historical-data pacing limit on first run."""
+        cache_key = f"INDEX_{symbol}"
+        cached = _load_cache(cache_key, CACHE_DIR_DAILY)
+
+        if historical_only and cached is not None:
+            return cached
+
+        owns_connection = self._ib is None
+        if owns_connection and not self.connect():
+            return cached
+
+        try:
+            from ib_async import Index
+            contract = Index(symbol, exchange, currency)
+            if not self._qualify(symbol, contract):
+                return cached
+            if cached is not None:
+                new_df = self._fetch_pages(contract, stop_at=cached.index[-1],
+                                           bar_size="1 day", page_duration="5 Y")
+            else:
+                new_df = self._fetch_pages(contract, min_days=_MAX_PERIOD_DAYS,
+                                           bar_size="1 day", page_duration="5 Y")
+        except Exception:
+            logger.warning("fetch_index_daily(%s/%s) failed", symbol, exchange, exc_info=True)
+            return cached
+        finally:
+            if owns_connection:
+                self.disconnect()
+
+        if cached is not None:
+            merged = pd.concat([cached, new_df]) if not new_df.empty else cached
+            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+        else:
+            merged = new_df
+
+        if merged.empty:
+            return cached
+        if not new_df.empty:
+            _save_cache(cache_key, merged, CACHE_DIR_DAILY)
+        return merged
 
     def fetch_recent_raw(self, ticker: str, lookback_days: int,
                           what_to_show: str = "TRADES") -> pd.DataFrame | None:

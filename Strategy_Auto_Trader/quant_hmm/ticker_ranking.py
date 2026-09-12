@@ -102,6 +102,43 @@ def trend_quality_asof(
     return float(score)
 
 
+def _price_momentum_normalized(
+    ticker: str,
+    as_of_date: pd.Timestamp,
+    price_by_ticker: dict[str, pd.Series],
+    momentum_lookback_days: int = 252,
+) -> float:
+    """Jegadeesh-Titman 12-month price momentum, normalized to [0, 1] via tanh.
+
+    tanh maps raw return to (-1, 1); shifting by +1 and halving gives [0, 1].
+    Neutral (0 return) → 0.5.  +100% return → ~0.88.  -50% → ~0.27.
+    Returns 0.5 (neutral) when price data is unavailable."""
+    series = price_by_ticker.get(ticker)
+    if series is None or series.empty:
+        return 0.5
+
+    idx_tz = getattr(series.index, "tz", None)
+    lookup_now = as_of_date
+    lookup_then = as_of_date - pd.Timedelta(days=momentum_lookback_days)
+    if idx_tz is not None:
+        if lookup_now.tzinfo is None:
+            lookup_now = lookup_now.tz_localize(idx_tz)
+        if lookup_then.tzinfo is None:
+            lookup_then = lookup_then.tz_localize(idx_tz)
+
+    try:
+        price_now = series.asof(lookup_now)
+        price_then = series.asof(lookup_then)
+    except Exception:
+        return 0.5
+
+    if pd.isna(price_now) or pd.isna(price_then) or float(price_then) <= 0:
+        return 0.5
+
+    momentum = float(price_now) / float(price_then) - 1.0
+    return float((np.tanh(momentum) + 1.0) / 2.0)
+
+
 def ticker_ranking_score(
     ticker: str,
     candidates: list[Candidate],
@@ -110,17 +147,29 @@ def ticker_ranking_score(
     vol_weight: float = 0.7,
     win_rate_weight: float = 0.3,
     lookback_days: int = 60,
+    momentum_weight: float = 0.0,
+    price_by_ticker: dict[str, pd.Series] | None = None,
+    momentum_lookback_days: int = 252,
 ) -> float:
-    """Hybrid score: vol_weight * trend_quality_normalized + win_rate_weight * win_rate.
+    """Hybrid score: vol_weight * TQ + win_rate_weight * win_rate + momentum_weight * momentum.
 
-    trend_quality is clipped to [0,1]; win_rate is [0,1]. Returns [0,1] combined score."""
+    All components are [0, 1]. Weights don't need to sum to 1 — scores are only used
+    for relative ranking (top-K selection), so absolute scale doesn't matter.
+    momentum_weight=0 (default) gives current behavior."""
     tq = trend_quality_asof(ticker, as_of_date, trend_quality_by_ticker)
     if tq is None:
         tq = 0.5
     tq_normalized = max(0.0, min(1.0, tq))
 
     wr = recent_win_rate(candidates, ticker, lookback_days)
-    return vol_weight * tq_normalized + win_rate_weight * wr
+
+    score = vol_weight * tq_normalized + win_rate_weight * wr
+
+    if momentum_weight > 0.0 and price_by_ticker:
+        mom = _price_momentum_normalized(ticker, as_of_date, price_by_ticker, momentum_lookback_days)
+        score += momentum_weight * mom
+
+    return score
 
 
 def filter_candidates_by_top_tickers(
@@ -130,19 +179,42 @@ def filter_candidates_by_top_tickers(
     vol_weight: float = 0.7,
     win_rate_weight: float = 0.3,
     lookback_days: int = 60,
+    score_lookback_days: int | None = None,
+    momentum_weight: float = 0.0,
+    price_by_ticker: dict[str, pd.Series] | None = None,
+    momentum_lookback_days: int = 252,
 ) -> tuple[list[Candidate], dict[str, float]]:
-    """Keep only candidates from top-K tickers by hybrid (vol + win-rate) ranking.
+    """Keep only candidates from top-K tickers by hybrid (TQ + win-rate + momentum) ranking.
 
-    Each ticker is scored as median of all its candidate entry-day scores, then
-    top-K are selected. Returns (filtered_candidates, ticker_scores_dict for diagnostics)."""
+    Each ticker is scored as median of its candidate entry-day scores, then
+    top-K are selected. Returns (filtered_candidates, ticker_scores_dict for diagnostics).
+
+    score_lookback_days: when set, only candidates from the last N calendar days
+    of the pool's date range are used to compute median scores. Lets recent
+    momentum names rank on their current trend_quality rather than all-time history.
+
+    momentum_weight: when > 0, adds price momentum (JT factor) to the hybrid score.
+    Requires price_by_ticker. momentum_weight=0 (default) gives current behavior."""
     if top_k <= 0:
         return candidates, {}
 
+    if score_lookback_days is not None and candidates:
+        max_date = max(c.date_opened for c in candidates)
+        cutoff = max_date - pd.Timedelta(days=score_lookback_days)
+        scoring_candidates = [c for c in candidates if c.date_opened >= cutoff]
+        if not scoring_candidates:
+            scoring_candidates = candidates
+    else:
+        scoring_candidates = candidates
+
     ticker_scores_by_date: dict[str, list[float]] = {}
-    for c in candidates:
+    for c in scoring_candidates:
         score = ticker_ranking_score(
             c.ticker, candidates, trend_quality_by_ticker, c.date_opened,
-            vol_weight, win_rate_weight, lookback_days
+            vol_weight, win_rate_weight, lookback_days,
+            momentum_weight=momentum_weight,
+            price_by_ticker=price_by_ticker,
+            momentum_lookback_days=momentum_lookback_days,
         )
         ticker_scores_by_date.setdefault(c.ticker, []).append(score)
 
@@ -341,6 +413,7 @@ def fetch_extract_and_prices(
     use_persistent_cache: bool = True,
     hmm_cache_dir: Path | None = None,
     historical_only: bool = False,
+    vol_window: int = 504,
 ) -> tuple[list[Candidate], pd.Series | None, pd.Series | None]:
     """Like fetch_and_extract, but also returns the ticker's close-price series
     (for mark-to-market valuation) and its rolling trend_quality series (for
@@ -359,7 +432,7 @@ def fetch_extract_and_prices(
     if detail is None:
         return [], None, None
     candidates = candidates_from_detail(ticker, detail, strategy_name, vol_filter_tag)
-    trend_quality = rolling_trend_quality(daily_ohlc_from_hourly(df_out))
+    trend_quality = rolling_trend_quality(daily_ohlc_from_hourly(df_out), window=vol_window)
     return candidates, df_out["Close"], trend_quality
 
 
@@ -375,6 +448,7 @@ def generate_candidates(
     use_persistent_cache: bool = True,
     hmm_cache_dir: Path | None = None,
     historical_only: bool = False,
+    vol_window: int = 504,
 ) -> tuple[list[Candidate], dict[str, pd.Series], dict[str, pd.Series]]:
     """Generate one strategy's candidate trades across a ticker list, optionally
     in parallel, retaining each ticker's close-price series (mark-to-market)
@@ -421,7 +495,7 @@ def generate_candidates(
                     fetch_extract_and_prices, t, strategy_name, vol_filter_tag,
                     vol_filter_ok, use_seasonal_volume, source,
                     df_by_ticker.get(t) if df_by_ticker else None,
-                    use_persistent_cache, hmm_cache_dir, historical_only,
+                    use_persistent_cache, hmm_cache_dir, historical_only, vol_window,
                 ): t
                 for t in tickers
             }
@@ -438,7 +512,7 @@ def generate_candidates(
             cands, close, trend_quality = fetch_extract_and_prices(
                 ticker, strategy_name, vol_filter_tag, vol_filter_ok, use_seasonal_volume, source,
                 df_by_ticker.get(ticker) if df_by_ticker else None,
-                use_persistent_cache, hmm_cache_dir, historical_only)
+                use_persistent_cache, hmm_cache_dir, historical_only, vol_window)
             all_candidates.extend(cands)
             if close is not None:
                 price_by_ticker[ticker] = close
@@ -458,6 +532,7 @@ def rank_universe(
     workers: int = 4,
     use_seasonal_volume: bool = False,
     source: str = "ibkr",
+    vol_window: int = 252,
 ) -> dict[str, float]:
     """Backtest every ticker in `tickers` and return {ticker: hybrid_score} "as
     of today" (the median-of-candidate-day score across each ticker's own full
@@ -470,10 +545,13 @@ def rank_universe(
     with a trend_quality-only estimate — a ticker the strategy never trades has
     no demonstrated edge, and admitting it into a top-K set on chart-shape
     alone would displace a ticker with real signal.
-    """
+
+    vol_window: rolling window for trend_quality (default 252 ≈ 1yr, swept 2026-09-12).
+    Must match the value used in live_sim.py --vol-window to keep daemon ranking
+    consistent with backtest top-K selection."""
     candidates, _price_by_ticker, trend_quality_by_ticker = generate_candidates(
         tickers, strategy_name, vol_filter_ok=True, workers=workers,
-        use_seasonal_volume=use_seasonal_volume, source=source,
+        use_seasonal_volume=use_seasonal_volume, source=source, vol_window=vol_window,
     )
     _, ticker_scores = filter_candidates_by_top_tickers(
         candidates, trend_quality_by_ticker, top_k=len(tickers),

@@ -27,6 +27,8 @@ import pandas as pd
 
 CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "cache" / "stooq_daily"
 
+_FRED_VIX_STOOQ_PATH = CACHE_DIR / "us" / "^vix.us.txt"
+
 _COLUMNS = ["<TICKER>", "<PER>", "<DATE>", "<TIME>", "<OPEN>", "<HIGH>", "<LOW>", "<CLOSE>", "<VOL>", "<OPENINT>"]
 
 
@@ -35,6 +37,29 @@ def _stooq_path(ticker: str, cache_dir: Path | None = None) -> Path:
     if ticker.endswith(".L"):
         return cache_dir / "uk" / f"{ticker[:-2].lower()}.uk.txt"
     return cache_dir / "us" / f"{ticker.lower()}.us.txt"
+
+
+def import_fred_vix(fred_csv_path: str | Path) -> None:
+    """Convert a FRED VIXCLS CSV download to stooq bulk-dump format.
+
+    FRED format: observation_date,VIXCLS (daily close only).
+    Writes to the stooq cache path for ^VIX so load_stooq_daily("^VIX") works.
+    The source file can be deleted after this runs."""
+    df = pd.read_csv(fred_csv_path)
+    df = df[df["VIXCLS"].astype(str).str.strip() != "."].copy()
+    df["<TICKER>"] = "VIX"
+    df["<PER>"] = "D"
+    df["<DATE>"] = pd.to_datetime(df["observation_date"]).dt.strftime("%Y%m%d")
+    df["<TIME>"] = "000000"
+    df["<OPEN>"] = df["VIXCLS"]
+    df["<HIGH>"] = df["VIXCLS"]
+    df["<LOW>"] = df["VIXCLS"]
+    df["<CLOSE>"] = df["VIXCLS"]
+    df["<VOL>"] = 0
+    df["<OPENINT>"] = 0
+    out = df[_COLUMNS]
+    _FRED_VIX_STOOQ_PATH.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(_FRED_VIX_STOOQ_PATH, index=False)
 
 
 def load_stooq_daily(ticker: str, cache_dir: Path | None = None) -> pd.DataFrame | None:

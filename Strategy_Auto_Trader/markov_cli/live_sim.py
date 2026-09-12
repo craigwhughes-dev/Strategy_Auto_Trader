@@ -65,7 +65,7 @@ from ..quant_hmm.ticker_ranking import (
 )
 from ..core.cli_logging import setup_cli_logger
 from ..strategy.base.registry import STRATEGY_REGISTRY, wants_low_trend_quality
-from ..quant_hmm.quant_engine import fetch_daily
+from ..quant_hmm.quant_engine import fetch_vix_ibkr
 from ..synthetic_backtest_data.generate import SYNTHETIC_HMM_CACHE_DIR, load_synthetic_hourly
 from ..synthetic_backtest_data.stooq_daily import load_stooq_daily
 
@@ -152,6 +152,27 @@ def resolve_correlation_cap(strategy_name: str) -> float | None:
     return getattr(entry_cls, "max_correlation_to_admitted_today", None)
 
 
+def resolve_vix_recovery_window(strategy_name: str) -> int | None:
+    """Strategy-owned vix_recovery_window_days: calendar days of reduced-Kelly
+    entries after VIX drops below vix_entry_gate_threshold. None = off (default).
+    Not a CLI flag — strategy-owned per .claude/rules/strategy.md."""
+    entry_cls = STRATEGY_REGISTRY.get(strategy_name, {}).get("entry")
+    return getattr(entry_cls, "vix_recovery_window_days", None)
+
+
+def resolve_vix_recovery_kelly_mult(strategy_name: str) -> float:
+    """Strategy-owned Kelly multiplier during vix_recovery_window_days (default 0.5)."""
+    entry_cls = STRATEGY_REGISTRY.get(strategy_name, {}).get("entry")
+    return getattr(entry_cls, "vix_recovery_kelly_mult", 0.5)
+
+
+def resolve_vix_gate_allow_reentry(strategy_name: str) -> bool:
+    """Strategy-owned flag: when True, previously-admitted tickers can still
+    enter on high-VIX days; only brand-new tickers are blocked. Default False."""
+    entry_cls = STRATEGY_REGISTRY.get(strategy_name, {}).get("entry")
+    return getattr(entry_cls, "vix_gate_allow_reentry", False)
+
+
 def _build_daily_returns_cache(tickers: list[str]) -> dict[str, pd.Series]:
     """Daily pct-change return series per ticker, from the local Stooq daily
     dump (see synthetic_backtest_data/stooq_daily.py — same data already used
@@ -200,6 +221,9 @@ def arbitrate(
     vix_entry_gate_threshold: float | None = None,
     daily_returns_by_ticker: dict[str, pd.Series] | None = None,
     max_correlation_to_admitted_today: float | None = None,
+    vix_recovery_window_days: int | None = None,
+    vix_recovery_kelly_mult: float = 0.5,
+    vix_gate_allow_reentry: bool = False,
 ) -> dict:
     """Walk candidates day-by-day (event days only: opens/closes), arbitrating
     entries against one shared, mutating cash pot. No position-count cap —
@@ -308,6 +332,9 @@ def arbitrate(
     n_rejected_vix = 0
     n_rejected_correlation = 0
     prev_day = None
+    admitted_tickers_ever: set[str] = set()  # for vix_gate_allow_reentry
+    prev_vix_blocked: bool = False            # for vix_recovery_window_days onset detection
+    vix_recovery_start: pd.Timestamp | None = None  # first day after VIX drops below threshold
 
     for day in all_days:
         if prev_day is not None:
@@ -335,12 +362,37 @@ def arbitrate(
         daily_cap = (same_day_deployment_cap_pct * initial_cash
                      if same_day_deployment_cap_pct else None)
 
-        # VIX gate: block all new entries on high-volatility days
+        # VIX gate: block or partial-block entries on high-volatility days.
+        # Three optional strategy-owned extensions (all default to off):
+        #   vix_gate_allow_reentry: on blocked days, allow re-entries into
+        #     previously-admitted tickers; only brand-new tickers rejected.
+        #   vix_recovery_window_days/vix_recovery_kelly_mult: after VIX drops
+        #     back below threshold, allow entries at reduced Kelly for N calendar
+        #     days to capture early-recovery entries the hard block misses.
+        vix_currently_blocked = False
         if vix_entry_gate_threshold is not None and vix_series is not None:
             vix_val = vix_series.asof(day)
             if not pd.isna(vix_val) and float(vix_val) >= vix_entry_gate_threshold:
-                n_rejected_vix += len(day_candidates)
-                day_candidates = []
+                vix_currently_blocked = True
+                vix_recovery_start = None  # reset ramp-up on any re-elevation
+                if vix_gate_allow_reentry and admitted_tickers_ever:
+                    new_day_cands = []
+                    for dc in day_candidates:
+                        if dc.ticker in admitted_tickers_ever:
+                            new_day_cands.append(dc)
+                        else:
+                            n_rejected_vix += 1
+                    day_candidates = new_day_cands
+                else:
+                    n_rejected_vix += len(day_candidates)
+                    day_candidates = []
+            elif vix_recovery_window_days is not None:
+                if prev_vix_blocked:
+                    vix_recovery_start = day  # first unblocked day after elevation
+                if (vix_recovery_start is not None
+                        and (day - vix_recovery_start).days >= vix_recovery_window_days):
+                    vix_recovery_start = None  # ramp-up window elapsed
+        prev_vix_blocked = vix_currently_blocked
 
         for cand in day_candidates:
             if not cand.kelly_fraction or cand.kelly_fraction <= 0:
@@ -368,7 +420,14 @@ def arbitrate(
                 n_rejected_cash += 1
                 continue
 
-            qty = max(1, int(cash * cand.kelly_fraction / price))
+            in_vix_rampup = (
+                vix_recovery_start is not None
+                and vix_recovery_window_days is not None
+                and (day - vix_recovery_start).days < vix_recovery_window_days
+            )
+            effective_kelly = (cand.kelly_fraction * vix_recovery_kelly_mult
+                               if in_vix_rampup else cand.kelly_fraction)
+            qty = max(1, int(cash * effective_kelly / price))
             alloc = qty * price
 
             if cost_model_name == "flat":
@@ -412,6 +471,7 @@ def arbitrate(
             n_admitted += 1
             deployed_today += alloc
             admitted_today.append(cand.ticker)
+            admitted_tickers_ever.add(cand.ticker)
 
         skipped = len(day_candidates) - taken
         if taken or skipped:
@@ -562,6 +622,24 @@ def main(argv: list[str] | None = None) -> int:
                              "No effect without --top-k > 0.")
     parser.add_argument("--lookback-days", type=int, default=60,
                         help="Window for computing recent win-rate (days). Default: 60.")
+    parser.add_argument("--vol-window", type=int, default=252,
+                        help="Rolling window (trading days) for trend_quality computation "
+                             "(default: 252 ≈ 1yr, swept 2026-09-12 — best real-window result). "
+                             "Shorter values recover faster from crash-era vol.")
+    parser.add_argument("--score-lookback-days", type=int, default=None,
+                        help="When set, only candidates from the last N calendar days of "
+                             "the pool are used to compute top-K median scores (default: all-time). "
+                             "Lets recent momentum names rank on current trend_quality rather than "
+                             "all-time history. E.g. --score-lookback-days 504 uses ~2yr of recent "
+                             "candidates for scoring while still admitting all top-K candidates.")
+    parser.add_argument("--momentum-weight", type=float, default=0.2,
+                        help="Weight for JT price momentum in hybrid rank (default: 0.2, swept 2026-09-12). "
+                             "Adds N-month price return (tanh-normalized, [0,1]) to TQ + win-rate. "
+                             "Weights don't need to sum to 1 — scores are used for relative ranking only. "
+                             "Set to 0 to disable.")
+    parser.add_argument("--momentum-lookback-days", type=int, default=252,
+                        help="Lookback period for price momentum factor (calendar days, default: 252 ≈ 12mo, "
+                             "swept 2026-09-12 — 12mo consistently beats 6mo).")
     parser.add_argument("--journal", default=None,
                         help="Journal CSV to append trades to (default: data/journals/live.csv)")
     parser.add_argument("--position-summary", default=None,
@@ -669,6 +747,7 @@ def main(argv: list[str] | None = None) -> int:
             # live IBKR gap-fill and serve straight from cache (see
             # generate_candidates' docstring).
             historical_only=True,
+            vol_window=args.vol_window,
         )
 
         cutoff = pd.Timestamp(args.start_date)
@@ -690,6 +769,10 @@ def main(argv: list[str] | None = None) -> int:
                 candidates, trend_quality_by_ticker, args.top_k,
                 vol_weight=args.vol_weight, win_rate_weight=args.win_rate_weight,
                 lookback_days=args.lookback_days,
+                score_lookback_days=args.score_lookback_days,
+                momentum_weight=args.momentum_weight,
+                price_by_ticker=price_by_ticker if args.momentum_weight > 0.0 else None,
+                momentum_lookback_days=args.momentum_lookback_days,
             )
             top_tickers_list = sorted(ticker_scores.keys(),
                                       key=lambda t: -ticker_scores[t])[:args.top_k]
@@ -720,7 +803,14 @@ def main(argv: list[str] | None = None) -> int:
         vix_series: pd.Series | None = None
         if vix_threshold is not None:
             if _vix_series_cache is None:
-                vix_df = fetch_daily("^VIX")
+                if args.synthetic_data_dir:
+                    # Synthetic mode: Stooq local dump covers 20+ yr history.
+                    # Returns None until the VIX file is downloaded — gate
+                    # silently disabled (fail-open), same as a fetch failure.
+                    from ..synthetic_backtest_data.stooq_daily import load_stooq_daily
+                    vix_df = load_stooq_daily("^VIX")
+                else:
+                    vix_df = fetch_vix_ibkr(historical_only=True)
                 if vix_df is not None and "Close" in vix_df.columns:
                     s = vix_df["Close"].dropna()
                     s.index = pd.to_datetime(s.index).tz_localize(None)
@@ -742,6 +832,15 @@ def main(argv: list[str] | None = None) -> int:
             logger.info(f"  max_correlation_to_admitted_today={corr_cap} (strategy-owned, "
                         f"{strategy_name}.max_correlation_to_admitted_today)")
 
+        vix_recovery_days = resolve_vix_recovery_window(strategy_name)
+        vix_recovery_mult = resolve_vix_recovery_kelly_mult(strategy_name)
+        vix_allow_reentry = resolve_vix_gate_allow_reentry(strategy_name)
+        if vix_recovery_days is not None:
+            logger.info(f"  vix_recovery_window_days={vix_recovery_days}, "
+                        f"vix_recovery_kelly_mult={vix_recovery_mult} (strategy-owned)")
+        if vix_allow_reentry:
+            logger.info(f"  vix_gate_allow_reentry=True (strategy-owned)")
+
         for pot_size in pot_sizes:
             result = arbitrate(
                 candidates,
@@ -755,6 +854,9 @@ def main(argv: list[str] | None = None) -> int:
                 vix_entry_gate_threshold=vix_threshold,
                 daily_returns_by_ticker=_daily_returns_cache,
                 max_correlation_to_admitted_today=corr_cap,
+                vix_recovery_window_days=vix_recovery_days,
+                vix_recovery_kelly_mult=vix_recovery_mult,
+                vix_gate_allow_reentry=vix_allow_reentry,
             )
             all_executed.extend(result["executed"])
 

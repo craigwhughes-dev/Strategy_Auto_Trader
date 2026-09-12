@@ -148,6 +148,21 @@ class OptimisedNewEntry:
     # -0.15 Sharpe (0.81 vs 0.96). vix25 confirmed worst-of-both-worlds (real
     # Sharpe 0.59, mediocre crash Sharpe -3.42). See BACKTEST_LOG.md 2026-09-02.
     vix_entry_gate_threshold: float = 20.0
+    # Post-crash VIX ramp-up: after VIX drops back below vix_entry_gate_threshold,
+    # allow entries at reduced Kelly for this many calendar days (None = off,
+    # current behavior — full-size entries resume immediately once VIX unblocks).
+    # Intended to capture early-recovery entries that the hard gate misses;
+    # swept in scripts/run_vix_rampup_sweep.ps1. Default None = off until sweep.
+    vix_recovery_window_days: int | None = None
+    # Kelly multiplier applied to admitted entries during vix_recovery_window_days.
+    # 0.5 = half normal size; only effective when vix_recovery_window_days is set.
+    vix_recovery_kelly_mult: float = 0.5
+    # Allow re-entries on previously-admitted tickers even when VIX >= threshold.
+    # False = current behavior (hard block on all new entries including re-entries).
+    # True = only brand-new tickers (never admitted before) are blocked; tickers
+    # with at least one prior admitted trade can still enter on high-VIX days.
+    # Swept in scripts/run_vix_reentry_sweep.ps1. Default False = off until sweep.
+    vix_gate_allow_reentry: bool = False
     # Correlation-aware same-day admission gate: rejects a candidate whose
     # trailing 60-day daily-return correlation to any ticker already admitted
     # that calendar day is >= this threshold. Targets the rolling-30d-Sharpe
