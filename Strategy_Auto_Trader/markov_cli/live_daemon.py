@@ -127,6 +127,8 @@ def setup_logging() -> logging.Logger:
 # always means a live daemon — no PID-liveness guessing.
 _lock_handle = None
 _last_reconnect_failure: float = 0.0  # epoch secs; suppresses repeated reconnect attempts
+_stop_failures: dict[str, int] = {}       # consecutive stop re-place failures per ticker
+_stop_retry_after: dict[str, float] = {}  # epoch secs; suppress re-place until this time
 
 _DAEMON_CMDLINE_MARKERS = ("markov_cli.live_daemon",
                            "markov_cli\\live_daemon.py",
@@ -521,7 +523,15 @@ def write_app_status_snapshot(
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     status_path = STATE_DIR / "app_status.json"
-    atomic_write_json(status_path, snapshot)
+    try:
+        atomic_write_json(status_path, snapshot)
+    except PermissionError:
+        # AV/Defender holds the file past the atomic-rename retry budget.
+        # Direct write is safe for this heartbeat file — a torn read gives stale data,
+        # not corrupt trade state.
+        with open(status_path, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, indent=2)
+        logger.debug("app_status.json: direct fallback write (atomic rename blocked by file lock)")
 
 
 def _write_app_status_snapshot_safe(
@@ -1467,6 +1477,7 @@ def check_protective_stops(
             return  # suppress reconnect spam; TWS likely down/weekend
         try:
             broker.connect()
+            time.sleep(5)  # settle: TWS session may not be ready to accept orders immediately post-reconnect
         except Exception as e:
             _last_reconnect_failure = now_ts
             logger.warning(f"check_protective_stops: broker reconnect failed: {e}")
@@ -1497,6 +1508,10 @@ def check_protective_stops(
 
             logger.warning(f"{ticker}: stop {perm_id} vanished without execution — re-placing")
 
+        if _stop_retry_after.get(ticker, 0.0) > time.time():
+            logger.debug(f"{ticker}: stop re-place suppressed (backoff active)")
+            continue
+
         from ..broker.types import StopOrderRequest
         try:
             buffered_stop = pos.get("stop_level", 0) * (1 - stop_buffer_pct / 100)
@@ -1511,8 +1526,25 @@ def check_protective_stops(
             if result:
                 portfolio.set_stop_order(ticker, result.perm_id, result.stop_price)
                 portfolio.save()
+                _stop_failures.pop(ticker, None)
+                _stop_retry_after.pop(ticker, None)
             else:
-                logger.warning(f"{ticker}: stop re-place rejected")
+                n = _stop_failures.get(ticker, 0) + 1
+                _stop_failures[ticker] = n
+                portfolio.clear_stop_order(ticker)
+                portfolio.save()
+                if n >= 3:
+                    _stop_retry_after[ticker] = time.time() + 300
+                    logger.warning(
+                        f"{ticker}: stop re-place rejected ({n} consecutive) — suppressed 5 min"
+                    )
+                else:
+                    logger.warning(f"{ticker}: stop re-place rejected ({n} consecutive)")
+                try:
+                    from ..output.emailer import send_stop_failure_alert
+                    send_stop_failure_alert(ticker, n)
+                except Exception as _e:
+                    logger.error(f"Stop failure alert send failed: {_e}")
         except Exception as e:
             logger.warning(f"{ticker}: error re-placing stop: {e}")
 
@@ -2159,6 +2191,9 @@ def main(argv: list[str] | None = None) -> int:
                 if not dry_run and (not startup_reconciliation_done or daemon_state.get("needs_reconciliation")):
                     if run_startup_reconciliation(daemon_state, portfolio, broker, logger):
                         startup_reconciliation_done = True
+                        if _recon_fail_count > 0 and _recon_first_fail_at is not None:
+                            elapsed = (datetime.now(timezone.utc) - _recon_first_fail_at).total_seconds()
+                            logger.info(f"Broker reconnected after {elapsed:.0f}s ({_recon_fail_count} failed attempts)")
                         _recon_fail_count = 0
                         _recon_first_fail_at = None
                         _recon_unreachable_alerted = False

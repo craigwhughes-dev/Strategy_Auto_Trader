@@ -411,6 +411,28 @@ def send_tws_unreachable_alert(host: str, port: int, minutes: int) -> None:
     logger.info(f"  TWS-unreachable alert sent: {subject}")
 
 
+def send_stop_failure_alert(ticker: str, n: int) -> None:
+    """Alert that a protective stop order failed to re-place.
+
+    Fires on every failure — an unprotected position overnight is a material risk."""
+    html = f"""<html><body style="margin:0;padding:20px;background:#0f1117;font-family:system-ui,sans-serif;color:#e0e0e0">
+<div style="max-width:700px;margin:0 auto">
+  <h1 style="color:#ef9a9a;margin:0 0 4px">Stop order re-place failed</h1>
+  <div style="color:#888;margin-bottom:16px">Protective stop for <strong>{ticker}</strong> could not be placed</div>
+  <div style="background:#2a1a1a;border:1px solid #4a2a2a;border-radius:8px;padding:12px 16px;margin:16px 0">
+    <p style="color:#ddd;margin:0">IBKR returned no order ID for the GTC stop on <strong>{ticker}</strong>
+    (consecutive failures: {n}).</p>
+    <p style="color:#ddd;margin:8px 0 0">The position is currently <strong>unprotected</strong>.
+    The daemon will retry on the next poll cycle.</p>
+  </div>
+  <p style="color:#888;font-size:0.85em">Check TWS for the position and place a manual stop if the retry does not succeed.</p>
+</div></body></html>"""
+
+    subject = f"Stop re-place failed for {ticker} ({n} consecutive)"
+    _send(subject, html)
+    logger.info(f"  Stop-failure alert sent: {subject}")
+
+
 def send_portfolio_status(positions: list[dict]) -> None:
     """Send a portfolio status email showing all active trades with P&L since entry."""
     if not positions:

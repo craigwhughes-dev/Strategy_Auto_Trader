@@ -15,8 +15,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_REPLACE_RETRIES = 10
-_REPLACE_RETRY_DELAY_SECONDS = 0.1  # linear backoff: 100ms..1000ms ≈ 5.5s total budget
+_REPLACE_RETRIES = 15
+_REPLACE_RETRY_DELAY_CAP_SECONDS = 2.0  # exponential backoff: 0.1, 0.2, 0.4 ... capped at 2s ≈ 40s budget
 
 
 _HOLDER_SCAN_SCRIPT = """
@@ -54,14 +54,18 @@ def _find_file_holders(path: Path) -> list[str]:
     except OSError:
         target = str(path)
     try:
+        t0 = time.monotonic()
         result = subprocess.run(
             [sys.executable, "-c", _HOLDER_SCAN_SCRIPT, target],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=5,
         )
+        elapsed = time.monotonic() - t0
         if result.returncode != 0:
-            logger.warning(f"File-holder scan subprocess failed: {result.stderr[-500:]}")
+            logger.warning(f"File-holder scan subprocess failed in {elapsed:.1f}s: {result.stderr[-500:]}")
             return []
-        return _json.loads(result.stdout.strip() or "[]")
+        holders = _json.loads(result.stdout.strip() or "[]")
+        logger.debug(f"File-holder scan completed in {elapsed:.1f}s: {holders or 'none found'}")
+        return holders
     except Exception as e:
         logger.warning(f"File-holder scan failed: {e}")
         return []
@@ -84,7 +88,8 @@ def _atomic_replace(temp_path: str, path: Path) -> None:
                     f"held by: {holders if holders else 'unknown (no psutil match — may be AV/kernel)'}"
                 )
                 raise
-            time.sleep(_REPLACE_RETRY_DELAY_SECONDS * (attempt + 1))
+            delay = min(0.1 * (2 ** attempt), _REPLACE_RETRY_DELAY_CAP_SECONDS)
+            time.sleep(delay)
 
 
 def atomic_write_json(path: Path, obj: dict) -> None:
