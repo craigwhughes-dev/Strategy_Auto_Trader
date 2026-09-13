@@ -334,7 +334,7 @@ class TestGenerateCandidatesDISeam:
         def fake_fep(ticker, strategy_name, vol_filter_tag,
                      vol_filter_ok=True, use_seasonal_volume=False, source="yfinance",
                      df=None, use_persistent_cache=True, hmm_cache_dir=None,
-                     historical_only=False, vol_window=504):
+                     historical_only=False, vol_window=504, end_date=None):
             received_dfs.append((ticker, df))
             rec = TradeRecord(date_opened="2026-01-12", ticker=ticker, strategy=strategy_name,
                               entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
@@ -369,7 +369,7 @@ class TestGenerateCandidatesDISeam:
         def fake_fep(ticker, strategy_name, vol_filter_tag,
                      vol_filter_ok=True, use_seasonal_volume=False, source="yfinance",
                      df=None, use_persistent_cache=True, hmm_cache_dir=None,
-                     historical_only=False, vol_window=504):
+                     historical_only=False, vol_window=504, end_date=None):
             received[ticker] = df
             rec = TradeRecord(date_opened="2026-01-12", ticker=ticker, strategy=strategy_name,
                               entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
@@ -397,7 +397,7 @@ class TestGenerateCandidatesDISeam:
         def fake_fep(ticker, strategy_name, vol_filter_tag,
                      vol_filter_ok=True, use_seasonal_volume=False, source="yfinance",
                      df=None, use_persistent_cache=True, hmm_cache_dir=None,
-                     historical_only=False, vol_window=504):
+                     historical_only=False, vol_window=504, end_date=None):
             received.append(hmm_cache_dir)
             return [], pd.Series([100.0], index=[ts_base]), pd.Series([0.5], index=[ts_base])
 

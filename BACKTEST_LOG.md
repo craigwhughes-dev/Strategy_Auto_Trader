@@ -30,6 +30,32 @@ Net P&L is the sum of N *independent* backtests, each with unlimited capital and
 
 ---
 
+## 2026-09-13 14:06 — Full-universe real-data validation post-synthetic sigma fix
+
+Tool: live_sim.py
+Scope: S&P500+FTSE100 universe × optimised_new, top-70, £100k pot, source=ibkr
+Command: `uv run python -m Strategy_Auto_Trader.markov_cli.live_sim --universe --strategies optimised_new --pot-sizes 100000 --top-k 70 --workers 4 --start-date 2000-01-01 --end-date 2026-09-13 --journal data/journals/backtest_real_full_20260913.csv`
+Data range: 2023-05-12 (first candidate) → 2026-09-13 (run date, ≈3.3 years, full available IBKR window)
+Journal: data/journals/backtest_real_full_20260913.csv
+Position summary: data/journals/live_sim_position_summary_20260913T140649.csv
+Chart: reports/live_sim_position_summary_20260913T140649_chart.png
+
+Config active (all changes since 2026-09-07 full run):
+- Synthetic sigma fix (bridge.py): corrects per-step σ = daily_vol / √n_bars — real data path unaffected
+- HMM synthetic cache re-warmed (nights 2026-09-07 through 2026-09-10): real HMM cache unchanged
+- No strategy parameter changes since 2026-09-07
+
+| Strategy | Admitted | VIX-rejected | Kelly-rejected | Realized P&L | Interest | Total return | Peak deployed | Max drawdown |
+|---|---|---|---|---|---|---|---|---|
+| optimised_new | 396/474 | 78 | 0 | +£36,173 | +£9,183 | +£45,355 (+45.4%) | £96,892 | −4.5% |
+
+vs 2026-09-07 (2.6yr window, start-date 2024-01-01): +£22,096 (+22.1%), −4.8% drawdown.
+Not directly comparable — extra 8 months (2023-05-12 to 2024-01-01) accounts for much of the P&L difference; drawdown marginally improved.
+
+Note: `--end-date` flag added this session so future runs are reproducible.
+
+---
+
 ## 2026-09-12 — Fix C (momentum factor) sweep — ADOPTED (mw=0.2, ml=252)
 
 Tool: scripts/run_momentum_sweep.py

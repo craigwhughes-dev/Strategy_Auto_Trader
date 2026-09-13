@@ -120,6 +120,30 @@ def _max_drawdown(values: list[float]) -> float:
     return max_dd
 
 
+def _portfolio_sharpe_sortino(equity_curve: list[dict]) -> tuple[float, float]:
+    """Annualized Sharpe and Sortino from sparse equity curve.
+
+    Forward-fills portfolio_value to daily frequency, then computes returns.
+    Sortino uses full-sample downside deviation (RMS of min(r,0) over all days).
+    Returns (nan, nan) when there is insufficient history.
+    """
+    if len(equity_curve) < 10:
+        return float("nan"), float("nan")
+    pv = pd.Series(
+        {row["date"]: row["portfolio_value"] for row in equity_curve}
+    ).sort_index()
+    daily = pv.resample("D").last().ffill()
+    rets = daily.pct_change().dropna().values
+    if len(rets) < 10:
+        return float("nan"), float("nan")
+    mean_r = float(np.mean(rets))
+    std_r = float(np.std(rets, ddof=1))
+    sharpe = mean_r / std_r * np.sqrt(252) if std_r > 0 else float("nan")
+    downside_dev = float(np.sqrt(np.mean(np.minimum(rets, 0.0) ** 2)))
+    sortino = mean_r / downside_dev * np.sqrt(252) if downside_dev > 0 else float("nan")
+    return sharpe, sortino
+
+
 def resolve_same_day_deployment_cap(strategy_name: str) -> float | None:
     """Strategy-owned same_day_deployment_cap_pct, read off the strategy's
     registered Entry class (default None for every strategy that doesn't
@@ -586,6 +610,10 @@ def main(argv: list[str] | None = None) -> int:
                              "instead of --tickers.")
     parser.add_argument("--strategies", nargs="+", default=["default", "conservative", "trend"])
     parser.add_argument("--start-date", default="2000-01-01")
+    parser.add_argument("--end-date", default=None, metavar="YYYY-MM-DD",
+                        help="Hard upper bound for data and candidate selection. "
+                             "Data is clipped to this date before the backtest runs — "
+                             "set this so the command is reproducible when re-run later.")
     parser.add_argument("--initial-cash", type=float, default=10_000.0,
                         help="Pot size per strategy. Ignored if --pot-sizes is given.")
     parser.add_argument("--pot-sizes", type=float, nargs="+", default=None,
@@ -748,10 +776,14 @@ def main(argv: list[str] | None = None) -> int:
             # generate_candidates' docstring).
             historical_only=True,
             vol_window=args.vol_window,
+            end_date=args.end_date,
         )
 
         cutoff = pd.Timestamp(args.start_date)
         candidates = [c for c in candidates if c.date_opened.tz_localize(None) >= cutoff]
+        if args.end_date:
+            end_cutoff = pd.Timestamp(args.end_date)
+            candidates = [c for c in candidates if c.date_opened.tz_localize(None) <= end_cutoff]
 
         if not exempt:
             wants_low = wants_low_trend_quality(strategy_name)
@@ -863,6 +895,9 @@ def main(argv: list[str] | None = None) -> int:
             total_pnl = sum(r.pnl_usd for r in result["executed"])
             peak_deployed = max((row["deployed"] for row in result["equity_curve"]), default=0.0)
             max_dd = _max_drawdown([row["portfolio_value"] for row in result["equity_curve"]])
+            sharpe, sortino = _portfolio_sharpe_sortino(result["equity_curve"])
+            sharpe_str = f"{sharpe:.2f}" if np.isfinite(sharpe) else "n/a"
+            sortino_str = f"{sortino:.2f}" if np.isfinite(sortino) else "n/a"
             vix_rej_str = (f", {result['n_rejected_vix']} rejected for VIX gate"
                            if result['n_rejected_vix'] else "")
             corr_rej_str = (f", {result['n_rejected_correlation']} rejected for correlation cap"
@@ -873,7 +908,8 @@ def main(argv: list[str] | None = None) -> int:
                   f"{result['n_rejected_concentration']} rejected for concentration cap"
                   f"{vix_rej_str}{corr_rej_str}), "
                   f"final £{result['final_cash']:,.2f} (P&L £{total_pnl:+,.2f}, "
-                  f"peak deployed £{peak_deployed:,.2f}, max drawdown {max_dd*100:.1f}%)")
+                  f"peak deployed £{peak_deployed:,.2f}, max drawdown {max_dd*100:.1f}%, "
+                  f"Sharpe {sharpe_str}, Sortino {sortino_str})")
 
             for row in result["equity_curve"]:
                 summary_rows.append({"strategy": strategy_name, "pot_size": pot_size, **row})
@@ -889,6 +925,8 @@ def main(argv: list[str] | None = None) -> int:
                 "n_rejected_vix": result["n_rejected_vix"],
                 "n_rejected_correlation": result["n_rejected_correlation"],
                 "max_drawdown": max_dd,
+                "sharpe": sharpe,
+                "sortino": sortino,
             })
 
     journal_path = Path(args.journal) if args.journal else LIVE_JOURNAL

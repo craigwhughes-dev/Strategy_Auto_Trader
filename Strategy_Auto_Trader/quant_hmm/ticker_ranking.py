@@ -266,6 +266,7 @@ def run_ticker_backtest(
     client_id: int = 2,
     hmm_cache_dir: Path | None = None,
     historical_only: bool = False,
+    end_date: str | None = None,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """Fetch data and run one ticker's full-history backtest.
 
@@ -311,6 +312,12 @@ def run_ticker_backtest(
                                   historical_only=historical_only)
     if df is None or df.empty:
         return None, None
+    if end_date is not None:
+        tz = df.index.tz
+        cutoff = pd.Timestamp(end_date, tz=tz) if tz else pd.Timestamp(end_date)
+        df = df[df.index < cutoff + pd.Timedelta(days=1)]
+        if df.empty:
+            return None, None
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
@@ -414,6 +421,7 @@ def fetch_extract_and_prices(
     hmm_cache_dir: Path | None = None,
     historical_only: bool = False,
     vol_window: int = 504,
+    end_date: str | None = None,
 ) -> tuple[list[Candidate], pd.Series | None, pd.Series | None]:
     """Like fetch_and_extract, but also returns the ticker's close-price series
     (for mark-to-market valuation) and its rolling trend_quality series (for
@@ -428,7 +436,7 @@ def fetch_extract_and_prices(
                                          use_seasonal_volume=use_seasonal_volume, source=source,
                                          df=df, use_persistent_cache=use_persistent_cache,
                                          client_id=_worker_client_id, hmm_cache_dir=hmm_cache_dir,
-                                         historical_only=historical_only)
+                                         historical_only=historical_only, end_date=end_date)
     if detail is None:
         return [], None, None
     candidates = candidates_from_detail(ticker, detail, strategy_name, vol_filter_tag)
@@ -449,6 +457,7 @@ def generate_candidates(
     hmm_cache_dir: Path | None = None,
     historical_only: bool = False,
     vol_window: int = 504,
+    end_date: str | None = None,
 ) -> tuple[list[Candidate], dict[str, pd.Series], dict[str, pd.Series]]:
     """Generate one strategy's candidate trades across a ticker list, optionally
     in parallel, retaining each ticker's close-price series (mark-to-market)
@@ -496,6 +505,7 @@ def generate_candidates(
                     vol_filter_ok, use_seasonal_volume, source,
                     df_by_ticker.get(t) if df_by_ticker else None,
                     use_persistent_cache, hmm_cache_dir, historical_only, vol_window,
+                    end_date,
                 ): t
                 for t in tickers
             }
@@ -512,7 +522,7 @@ def generate_candidates(
             cands, close, trend_quality = fetch_extract_and_prices(
                 ticker, strategy_name, vol_filter_tag, vol_filter_ok, use_seasonal_volume, source,
                 df_by_ticker.get(ticker) if df_by_ticker else None,
-                use_persistent_cache, hmm_cache_dir, historical_only, vol_window)
+                use_persistent_cache, hmm_cache_dir, historical_only, vol_window, end_date)
             all_candidates.extend(cands)
             if close is not None:
                 price_by_ticker[ticker] = close
