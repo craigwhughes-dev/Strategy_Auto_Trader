@@ -46,6 +46,7 @@ def test_args_passed_through_to_rank_universe(tmp_path):
         ["AAPL"], "conservative",
         vol_weight=0.5, win_rate_weight=0.5, lookback_days=30, workers=2,
         use_seasonal_volume=True, source="ibkr", vol_window=252,
+        momentum_weight=0.2, momentum_lookback_days=252,
     )
 
 

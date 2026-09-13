@@ -36,9 +36,9 @@ _DEFAULT_TICKERS = [
     "CRL", "CSX", "DVA", "EFX", "ELV", "ES", "ETN", "FAST", "FIX", "FRT",
 ]
 
-# Current baseline (optimised_new as of 2026-09-07)
+# Current baseline (optimised_new as of 2026-09-13)
 _BASELINE = dict(
-    stop_loss_pct=0.08,
+    stop_loss_pct=0.10,     # updated 2026-09-13: 0.08 -> 0.10
     vol_stop_mult=0.5,
     vol_stop_window=20,
     profit_stop_scale=0.30,

@@ -533,6 +533,8 @@ def rank_universe(
     use_seasonal_volume: bool = False,
     source: str = "ibkr",
     vol_window: int = 252,
+    momentum_weight: float = 0.2,
+    momentum_lookback_days: int = 252,
 ) -> dict[str, float]:
     """Backtest every ticker in `tickers` and return {ticker: hybrid_score} "as
     of today" (the median-of-candidate-day score across each ticker's own full
@@ -547,14 +549,17 @@ def rank_universe(
     alone would displace a ticker with real signal.
 
     vol_window: rolling window for trend_quality (default 252 ≈ 1yr, swept 2026-09-12).
-    Must match the value used in live_sim.py --vol-window to keep daemon ranking
-    consistent with backtest top-K selection."""
-    candidates, _price_by_ticker, trend_quality_by_ticker = generate_candidates(
+    momentum_weight/momentum_lookback_days: JT price-momentum factor (default 0.2/252,
+    adopted 2026-09-12). Must match live_sim.py defaults to keep daemon ranking consistent."""
+    candidates, price_by_ticker, trend_quality_by_ticker = generate_candidates(
         tickers, strategy_name, vol_filter_ok=True, workers=workers,
         use_seasonal_volume=use_seasonal_volume, source=source, vol_window=vol_window,
     )
     _, ticker_scores = filter_candidates_by_top_tickers(
         candidates, trend_quality_by_ticker, top_k=len(tickers),
         vol_weight=vol_weight, win_rate_weight=win_rate_weight, lookback_days=lookback_days,
+        momentum_weight=momentum_weight,
+        price_by_ticker=price_by_ticker if momentum_weight > 0.0 else None,
+        momentum_lookback_days=momentum_lookback_days,
     )
     return ticker_scores

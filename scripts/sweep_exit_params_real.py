@@ -32,14 +32,14 @@ _DEFAULT_TICKERS = [
     "CRL", "CSX", "DVA", "EFX", "ELV", "ES", "ETN", "FAST", "FIX", "FRT",
 ]
 
-# Current baseline (optimised_new as of 2026-09-07)
+# Current baseline (optimised_new as of 2026-09-07, updated 2026-09-12)
 _BASELINE = dict(
-    stop_loss_pct=0.08,
-    vol_stop_mult=0.5,
+    stop_loss_pct=0.10,     # updated 2026-09-13: 0.08 -> 0.10 (real Sharpe +35.5 vs +26.5)
+    vol_stop_mult=1.5,     # updated 2026-09-07: 0.5 -> 1.5 (real sweep Sharpe +35.3 vs +12.2)
     vol_stop_window=20,
     profit_stop_scale=0.30,
     min_stop_pct=0.03,
-    min_hold_bars=48,
+    min_hold_bars=0,       # updated 2026-09-07: inert with score gate + Plan B
     take_profit_pct=999.0,
     trailing_stop=0.0,
     max_hold_days=0,
@@ -47,17 +47,25 @@ _BASELINE = dict(
 )
 
 _SWEEPS: dict[str, list] = {
-    "profit_stop_scale": [0.0, 0.10, 0.20, 0.30, 0.50],
-    "vol_stop_mult":     [0.5, 1.0, 1.5, 2.0, 3.0],
     "stop_loss_pct":     [0.04, 0.06, 0.08, 0.10],
+    "vol_stop_mult":     [0.5, 1.0, 1.5, 2.0, 3.0],
+    "min_entry_score":   [6.0, 7.0, 8.0],
+    "profit_stop_scale": [0.0, 0.10, 0.20, 0.30, 0.50],
     "min_hold_bars":     [0, 6, 24, 48, 96, 168],
-    "min_entry_score":   [6.0, 7.0, 8.0],  # 6.0 = effectively off (= buy_threshold)
 }
+
+# Plan B: regime-forced exit minimum hold before bypass kicks in (None = off)
+_REGIME_FORCED_SWEEP: list[int | None] = [None, 6, 12, 24, 48]
 
 _COST_MODEL = make_cost_model("ibkr_tiered_spread", "SPY", 1.0)
 
 
-def _run_backtest(df: pd.DataFrame, hmm_path: Path, **overrides) -> dict | None:
+def _run_backtest(
+    df: pd.DataFrame,
+    hmm_path: Path,
+    min_hold_bars_regime_exit: int | None = None,
+    **overrides,
+) -> dict | None:
     params = {**_BASELINE, **overrides}
     regime_model = PersistentHMMRegimeModel(
         hmm_path, dates=df.index, closes=df["Close"].values,
@@ -74,6 +82,8 @@ def _run_backtest(df: pd.DataFrame, hmm_path: Path, **overrides) -> dict | None:
         min_stop_pct=params["min_stop_pct"],
         max_hold_days=params["max_hold_days"],
     )
+    if min_hold_bars_regime_exit is not None:
+        exit_s.min_hold_bars_regime_exit = min_hold_bars_regime_exit
     try:
         bt = consolidated_backtest(
             df,
@@ -133,7 +143,7 @@ def main() -> None:
         if not hmm_path.exists():
             continue
         try:
-            df = fetch_hourly_cached(t, period="730d", source="ibkr")
+            df = fetch_hourly_cached(t, period="730d", source="ibkr", historical_only=True)
         except Exception:
             continue
         if df is None or df.empty:
@@ -167,6 +177,30 @@ def main() -> None:
                   f"{agg['peak_capture']:>10.1%} "
                   f"{agg['sharpe']:>+8.3f}{marker}")
         print()
+
+
+    print(f"{'-'*72}")
+    print("Plan B: regime-forced exit (min_hold_bars_regime_exit sweep)")
+    print("  None = feature off (baseline behavior, currently live: 6)")
+    print(f"  {'Value':<12} {'Trades':>7} {'WinRate':>8} {'MeanRet':>9} {'PeakCapt':>10} {'Sharpe':>8}")
+    for val in _REGIME_FORCED_SWEEP:
+        ticker_results = []
+        for t, (df, hmm_path) in ticker_data.items():
+            r = _run_backtest(df, hmm_path, min_hold_bars_regime_exit=val)
+            if r:
+                ticker_results.append(r)
+        if not ticker_results:
+            print(f"  {val!s:<12} {'no data':>7}")
+            continue
+        agg = _aggregate(ticker_results)
+        label = "None (off)" if val is None else str(val)
+        marker = " << live" if val == 6 else ""
+        print(f"  {label:<12} {agg['n_total']:>7} "
+              f"{agg['win_rate']:>8.1%} "
+              f"{agg['mean_ret']:>+9.2%} "
+              f"{agg['peak_capture']:>10.1%} "
+              f"{agg['sharpe']:>+8.3f}{marker}")
+    print()
 
 
 if __name__ == "__main__":

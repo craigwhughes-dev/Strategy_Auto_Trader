@@ -56,6 +56,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="Rolling window (trading days) for trend_quality computation "
                              "(default: 252 ≈ 1yr, swept 2026-09-12). Must match live_sim.py "
                              "--vol-window to keep daemon ranking consistent with backtest top-K.")
+    parser.add_argument("--momentum-weight", type=float, default=0.2,
+                        help="Weight for JT price-momentum factor in ticker_ranking_score() "
+                             "(default: 0.2, adopted 2026-09-12). Must match live_sim.py "
+                             "--momentum-weight to keep daemon ranking consistent.")
+    parser.add_argument("--momentum-lookback-days", type=int, default=252,
+                        help="Lookback window (calendar days) for price-momentum factor "
+                             "(default: 252 ≈ 12mo, adopted 2026-09-12).")
     args = parser.parse_args(argv)
 
     if args.tickers:
@@ -72,6 +79,8 @@ def main(argv: list[str] | None = None) -> int:
         use_seasonal_volume=args.seasonal_volume,
         source=args.source,
         vol_window=args.vol_window,
+        momentum_weight=args.momentum_weight,
+        momentum_lookback_days=args.momentum_lookback_days,
     )
 
     output_path = Path(args.output)

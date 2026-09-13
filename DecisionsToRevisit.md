@@ -209,7 +209,7 @@ None (off)   5230   52.6%   -1.82%   35.7%   Sharpe -15.109
 - 12-bar identical to off: all regime flips that matter happen in first 6 bars or not at all.
 
 **Other sweep observations (not acted on):**
-- `stop_loss_pct=0.10`: -1.66% mean_ret vs -1.82% — worth sweeping on real data before touching live
+- `stop_loss_pct=0.10`: -1.66% mean_ret vs -1.82% — ADOPTED 2026-09-13 (swept on real IBKR: Sharpe +35.5 vs +26.5; corrected-sigma synthetic: Sharpe +5.69 vs +3.59; both agree)
 - `min_hold_bars=168`: 54.0% WR vs 52.6%, -1.79% vs -1.82% — marginal; leave
 
 #### 26yr synth results with Plan B=6 (2026-09-07, b0qqy2zvp)
@@ -282,6 +282,14 @@ Remove-Item data_synthetic\journals\synth_26yr.csv
 - `scripts/score_rr_by_vsmult.py` — score-stratified R:R comparison, use this to measure avg_loss change
 - `data_synthetic/journals/synth_26yr.csv` — 453-trade vol-filtered journal (correct input for regime analysis)
 - `scripts/analyse_regime_split.py` — regime-split P&L by calm/volatile/intermediate
+
+---
+
+### COMMITTED (2026-09-13): stop_loss_pct 0.08 → 0.10
+
+**Evidence:** Real IBKR sweep (20 tickers, 2.9yr, score gate=7.0 active): Sharpe +35.5 vs +26.5, MeanRet +1.17% vs +0.86%. Corrected-sigma synthetic sweep: Sharpe +5.69 vs +3.59. Both datasets agree; real overrules.
+
+**Files changed:** `strategy/optimised_new.py` (`_stop`, class docstring, property docstring, module docstring); `scripts/sweep_exit_params_real.py` baseline; `scripts/sweep_exit_params.py` baseline.
 
 ---
 

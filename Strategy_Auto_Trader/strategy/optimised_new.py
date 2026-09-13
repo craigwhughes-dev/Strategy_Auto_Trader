@@ -42,7 +42,7 @@ What changed vs. `optimised`, and why
   testing found `_RSI_OVERBOUGHT` also helps alone but dominates/overrides
   `sell_threshold`'s contribution once combined with it — left at 70
   (`optimised`'s value), not adopted alongside this pair.
-* `stop_loss_pct` (0.08), `vol_stop_window` (20), `max_hold_days` (0),
+* `stop_loss_pct` (0.10, updated 2026-09-13), `vol_stop_window` (20), `max_hold_days` (0),
   `_RSI_OVERBOUGHT` (70) all unchanged from `optimised`.
 
 Original single-ticker result (AAPL, 2023-08 to 2026-07): Sharpe 1.96 vs
@@ -267,13 +267,13 @@ class OptimisedNewEntry:
 
 
 class OptimisedNewExit:
-    """Hard stop-loss floor (8%) only — no hard take-profit. Winners are
+    """Hard stop-loss floor (10%) only — no hard take-profit. Winners are
     closed exclusively by the vol-scaled, profit-narrowing trailing stop.
 
     Satisfies ExitStrategyProtocol.
     """
 
-    _stop: float = 0.08
+    _stop: float = 0.10  # updated 2026-09-13: 0.08 -> 0.10 (real sweep Sharpe +35.5 vs +26.5, synthetic +5.69 vs +3.59)
     _target: float = 999.0  # effectively disabled — see module docstring
     use_kelly: bool = True
     kelly_lookback: int = 20
@@ -343,7 +343,7 @@ class OptimisedNewExit:
 
     @property
     def stop_loss_pct(self) -> float:
-        """Hard stop-loss fraction (8%)."""
+        """Hard stop-loss fraction (10%)."""
         return self._stop
 
     @property
