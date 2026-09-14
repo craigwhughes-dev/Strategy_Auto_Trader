@@ -37,21 +37,28 @@ IBKR_UNRESOLVABLE: frozenset[str] = frozenset({
 # against the live paper Gateway; all eight still GBP as expected.
 _LSE_DOT_SYMBOLS = {"AV", "BA", "BP", "JD", "NG", "RR", "SN", "UU"}
 
+# LSE-listed ETFs use exchange "LSEETF" on IBKR, not "LSE" (which is for equities).
+# Stock("ISF","LSE","GBP") returns Error 200; Stock("ISF","LSEETF","GBP") resolves correctly.
+# Verified 2026-09-14 on paper Gateway port 4002: conIds 13444223/104145585/68490081.
+_LSEETF_SYMBOLS: frozenset[str] = frozenset({"ISF", "XSTR", "IGLS", "ISXF"})
+
 
 def ibkr_contract_params(ticker: str) -> tuple[str, str, str]:
     """Map a yfinance ticker to (symbol, exchange, currency) for an IBKR Stock.
 
     ".L" suffix → LSE/GBP with the suffix stripped and share-class hyphen
     turned into IBKR's dot (plus the _LSE_DOT_SYMBOLS trailing-dot fixups
-    above). Everything else is treated as a US equity on SMART/USD; US
-    dual-class tickers use yfinance's hyphen (e.g. "BRK-B", "BF-B") where
-    IBKR wants a space ("BRK B", "BF B").
+    above). LSE ETFs in _LSEETF_SYMBOLS use exchange "LSEETF" instead of "LSE".
+    Everything else is treated as a US equity on SMART/USD; US dual-class
+    tickers use yfinance's hyphen (e.g. "BRK-B", "BF-B") where IBKR wants
+    a space ("BRK B", "BF B").
     """
     if ticker.upper().endswith(".L"):
         base = ticker[:-2].replace("-", ".")
         if base.upper() in _LSE_DOT_SYMBOLS:
             base = base + "."
-        return base, "LSE", "GBP"
+        exch = "LSEETF" if base.upper() in _LSEETF_SYMBOLS else "LSE"
+        return base, exch, "GBP"
     return ticker.replace("-", " "), "SMART", "USD"
 
 

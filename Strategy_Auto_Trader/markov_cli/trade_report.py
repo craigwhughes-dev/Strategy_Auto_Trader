@@ -30,6 +30,7 @@ def _fetch(ticker: str) -> pd.DataFrame | None:
 
 
 def _get_company_info(ticker: str) -> tuple[str, str]:
+    # DEPRECATED: yfinance company info — no IBKR replacement; remove or replace with IBKR fundamentals
     import yfinance as yf
     try:
         info = yf.Ticker(ticker).info

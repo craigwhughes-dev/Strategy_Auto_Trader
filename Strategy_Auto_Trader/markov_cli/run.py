@@ -47,6 +47,7 @@ def _make_run_dir(ticker: str) -> Path:
 
 
 def _fetch_company_info(ticker: str) -> tuple[str, str]:
+    # DEPRECATED: yfinance company info — no IBKR replacement; remove or replace with IBKR fundamentals
     import yfinance as yf
     from ..core.net_retry import call_with_timeout_retry
 

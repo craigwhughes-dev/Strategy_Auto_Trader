@@ -90,6 +90,7 @@ def volatility_profile(ticker: str, period: str = "2y", source: str = "ibkr") ->
             "Close": "last", "Volume": "sum",
         }).dropna(subset=["Close"])
     else:
+        # DEPRECATED: yfinance path — use source="ibkr" so this branch is never reached
         import yfinance as yf
         from ..core.net_retry import call_with_timeout_retry
 

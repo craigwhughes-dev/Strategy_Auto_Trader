@@ -299,6 +299,10 @@ class IBKRAdapter:
             exchange_stop = native_stop
             if req.ticker.upper().endswith(".L"):
                 exchange_stop = native_stop * PENCE_PER_POUND
+                # IBKR precautionary setting 10311 blocks stop orders directly
+                # routed to LSE. Switch to SMART after qualifyContracts so the
+                # conId is already resolved (market rule lookup above needed LSE).
+                contract.exchange = "SMART"
             order = StopOrder("SELL", req.quantity, exchange_stop, tif="GTC")
             trade = self._ib.placeOrder(contract, order)
             # waitOnUpdate() returns on the *first* incoming update event

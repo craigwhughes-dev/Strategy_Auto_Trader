@@ -461,6 +461,7 @@ def write_app_status_snapshot(
     config: dict,
     last_cycle_hour: dict,
     logger: logging.Logger,
+    cash_parking_mgr: object | None = None,
 ) -> None:
     """Write app_status.json snapshot atomically every poll loop (~60s).
 
@@ -519,6 +520,7 @@ def write_app_status_snapshot(
         "interest_accrued": portfolio.interest_accrued,
         "markets": markets_status,
         "positions": positions_snapshot,
+        "cash_parking": cash_parking_mgr.app_status_dict() if cash_parking_mgr is not None else None,
     }
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -529,18 +531,29 @@ def write_app_status_snapshot(
         # AV/Defender holds the file past the atomic-rename retry budget.
         # Direct write is safe for this heartbeat file — a torn read gives stale data,
         # not corrupt trade state.
-        with open(status_path, "w", encoding="utf-8") as f:
-            json.dump(snapshot, f, indent=2)
-        logger.debug("app_status.json: direct fallback write (atomic rename blocked by file lock)")
+        try:
+            with open(status_path, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f, indent=2)
+            logger.debug("app_status.json: direct fallback write (atomic rename blocked by file lock)")
+        except PermissionError:
+            logger.debug("app_status.json: write skipped this cycle (file locked by external process)")
 
 
 def _write_app_status_snapshot_safe(
-    portfolio: object, daemon_state: dict, config: dict, last_cycle_hour: dict, logger: logging.Logger
+    portfolio: object,
+    daemon_state: dict,
+    config: dict,
+    last_cycle_hour: dict,
+    logger: logging.Logger,
+    cash_parking_mgr: object | None = None,
 ) -> None:
     """write_app_status_snapshot(), swallowing errors so a snapshot failure
     can't interrupt the ticker-processing loop it's interleaved into."""
     try:
-        write_app_status_snapshot(portfolio, daemon_state, config, last_cycle_hour, logger)
+        write_app_status_snapshot(
+            portfolio, daemon_state, config, last_cycle_hour, logger,
+            cash_parking_mgr=cash_parking_mgr,
+        )
     except Exception as e:
         logger.error(f"Failed to write app_status.json: {e}", exc_info=True)
 
@@ -1063,6 +1076,7 @@ def process_cycle(
     protective_stops: bool = False,
     stop_buffer_pct: float = 1.5,
     workers: int = 1,
+    cash_parking_mgr: object | None = None,
 ) -> int:
     """Run one market cycle: prioritize open positions, then round-robin through candidates.
 
@@ -1189,6 +1203,45 @@ def process_cycle(
         market_name, processed, config, daemon_state, portfolio, broker, logger,
         protective_stops=protective_stops, stop_buffer_pct=stop_buffer_pct,
     )
+
+    # Cash parking rebalance — runs once per cycle, after main signal execution.
+    # Reads ISF.L p_bull_smooth from this cycle's processed results; fails open
+    # (no rebalance) if ISF.L wasn't evaluated this cycle.
+    if cash_parking_mgr is not None:
+        pbull = next(
+            (
+                p["result"].get("p_bull_smooth")
+                for p in processed
+                if p.get("ticker") == "ISF.L" and p.get("result")
+            ),
+            None,
+        )
+        if pbull is not None:
+            from ..quant_hmm.sentiment import vix_regime as _vix_regime
+            vix_data = _vix_regime()
+            vix_current = vix_data.get("vix_current")
+            if vix_current is not None:
+                from datetime import date as _date
+                today = _date.today()
+                try:
+                    orders = cash_parking_mgr.rebalance(
+                        broker=broker,
+                        available_cash=portfolio.available_cash,
+                        pbull_smooth=pbull,
+                        vix_level=vix_current,
+                        current_positions=portfolio.positions,
+                        today=today,
+                    )
+                    for order in orders:
+                        broker.place_order(order)
+                        if order.action == "SELL":
+                            cash_parking_mgr.record_sell_settled(order.ticker, today)
+                except Exception as _cp_err:
+                    logger.warning(f"[{market_name}] Cash parking rebalance error: {_cp_err}")
+            else:
+                logger.debug(f"[{market_name}] Cash parking: VIX unavailable — skipping rebalance")
+        else:
+            logger.debug(f"[{market_name}] Cash parking: ISF.L not in cycle — skipping rebalance")
 
     elapsed = time.time() - cycle_start
     n_timeouts = sum(
@@ -2133,6 +2186,9 @@ def main(argv: list[str] | None = None) -> int:
     currency = get_market_currency(primary_market, config)
     portfolio = PortfolioManager(capital_pot, state_path, currency=currency)
 
+    from ..cash_parking.manager import CashParkingManager
+    cash_parking_mgr = CashParkingManager(initial_cash=capital_pot)
+
     # Broker connection is async and can hang; skip it here and let it fail gracefully
     # when trades are attempted. Daemon can still process tickers and generate signals.
     try:
@@ -2311,6 +2367,7 @@ def main(argv: list[str] | None = None) -> int:
                             protective_stops=args.protective_stops,
                             stop_buffer_pct=args.stop_buffer_pct,
                             workers=args.workers,
+                            cash_parking_mgr=cash_parking_mgr,
                         )
 
                         daemon_state["cycle_in_progress"] = None
@@ -2326,7 +2383,10 @@ def main(argv: list[str] | None = None) -> int:
                 had_error = True
             finally:
                 # Write app_status.json snapshot ALWAYS, even on error — app needs fresh heartbeat
-                _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
+                _write_app_status_snapshot_safe(
+                    portfolio, daemon_state, config, last_cycle_hour, logger,
+                    cash_parking_mgr=cash_parking_mgr,
+                )
 
                 # Sleep before next iteration (5s on error, normal interval on
                 # success); skip entirely on shutdown so Ctrl+C exits promptly.

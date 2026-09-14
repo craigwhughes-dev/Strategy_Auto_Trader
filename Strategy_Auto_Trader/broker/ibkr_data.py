@@ -324,15 +324,21 @@ class IBKRDataClient:
         return _resample_30min_aligned(_truncate_to_period(merged, period))
 
     def fetch_daily(self, ticker: str, period: str = "max", use_cache: bool = True,
-                     what_to_show: str = "TRADES") -> pd.DataFrame | None:
+                     what_to_show: str = "TRADES",
+                     historical_only: bool = False) -> pd.DataFrame | None:
         """Fetch daily OHLCV, same incremental-cache shape as fetch_hourly
         (see its docstring) but barSizeSetting="1 day" and a separate,
         never-merged cache dir (data/cache/ibkr_daily/) — kept apart from
         the hourly cache so a daily fetch can never contaminate hourly bars
         or vice versa. No 30-min bar-alignment resample: that fix is
         specific to IBKR's hourly TRADES bar-boundary quirk and doesn't
-        apply to daily bars."""
+        apply to daily bars.
+        historical_only: skip the live gap-fill when a cache exists — set True
+        for pure backtests so live_sim doesn't compete with the daemon for pacing."""
         cached = _load_cache(ticker, CACHE_DIR_DAILY) if use_cache else None
+
+        if historical_only and cached is not None:
+            return _truncate_to_period(cached, period)
 
         owns_connection = self._ib is None
         if owns_connection and not self.connect():

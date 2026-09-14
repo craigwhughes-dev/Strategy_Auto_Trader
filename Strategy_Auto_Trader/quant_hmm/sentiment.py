@@ -2,6 +2,9 @@
 
 These feed into the quant engine as additional confirmation/warning signals
 alongside the core HMM regime probabilities.
+
+DEPRECATED: entire module uses yfinance — options chains have no historical data (unbacktestable);
+insider data has no IBKR equivalent. Module kept for research reporting only; not used in live trading.
 """
 
 from __future__ import annotations

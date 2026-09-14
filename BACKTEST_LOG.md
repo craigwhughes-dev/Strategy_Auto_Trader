@@ -30,6 +30,280 @@ Net P&L is the sum of N *independent* backtests, each with unlimited capital and
 
 ---
 
+## 2026-09-14 10:00 — optimised_new + cash parking (26yr synthetic, synthetic ETF hourly v3)
+
+Tool: live_sim.py --cash-parking --synthetic-data-dir
+Scope: S&P500+FTSE100 universe x optimised_new, 26yr synthetic (1999-09-01 to 2026-09-01), top-k=70, GBP100k pot, source=ibkr, workers=4
+Journal: data_synthetic/journals/synth_26yr_parking_v3.csv
+Position summary: data_synthetic/journals/synth_26yr_parking_v3_summary.csv
+Chart: reports/synth_26yr_parking_v3_chart.png
+Command:
+```
+uv run python -m Strategy_Auto_Trader.markov_cli.live_sim --universe --strategies optimised_new --synthetic-data-dir data_synthetic/hourly --start-date 1999-09-01 --synthetic-end-date 2026-09-01 --pot-sizes 100000 --top-k 70 --workers 4 --cash-parking --journal data_synthetic/journals/synth_26yr_parking_v3.csv --position-summary data_synthetic/journals/synth_26yr_parking_v3_summary.csv
+```
+Data range: 1999-12-14 (first candidate) to 2026-08-18 (last entry), 2026-09-01 synthetic end
+
+Parking signals: full synthetic separation. ETF returns (xstr_ret, igls_ret, isf_ret) routed via `synthetic_data_dir` to `data_synthetic/hourly/` — Brownian-bridge synthetic hourly generated from IBKR daily caches:
+- ISF.L: 41,195 synthetic bars, IBKR daily 2003-04-29→2026-09-14 (5905 real daily bars)
+- IGLS.L: 29,911 synthetic bars, IBKR daily 2009-09-11→2026-09-14 (4294 real daily bars)
+- XSTR.L: 22,316 synthetic bars, IBKR daily 2012-03-15→2026-09-14 (3209 real daily bars)
+VIX + ISF.L HMM p_bull_smooth: real IBKR daily (unchanged).
+Pre-launch periods (pre-2009 for IGLS.L, pre-2012 for XSTR.L): parked capital earns 0%, returned intact on tier-exit — correct, no alternative ETF existed pre-launch.
+
+Supersedes: v2 (2026-09-14 07:44) — that had ETF returns only from 2024-09-16 (IBKR hourly); this extends to ETF launch dates via synthetic hourly from IBKR daily.
+
+1479/2212 admitted (0 cash, 241 kelly≤0, 0 concentration, 492 VIX gate) — identical trades.
+
+| P&L component | Amount |
+|---|---|
+| Stock P&L (realized) | +GBP170,228 |
+| Interest (SONIA on cash) | +GBP169,494 |
+| Parking P&L (ETF returns on idle cash) | **-GBP4,097** |
+| **Total P&L** | **+GBP335,625** |
+
+| Metric | Value |
+|---|---|
+| Final portfolio | GBP435,624 |
+| Max drawdown | -9.8% |
+| Sharpe | 0.73 |
+| Sortino | 1.17 |
+| Peak deployed | GBP378,551 |
+
+vs v2 (-GBP6,418): +GBP2,321 improvement from having genuine IGLS.L/ISF.L returns back to 2009/2003. Still negative: 2022-2026 gilt crash (rising-rate cycle) dominates — by 2022 the pot is GBP200-400k so a ~5% IGLS drawdown on a large parked fraction creates a big absolute loss. Parking is rate-environment-dependent; would be additive in falling-yield conditions.
+
+Implied no-parking baseline (same run, same tickers): stock+interest = GBP439,722. Parking drags final by -GBP4,097 (-0.9% of final portfolio) over 26yr.
+
+---
+
+## 2026-09-14 07:44 — optimised_new + cash parking (26yr synthetic, IBKR daily ISF.L HMM, v2)
+
+Tool: live_sim.py --cash-parking --synthetic-data-dir
+Scope: S&P500+FTSE100 universe x optimised_new, 26yr synthetic (1999-09-01 to 2026-09-01), top-k=70, GBP100k pot, source=ibkr, workers=4
+Journal: data_synthetic/journals/synth_26yr_parking_v2.csv
+Position summary: data_synthetic/journals/synth_26yr_parking_v2_summary.csv
+Chart: reports/synth_26yr_parking_v2_chart.png
+Command:
+```
+uv run python -m Strategy_Auto_Trader.markov_cli.live_sim --universe --strategies optimised_new --synthetic-data-dir data_synthetic/hourly --start-date 1999-09-01 --synthetic-end-date 2026-09-01 --pot-sizes 100000 --top-k 70 --workers 4 --cash-parking --journal data_synthetic/journals/synth_26yr_parking_v2.csv --position-summary data_synthetic/journals/synth_26yr_parking_v2_summary.csv
+```
+Data range: 1999-12-14 (first candidate) to 2026-08-18 (last entry), 2026-09-01 synthetic end
+
+Top-70 tickers: LULU, XYZ, EDV.L, IAG.L, CCH.L, REGN, META, TER, CHTR, ULTA, MU, MA, ADI, BNY, RCL, ON, SWKS, HWM, PWR, AMP, III.L, AAPL, MRVL, NXT.L, TEL, ZBRA, DCC.L, GEN, TT, DVA, MCK, CPAY, LLOY.L, SNPS, ACGL, COR, BA, ALL, CAH, HIG, CBRE, CRH, FSLR, ACN, BLND.L, AVY, STLD, KEY, MKC, SCHW, V, SHW, GS, PM, ADM, DD, PSKY, AME, MRK, APD, ABBV, CSCO, BR, BAC, FLEX, KIM, FCIT.L, BF-B, AFL, MMM
+
+Parking signals: IBKR-only (no yfinance). ISF.L HMM uses ibkr_daily cache (5905 bars, 2003-04-29 to 2026-09-11). ETF daily returns (xstr_ret, igls_ret, isf_ret) from IBKR hourly cache (4357-4520 bars each, available from 2024-09-16). VIX from IBKR daily cache. Signal coverage: **5405 days (2005-04-20 to 2026-09-11)** — but ETF return data only from 2024-09-16; pre-2024 parking earns 0% on parked capital (NaN igls_ret skips accrual) while capital is returned intact on tier-exit.
+
+Supersedes: 2026-09-14 04:48 entry (that used hourly-resampled HMM = 674 days coverage, p_bull_smooth only valid from 2024).
+
+1479/2212 admitted (0 rejected cash, 241 kelly≤0, 0 concentration cap, 492 VIX gate). Stock trading identical to no-parking run (confirmed transparent model).
+
+| P&L component | Amount |
+|---|---|
+| Stock P&L (realized) | +GBP170,228 |
+| Interest (SONIA on cash) | +GBP169,494 |
+| Parking P&L (ETF returns on idle cash) | **-GBP6,418** |
+| **Total P&L** | **+GBP333,304** |
+
+| Metric | Value |
+|---|---|
+| Final portfolio | GBP433,304 |
+| Max drawdown | -10.0% |
+| Sharpe | 0.74 |
+| Sortino | 1.18 |
+| Peak deployed | GBP378,551 |
+
+Parking P&L: -GBP6,418 vs. -GBP2,373 in previous run. The extra -GBP4,045 is from the daily HMM producing a different (more valid) p_bull_smooth for the 2024-2026 period, driving more time in the gilts tier (IGLS.L), which had negative returns in the high-rate 2024-2026 environment. Pre-2024 parking earns 0% (NaN ETF returns) not a loss — capital returned intact when tier exits. Parking is rate-environment-dependent: gilts tier is a drag during 2024-2026 rising-rate period; would be additive in a falling-yield environment.
+
+---
+
+## 2026-09-14 01:15 — optimised_new + transparent concurrent cash parking (correct model)
+
+Tool: live_sim.py --cash-parking
+Scope: S&P500+FTSE100 universe x optimised_new, top-k=70, GBP100k pot, source=ibkr
+Journal: data/journals/combined_parking_v2_20260914.csv
+Position summary: data/journals/combined_parking_v2_summary_20260914.csv
+Chart: reports/combined_parking_v2_20260914_chart.png
+Command:
+```
+uv run python -m Strategy_Auto_Trader.markov_cli.live_sim --universe --strategies optimised_new --start-date 2000-01-01 --pot-sizes 100000 --top-k 70 --workers 4 --source ibkr --journal data/journals/combined_parking_v2_20260914.csv --position-summary data/journals/combined_parking_v2_summary_20260914.csv --cash-parking
+```
+Data range: 2023-05-12 (first candidate) to 2026-08-21 (3.3 years, full available IBKR window)
+396/474 candidates admitted (78 VIX-gated) — identical to no-parking run: trading unaffected.
+
+Model: transparent — `cash`/Kelly/admission unchanged; parking earns on idle cash as purely additive P&L.
+Parking signals: ISF.L HMM p_bull_smooth + VIX + ETF daily returns (yfinance daily, fetched once).
+Rebalance: after main entries each event day; no T+2 modelled (transparent, no capital locked).
+
+| P&L component | Amount |
+|---|---|
+| Stock P&L (realized) | +GBP36,173 |
+| Interest (SONIA on cash) | +GBP9,183 |
+| Parking P&L (ETF returns on idle cash) | +GBP1,996 |
+| **Total P&L** | **+GBP47,352** |
+
+| Metric | Value |
+|---|---|
+| Final portfolio | GBP147,352 |
+| Max drawdown | -4.0% |
+| Sharpe | 1.48 |
+| Sortino | 2.62 |
+| Peak deployed | GBP96,892 |
+
+Parking adds +GBP1,996 / +2.0% over 3.3yr. Much less than the post-hoc overlay estimate (+GBP6,415) because:
+when GBP96k of GBP100k pot is deployed in stocks, only ~GBP4k is idle → very little to park.
+Gilts tier (IGLS.L) is the main contributor; equity tier (ISF.L, VIX<12) rarely fires.
+Parking contribution is real but modest — its value shows mainly in volatile/low-deployment periods.
+
+Conclusion: Concurrent parking simulation (correct model) shows +2.0% P&L uplift with zero impact on main strategy; post-hoc overlay (+6.4%) was 3x optimistic because it ignored that most cash is actively deployed.
+
+---
+
+## 2026-09-14 04:48 — optimised_new + transparent concurrent cash parking (26yr synthetic, IBKR signals)
+
+Tool: live_sim.py --cash-parking --synthetic-data-dir
+Scope: S&P500+FTSE100 universe x optimised_new, 26yr synthetic (1999-09-01 to 2026-09-01), top-k=70, GBP100k pot, source=ibkr, workers=4
+Journal: data_synthetic/journals/synth_26yr_parking.csv
+Position summary: data_synthetic/journals/synth_26yr_parking_summary.csv
+Command:
+```
+uv run python -m Strategy_Auto_Trader.markov_cli.live_sim --universe --strategies optimised_new --synthetic-data-dir data_synthetic/hourly --start-date 1999-09-01 --synthetic-end-date 2026-09-01 --pot-sizes 100000 --top-k 70 --workers 4 --journal data_synthetic/journals/synth_26yr_parking.csv --position-summary data_synthetic/journals/synth_26yr_parking_summary.csv --cash-parking
+```
+
+Parking signals: IBKR-only (no yfinance). ISF.L HMM runs on raw IBKR hourly data (~3400 bars) — NOT resampled to daily first. Signal coverage: 674 days (2024-01-15 to 2026-09-11). Before 2024-01-15: no signals → parking stays "cash" tier → no P&L. Tier breakdown: 531 days cash, 143 days gilts (equity tier never fired: pbull<0.60 or VIX>12 throughout).
+
+**Bug found and fixed (signals.py):** original code resampled IBKR hourly to daily (230 rows) before passing to HMM — below min_train_bars=500, causing p_bull_smooth=0 for all outputs. Fix: pass raw IBKR hourly data directly to consolidated_backtest, resample p_bull_smooth output to daily after.
+
+1479/2212 admitted (0 rejected cash, 241 kelly<=0, 0 concentration cap, 492 VIX gate) — same as no-parking run: stock trading unaffected (confirmed transparent model).
+
+| P&L component | Amount |
+|---|---|
+| Stock P&L (realized) | +GBP170,228 |
+| Interest (SONIA on cash) | +GBP169,494 |
+| Parking P&L (ETF returns on idle cash) | **-GBP2,373** |
+| **Total P&L** | **+GBP337,349** |
+
+| Metric | Value |
+|---|---|
+| Final portfolio | GBP437,349 |
+| Max drawdown | -10.1% |
+| Sharpe | 0.74 |
+| Sortino | 1.18 |
+| Peak deployed | GBP378,551 |
+
+Parking P&L is **negative (-GBP2,373)** — UK gilts (IGLS.L) had negative returns during the 2024-2026 signal coverage window due to the rising-rate / high-rate environment. The parking strategy switched to gilts on 143 days (pbull>=0.55, VIX<18) and lost money on each. Outside the signal window (pre-2024), parking inactive. This is consistent with real observed behaviour: 2024-2025 was a poor environment for gilts. Verdict: parking is rate-environment-dependent; in a rate-cut / falling-yield environment it would be additive; in 2024-2026 it was a drag.
+
+Comparison vs baseline 26yr synthetic (no parking, from 2026-09-12 entry): Sharpe 0.74 (same), Sortino 1.18 vs 1.19 (negligible), final GBP437,349 vs GBP439,722 (-GBP2,373 = parking drag). Main strategy unaffected as intended.
+
+---
+
+## 2026-09-14 00:30 — optimised_new + cash parking overlay (post-hoc, superceded)
+
+Tool: live_sim.py + scripts/combined_backtest_analysis.py
+Scope: S&P500+FTSE100 universe x optimised_new, top-k=70, GBP100k pot, source=ibkr
+Journal: data/journals/combined_fresh_20260914.csv
+Position summary: data/journals/combined_fresh_summary_20260914.csv
+Chart: reports/combined_fresh_20260914_chart.png
+Parking chart: reports/optimised_new_combined_parking_chart.png
+Commands:
+```
+uv run python -m Strategy_Auto_Trader.markov_cli.live_sim --universe --strategies optimised_new --start-date 2000-01-01 --pot-sizes 100000 --top-k 70 --workers 4 --source ibkr --journal data/journals/combined_fresh_20260914.csv --position-summary data/journals/combined_fresh_summary_20260914.csv
+uv run python scripts/combined_backtest_analysis.py --position-summary data/journals/combined_fresh_summary_20260914.csv --pot-size 100000
+```
+Data range: 2023-05-12 (first candidate) to 2026-09-11 (3.3 years, full available IBKR window)
+396/474 candidates admitted (78 rejected VIX gate). Peak deployed GBP96,892. VIX gate threshold: 20.
+
+| Variant | Sharpe | Sortino | TotRet | AnnRet | MaxDD | P&L |
+|---|---|---|---|---|---|---|
+| Main strategy only | 1.746 | 2.542 | +45.6% | +11.9% | -4.5% | +GBP45,541 |
+| Main + cash parking | 1.960 | 3.013 | +52.1% | +13.4% | -3.4% | +GBP51,954 |
+
+Cash parking contribution: +GBP6,415 (+6.4% of initial pot), Sharpe +0.21, DD reduced 1.1pp.
+Cash parking module: liquid_floor=10%, gilts tier (IGLS.L, VIX<18 + pbull>=0.55) dominant, equity tier (ISF.L, VIX<12) rarely fires.
+
+Conclusion: Cash parking on idle cash adds ~6% return over 3.3yr and materially improves risk-adjusted metrics; main strategy alone is strong (Sharpe 1.75, -4.5% max DD on 3.3yr IBKR data).
+
+---
+
+## 2026-09-13 22:00 — optimised_new parameter sweep — veto, weights, thresholds (18 variants)
+
+Tool: live_sim.py (3 batch runs)
+Scope: S&P500+FTSE100 universe × 18 optimised_new variants, top-70, £100k pot, source=ibkr
+Commands:
+```
+uv run python -m Strategy_Auto_Trader.markov_cli.live_sim --universe --top-k 70 --strategies on_bt50 on_bt55 on_bt65 on_bt70 on_sma2 on_sma25 --pot-sizes 100000 --workers 4 --start-date 2000-01-01 --end-date 2026-09-13 --source ibkr --journal data/journals/param_sweep_a2_20260913.csv --position-summary data/journals/param_sweep_a2_summary_20260913.csv
+uv run python -m Strategy_Auto_Trader.markov_cli.live_sim --universe --top-k 70 --strategies on_rsi05 on_rsi15 on_hmm1 on_hmm15 on_hmm25 on_hmm3 --pot-sizes 100000 --workers 4 --start-date 2000-01-01 --end-date 2026-09-13 --source ibkr --journal data/journals/param_sweep_b2_20260913.csv --position-summary data/journals/param_sweep_b2_summary_20260913.csv
+uv run python -m Strategy_Auto_Trader.markov_cli.live_sim --universe --top-k 70 --strategies on_no_regime_veto on_rsi_veto_off on_rsi_veto60 on_rsi_veto65 on_rsi_veto75 on_rsi_veto80 --pot-sizes 100000 --workers 4 --start-date 2000-01-01 --end-date 2026-09-13 --source ibkr --journal data/journals/param_sweep_c2_20260913.csv --position-summary data/journals/param_sweep_c2_summary_20260913.csv
+```
+Data range: 2023-05-12 (first candidate) → 2026-09-13 (≈3.3 years, full available IBKR window)
+Baseline (optimised_new, same session run): 396/474 admitted, Sharpe 1.45, Sortino 2.54, P&L +£36,173, DD −4.5%
+
+Strategy variant classes in `strategy/optimised_new_param_tests.py`, registered in `strategy/base/registry.py`.
+
+Note: an earlier set of 3 batches (same variants) ran WITHOUT `--top-k 70` by mistake and produced incomparable results (1373–2139 trades vs the correct ~396). Those results are discarded. Only the `_a2/_b2/_c2` runs here are valid.
+
+**Batch A — buy/sell threshold pairs + SMA200 weight:**
+Chart: reports/param_sweep_a2_20260913_chart.png
+
+| Strategy | Change | Admitted | Sharpe | Sortino | P&L | DD | vs baseline |
+|---|---|---|---|---|---|---|---|
+| baseline (optimised_new) | — | 396/474 | 1.45 | 2.54 | +£36,173 | −4.5% | — |
+| on_bt50 | sell=−5.0 | 320/371 | 1.25 | 2.10 | +£22,926 | −5.3% | −0.20 Sharpe |
+| on_bt55 | sell=−5.5 | 396/474 | 1.45 | 2.54 | +£36,173 | −4.5% | **identical** |
+| on_bt65 | sell=−6.5 | 474/584 | 1.37 | 2.39 | +£34,545 | −4.6% | −0.08 Sharpe |
+| on_bt70 | sell=−7.0 | 474/584 | 1.37 | 2.39 | +£34,545 | −4.6% | identical to bt65 |
+| on_sma2 | sma200_w=2.0 | 424/509 | 0.89 | 1.40 | +£16,254 | −5.3% | **−0.56 Sharpe** |
+| on_sma25 | sma200_w=2.5 | 424/509 | 0.89 | 1.40 | +£16,254 | −5.3% | identical to sma2 |
+
+Observations:
+- sell=−5.5 and −6.5/−7.0 both inert vs −6.0 baseline: composite SELL in range [−5.5, −7.0] rarely fires before the 10% hard stop — exit mechanism is dominated by the hard stop.
+- sell=−5.0 (bt50) DOES fire, cutting winners short: 76 fewer trades admitted at lower quality.
+- sma200_w reduction (3.0→2.0 or 2.5) catastrophic: SMA200 is the dominant entry discriminator and load-bearing.
+
+**Batch B — RSI weight + HMM weight:**
+Chart: reports/param_sweep_b2_20260913_chart.png
+
+| Strategy | Change | Admitted | Sharpe | Sortino | P&L | DD | vs baseline |
+|---|---|---|---|---|---|---|---|
+| baseline | — | 396/474 | 1.45 | 2.54 | +£36,173 | −4.5% | — |
+| on_rsi05 | rsi_w=0.5 | 428/512 | 0.84 | 1.32 | +£14,947 | −5.8% | **−0.61 Sharpe** |
+| on_rsi15 | rsi_w=1.5 | 396/474 | 1.45 | 2.54 | +£36,173 | −4.5% | **identical** |
+| on_hmm1 | hmm_w=1.0 | 429/510 | 0.87 | 1.37 | +£15,592 | −5.2% | −0.58 Sharpe |
+| on_hmm15 | hmm_w=1.5 | 429/510 | 0.87 | 1.37 | +£15,592 | −5.2% | identical to hmm1 |
+| on_hmm25 | hmm_w=2.5 | 396/474 | 1.45 | 2.54 | +£36,173 | −4.5% | **identical** |
+| on_hmm3 | hmm_w=3.0 | 407/481 | 1.32 | 2.24 | +£29,262 | −5.2% | −0.13 Sharpe |
+
+Observations:
+- rsi_w=1.5 and hmm_w=2.5 both inert vs baseline: ±0.5 weight steps don't change which trades pass the combined mes=7.0 + VIX gate.
+- hmm_w=1.0 and 1.5 produce identical results (halving HMM weight by 0.5 not enough to change selection); both badly hurt.
+- rsi_w=2.0 (on_rsi2, tested earlier same session): −0.06 Sharpe — the per-ticker improvement did not transfer.
+- HMM sweet spot confirmed: 2.0–2.5. Below 1.5 collapses quality; 3.0 mildly worse.
+
+**Batch C — regime_signal veto + RSI overbought veto threshold:**
+Chart: reports/param_sweep_c2_20260913_chart.png
+
+| Strategy | Change | Admitted | Sharpe | Sortino | P&L | DD | vs baseline |
+|---|---|---|---|---|---|---|---|
+| baseline | — | 396/474 | 1.45 | 2.54 | +£36,173 | −4.5% | — |
+| on_no_regime_veto | regime veto off | 388/467 | **1.51** | **2.66** | **+£38,299** | −4.5% | **+0.06 Sharpe, +£2,126** |
+| on_rsi_veto_off | RSI veto off | 449/543 | 1.35 | 2.36 | +£32,965 | −5.0% | −0.10 Sharpe |
+| on_rsi_veto60 | RSI veto=60 | 349/422 | 1.36 | 2.52 | +£30,014 | **−3.6%** | −0.09 Sharpe, −0.9pp DD |
+| on_rsi_veto65 | RSI veto=65 | 390/472 | 1.40 | 2.58 | +£32,052 | **−3.9%** | −0.05 Sharpe, −0.6pp DD |
+| on_rsi_veto75 | RSI veto=75 | 427/519 | 1.33 | 2.32 | +£31,312 | −4.5% | −0.12 Sharpe |
+| on_rsi_veto80 | RSI veto=80 | 444/536 | 1.31 | 2.30 | +£31,108 | −5.1% | −0.14 Sharpe |
+
+Observations:
+- **on_no_regime_veto is the only variant across all 18 that beats baseline**: +0.06 Sharpe, +£2,126 P&L, same drawdown, 8 fewer trades. Mechanism: `regime_signal <= 0` double-counts HMM bearishness already captured in the composite score via `hmm_vote`; with `min_entry_score=7.0` as binding gate, the separate regime veto blocks some genuine high-score entries.
+- RSI veto tightening (60/65): notable drawdown reduction (−3.6%/−3.9% vs −4.5%) at cost of lower Sharpe and P&L. Different risk profile, not a clear improvement.
+- RSI veto loosening (75/80) or removal: unambiguously worse — RSI>70 entries lose.
+- Decision on adopting on_no_regime_veto: **deferred** — improvement is real (+0.06 Sharpe over 3.3yr) but margin is modest; not adopted this session.
+
+**Cross-sweep summary:**
+- 16 of 18 variants worse than or equal to baseline.
+- 1 inert (on_bt55, on_rsi15, on_hmm25 all = baseline exactly — these changes don't affect trade selection).
+- 1 better (on_no_regime_veto, deferred).
+- SMA200_w=3.0 and HMM_w=2.0 are the most sensitive parameters (large degradation when reduced). RSI_w and sell_threshold are insensitive in the tested ranges.
+
+---
+
 ## 2026-09-13 14:06 — Full-universe real-data validation post-synthetic sigma fix
 
 Tool: live_sim.py
@@ -259,7 +533,44 @@ Annual breakdown (port return vs index price returns, no dividends):
 Sharpe (ann, rfr=4%): 0.41 · Sortino (ann, rfr=4%): 0.47
 Note: FTSE £PnL and SP $PnL are realized P&L in trade currency for trades closing that year (mixed GBp/USD). Index returns are price-only (^GSPC, ^FTSE), no dividends.
 
-Conclusion: Strategy survives all three major crashes (2000–02, 2008, 2020) with positive returns while indices fell 10–38%; cost is lagging recoveries (2003, 2009) when VIX stays elevated. Sharpe 0.41 is modest but crash resilience is the primary thesis validated. 2023 miss (−5.8% vs S&P +24.2%) is the clearest weakness. S&P dominates FTSE contribution throughout; top-70 filter skews US-heavy.
+Interest vs trade P&L split (2026-09-13 analysis):
+
+| Year | Port% | Trade P&L | Interest | Int% of gain |
+|---|---|---|---|---|
+| 1999 | +0.2% | +0 | +204 | 100% |
+| 2000 | +7.1% | +2,535 | +4,545 | 64% |
+| 2001 | +5.1% | +0 | +5,461 | **100%** |
+| 2002 | +5.0% | +2 | +5,664 | **100%** |
+| 2003 | +4.7% | +47 | +5,980 | **100%** |
+| 2004 | +3.6% | +3,451 | +3,670 | 83% |
+| 2005 | +12.9% | +12,124 | +3,557 | 21% |
+| 2006 | +9.7% | +11,429 | +3,237 | 23% |
+| 2007 | +6.2% | +2,557 | +4,405 | 45% |
+| 2008 | +5.4% | +897 | +8,209 | **90%** |
+| 2009 | +4.9% | +0 | +8,751 | **100%** |
+| 2010 | +10.6% | +16,444 | +8,951 | 45% |
+| 2011 | +7.8% | +4,328 | +6,337 | 39% |
+| 2012 | +3.6% | +6,145 | +5,800 | 73% |
+| 2013 | +13.5% | +26,616 | +2,925 | 9% |
+| 2014 | +11.8% | +23,492 | +2,525 | 8% |
+| 2015 | −5.0% | −18,101 | +4,393 | −30% |
+| 2016 | −0.5% | −1,421 | +5,611 | −377% |
+| 2017 | +21.7% | +65,086 | +3,119 | 5% |
+| 2018 | −2.0% | −25,343 | +6,230 | −90% |
+| 2019 | +22.9% | +85,988 | +4,840 | 6% |
+| 2020 | +7.0% | **−4,286** | +17,311 | 61% |
+| 2021 | +6.7% | +4,955 | +19,396 | 67% |
+| 2022 | +1.3% | **−9,429** | +19,846 | 319% |
+| 2023 | −5.8% | **−30,129** | +10,763 | −40% |
+| 2024 | +8.8% | +21,944 | +9,174 | 24% |
+| 2025 | +9.6% | +37,449 | +13,148 | 28% |
+| 2026 | +10.2% | +38,783 | +11,017 | 20% |
+
+**Key finding:** "Crash resilience" is VIX gate + interest income, not trading alpha. Crash years (2001, 2003, 2009) are 100% interest — gate parks capital in cash; 2008 is 90% interest on just 8 trades. Trade P&L is negative in 2015, 2018, 2020, 2022, 2023 — interest masked real trading losses in all five years. Without interest the strategy would be down in 6+ years, not 3.
+
+**Caveat on post-2020 interest:** £17–20k/yr interest on a ~£200–450k portfolio implies ~5% simulated cash rate reflecting the 2022–25 rate cycle. In a low-rate environment (e.g., 2011–2021 real rates) that income collapses — 2020–2022 "positive" years would flip negative on trading alone.
+
+Conclusion: Strategy survives all three major crashes (2000–02, 2008, 2020) with positive returns while indices fell 10–38%; cost is lagging recoveries (2003, 2009) when VIX stays elevated. Sharpe 0.41 is modest but crash resilience is the primary thesis validated. 2023 miss (−5.8% vs S&P +24.2%) is the clearest weakness. S&P dominates FTSE contribution throughout; top-70 filter skews US-heavy. **Revised thesis: positive crash-year returns are driven by interest on parked cash, not active trading; genuine trading alpha only materialises in trending years (2013, 2014, 2017, 2019, 2025, 2026).**
 
 ---
 

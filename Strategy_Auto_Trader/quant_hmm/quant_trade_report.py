@@ -33,6 +33,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 
 def _get_company_info(ticker: str) -> tuple[str, str]:
+    # DEPRECATED: yfinance company info — no IBKR replacement; remove or replace with IBKR fundamentals
     import yfinance as yf
     try:
         info = yf.Ticker(ticker).info
@@ -97,7 +98,10 @@ def _fetch_daily_indicators_table(ticker: str, period: str = "2y") -> pd.DataFra
     that add useful context to each trade entry from the hourly engine.
 
     Returns a DataFrame indexed by normalised date (tz-naive), or None on failure.
+
+    DEPRECATED: yfinance daily fetch — replace with fetch_daily_ibkr() when this report is updated.
     """
+    # DEPRECATED: yfinance daily fetch — replace with fetch_daily_ibkr()
     import yfinance as yf
     from ..core.momentum import compute_rsi, compute_sma, compute_macd, compute_bollinger, compute_atr
 

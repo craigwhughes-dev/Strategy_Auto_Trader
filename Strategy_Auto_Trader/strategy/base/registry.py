@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 
+from ..active import ActiveEntry, ActiveExit
 from ..breakout_momentum import BreakoutMomentumEntry, BreakoutMomentumExit
 from ..choppy_vol import ChoppyVolEntry, ChoppyVolExit
 from ..conservative import ConservativeEntry, ConservativeExit
@@ -22,11 +23,25 @@ from ..default import DefaultEntry, DefaultExit
 from ..mean_reversion import MeanReversionEntry, MeanReversionExit
 from ..optimised import OptimisedEntry, OptimisedExit
 from ..optimised_new import OptimisedNewEntry, OptimisedNewExit
+from ..optimised_new_weight_tests import OnRsi2Entry, OnSma4Entry, OnRsi2Sma4Entry
+from ..optimised_new_param_tests import (
+    OnBt50Entry, OnBt55Entry, OnBt65Entry, OnBt70Entry,
+    OnSma2Entry, OnSma25Entry,
+    OnRsi05Entry, OnRsi15Entry,
+    OnHmm1Entry, OnHmm15Entry, OnHmm25Entry, OnHmm3Entry,
+    OnNoRegimeVetoEntry,
+    OnRsiVetoOffEntry, OnRsiVeto60Entry, OnRsiVeto65Entry,
+    OnRsiVeto75Entry, OnRsiVeto80Entry,
+)
 from ..trend_follow import TrendEntry, TrendExit
 
 logger = logging.getLogger(__name__)
 
 STRATEGY_REGISTRY: dict[str, dict[str, type]] = {
+    "active": {
+        "entry": ActiveEntry,
+        "exit":  ActiveExit,
+    },
     "breakout_momentum": {
         "entry": BreakoutMomentumEntry,
         "exit":  BreakoutMomentumExit,
@@ -55,10 +70,45 @@ STRATEGY_REGISTRY: dict[str, dict[str, type]] = {
         "entry": OptimisedNewEntry,
         "exit":  OptimisedNewExit,
     },
+    "on_rsi2": {
+        "entry": OnRsi2Entry,
+        "exit":  OptimisedNewExit,
+    },
+    "on_sma4": {
+        "entry": OnSma4Entry,
+        "exit":  OptimisedNewExit,
+    },
+    "on_rsi2_sma4": {
+        "entry": OnRsi2Sma4Entry,
+        "exit":  OptimisedNewExit,
+    },
     "trend": {
         "entry": TrendEntry,
         "exit":  TrendExit,
     },
+    # ── buy_threshold / sell_threshold pair variants ──────────────────────────
+    "on_bt50": {"entry": OnBt50Entry, "exit": OptimisedNewExit},
+    "on_bt55": {"entry": OnBt55Entry, "exit": OptimisedNewExit},
+    "on_bt65": {"entry": OnBt65Entry, "exit": OptimisedNewExit},
+    "on_bt70": {"entry": OnBt70Entry, "exit": OptimisedNewExit},
+    # ── SMA200 weight variants ────────────────────────────────────────────────
+    "on_sma2":  {"entry": OnSma2Entry,  "exit": OptimisedNewExit},
+    "on_sma25": {"entry": OnSma25Entry, "exit": OptimisedNewExit},
+    # ── RSI weight variants ───────────────────────────────────────────────────
+    "on_rsi05": {"entry": OnRsi05Entry, "exit": OptimisedNewExit},
+    "on_rsi15": {"entry": OnRsi15Entry, "exit": OptimisedNewExit},
+    # ── HMM weight variants ───────────────────────────────────────────────────
+    "on_hmm1":  {"entry": OnHmm1Entry,  "exit": OptimisedNewExit},
+    "on_hmm15": {"entry": OnHmm15Entry, "exit": OptimisedNewExit},
+    "on_hmm25": {"entry": OnHmm25Entry, "exit": OptimisedNewExit},
+    "on_hmm3":  {"entry": OnHmm3Entry,  "exit": OptimisedNewExit},
+    # ── Veto variants ─────────────────────────────────────────────────────────
+    "on_no_regime_veto": {"entry": OnNoRegimeVetoEntry, "exit": OptimisedNewExit},
+    "on_rsi_veto_off":   {"entry": OnRsiVetoOffEntry,   "exit": OptimisedNewExit},
+    "on_rsi_veto60":     {"entry": OnRsiVeto60Entry,    "exit": OptimisedNewExit},
+    "on_rsi_veto65":     {"entry": OnRsiVeto65Entry,    "exit": OptimisedNewExit},
+    "on_rsi_veto75":     {"entry": OnRsiVeto75Entry,    "exit": OptimisedNewExit},
+    "on_rsi_veto80":     {"entry": OnRsiVeto80Entry,    "exit": OptimisedNewExit},
 }
 
 

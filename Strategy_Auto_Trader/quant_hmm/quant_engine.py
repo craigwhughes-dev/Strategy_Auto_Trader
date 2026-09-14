@@ -44,6 +44,7 @@ def fetch_hourly(ticker: str, period: str = "730d", source: str = "ibkr", client
         if df is not None and not df.empty:
             return df
 
+    # DEPRECATED: yfinance fallback — use source="ibkr" so this branch is never reached
     import yfinance as yf
     from ..core.net_retry import call_with_timeout_retry
 
@@ -59,7 +60,11 @@ def fetch_hourly(ticker: str, period: str = "730d", source: str = "ibkr", client
 
 
 def fetch_daily(ticker: str) -> pd.DataFrame | None:
-    """Fetch daily OHLCV data from yfinance (max history, ~20–30 years)."""
+    """Fetch daily OHLCV data from yfinance (max history, ~20–30 years).
+
+    DEPRECATED: use fetch_daily_ibkr() instead.
+    """
+    # DEPRECATED: use fetch_daily_ibkr(ticker) instead
     import yfinance as yf
     from ..core.net_retry import call_with_timeout_retry
 
@@ -72,6 +77,18 @@ def fetch_daily(ticker: str) -> pd.DataFrame | None:
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     return df
+
+
+def fetch_daily_ibkr(ticker: str, period: str = "max",
+                     historical_only: bool = False) -> pd.DataFrame | None:
+    """Fetch daily OHLCV for an equity/ETF via IBKR incremental cache.
+
+    Wraps IBKRDataClient.fetch_daily — caches to data/cache/ibkr_daily/.
+    historical_only=True reads from the on-disk cache without connecting to IBKR,
+    same semantics as fetch_hourly's historical_only parameter."""
+    from ..broker.ibkr_data import IBKRDataClient
+    return IBKRDataClient().fetch_daily(ticker, period=period,
+                                        historical_only=historical_only)
 
 
 def fetch_vix_ibkr(client_id: int = 2, historical_only: bool = False) -> pd.DataFrame | None:

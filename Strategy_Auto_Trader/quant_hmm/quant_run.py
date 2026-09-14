@@ -180,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     logger.info(f"  {len(df)} hourly bars | {df.index[0]} -> {df.index[-1]}")
 
     # Company info
+    # DEPRECATED: yfinance company info — no IBKR replacement; remove or replace with IBKR fundamentals
     try:
         import yfinance as yf
         info = yf.Ticker(args.ticker).info
