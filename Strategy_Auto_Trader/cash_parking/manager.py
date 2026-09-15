@@ -1,7 +1,7 @@
 """CashParkingManager — idle-cash tier rebalancing for the live daemon.
 
-Called once per cycle after execute_signals(), when both pbull_smooth and VIX
-are available. Returns 0-2 OrderRequests; the caller places them.
+Called once per cycle after execute_signals(), when VIX is available.
+Returns 0-2 OrderRequests; the caller places them.
 
 State is persisted to state/cash_parking_state.json so T+2 settlement blocks
 and current holding survive daemon restarts.
@@ -44,7 +44,7 @@ class ParkingState:
 
 
 class CashParkingManager:
-    """Manages idle-cash allocation across XSTR/IGLS/ISXF/ISF based on regime signals.
+    """Manages idle-cash allocation across XSTR/IGLS/ISXF based on regime signals.
 
     One instance per daemon run. Persists state to disk so T+2 settlement gates
     survive restarts.
@@ -69,7 +69,6 @@ class CashParkingManager:
         self,
         broker: object,
         available_cash: float,
-        pbull_smooth: float,
         vix_level: float,
         current_positions: dict,
         today: date,
@@ -79,17 +78,11 @@ class CashParkingManager:
         Gates (in order):
         1. Liquid floor — only the investable fraction can be parked.
         2. Min amount — skip if investable cash < MIN_PARKING_AMOUNT.
-        3. Dedup — if equity tier and ISF.L already in main positions, degrade to gilts.
-        4. Same ticker — no change if target equals current holding.
-        5. Rebalance threshold — only switch if allocation delta > threshold * pot.
-        6. T+2 block — can sell an existing position, but new buy deferred until settled.
+        3. Same ticker — no change if target equals current holding.
+        4. Rebalance threshold — only switch if allocation delta > threshold * pot.
+        5. T+2 block — can sell an existing position, but new buy deferred until settled.
         """
-        desired_tier = tier_for(pbull_smooth, vix_level)
-
-        # Dedup: ISF.L held by main strategy → downgrade equity to hy_bonds instead
-        if desired_tier == "equity" and "ISF.L" in current_positions:
-            desired_tier = "hy_bonds"
-
+        desired_tier = tier_for(vix_level)
         desired_ticker = PARKING_TICKERS[desired_tier]
 
         parkable = available_cash * (1 - self._liquid_floor_pct)

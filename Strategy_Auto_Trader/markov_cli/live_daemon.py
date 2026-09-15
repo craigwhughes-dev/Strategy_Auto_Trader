@@ -1227,7 +1227,6 @@ def process_cycle(
                     orders = cash_parking_mgr.rebalance(
                         broker=broker,
                         available_cash=portfolio.available_cash,
-                        pbull_smooth=pbull,
                         vix_level=vix_current,
                         current_positions=portfolio.positions,
                         today=today,

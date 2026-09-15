@@ -1,10 +1,9 @@
 """Cash parking tier classification.
 
-4-tier model: cash (XSTR.L) → gilts (IGLS.L) → hy_bonds (ISXF.L) → equity (ISF.L).
+3-tier model: cash (XSTR.L) → gilts (IGLS.L) → hy_bonds (ISXF.L).
 ISXF.L = iShares $ HY Corp Bond UCITS ETF GBP Hedged — USD HY credit risk, GBP-hedged.
 
-Tuned via backtest.py sweep on ISXF.L 2026-09-14 (16yr synthetic data, 9,216 combos).
-Optimal: Sharpe 0.289, Sortino 0.316, +24.53% return, -11.70% max DD.
+Tier decisions driven by VIX levels only (market volatility regime).
 
 LIQUID_FLOOR_PCT = 0.0 (no cash buffer needed; parking doesn't block main entries).
 """
@@ -21,16 +20,13 @@ MIN_PARKING_AMOUNT: float = 500.0
 REBALANCE_THRESHOLD_PCT: float = 0.05
 
 
-def tier_for(pbull_smooth: float, vix: float) -> str:
-    """Map (pbull_smooth, vix) to parking tier name.
+def tier_for(vix: float) -> str:
+    """Map VIX level to parking tier name.
 
-    Returns one of: "equity", "hy_bonds", "gilts", "cash".
-    Boundaries optimised via 16yr ISXF.L sweep (2026-09-14).
+    Returns one of: "hy_bonds", "gilts", "cash".
     """
-    if pbull_smooth >= 0.65 and vix < 12.0:   # strong bull, very low vol → equities
-        return "equity"
-    if pbull_smooth >= 0.55 and vix < 18.0:   # moderate bull → HY bonds (GBP-hedged)
+    if vix < 12.0:          # very low vol → HY bonds
         return "hy_bonds"
-    if pbull_smooth >= 0.45 and vix < 22.0:   # mild bull → gilts
+    if vix < 18.0:          # moderate vol → gilts
         return "gilts"
-    return "cash"                               # capital preservation
+    return "cash"           # high vol → capital preservation

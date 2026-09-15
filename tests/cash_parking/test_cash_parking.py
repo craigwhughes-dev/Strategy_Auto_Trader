@@ -13,35 +13,35 @@ import pytest
 # ---------------------------------------------------------------------------
 
 class TestTierFor:
-    def test_tier_for_equity(self):
+    def test_tier_for_hy_bonds(self):
         from Strategy_Auto_Trader.cash_parking.strategy import tier_for
-        # pbull=0.75, vix=10 → equity (pbull>=0.60, vix<12)
-        assert tier_for(0.75, 10.0) == "equity"
+        # vix=10 < 12 → hy_bonds
+        assert tier_for(10.0) == "hy_bonds"
 
     def test_tier_for_gilts(self):
         from Strategy_Auto_Trader.cash_parking.strategy import tier_for
-        # pbull=0.60, vix=15 → gilts (pbull>=0.55, vix<18)
-        assert tier_for(0.60, 15.0) == "gilts"
+        # vix=15 (12 <= vix < 18) → gilts
+        assert tier_for(15.0) == "gilts"
 
     def test_tier_for_cash_high_vix(self):
         from Strategy_Auto_Trader.cash_parking.strategy import tier_for
-        # VIX 20 exceeds gilts_vix_max (18) even with strong pbull → cash
-        assert tier_for(0.80, 20.0) == "cash"
+        # vix >= 18 → cash
+        assert tier_for(20.0) == "cash"
 
-    def test_tier_for_cash_low_pbull(self):
+    def test_hy_bonds_boundary(self):
         from Strategy_Auto_Trader.cash_parking.strategy import tier_for
-        # pbull 0.40 is below gilts_pbull_min (0.55) → cash
-        assert tier_for(0.40, 14.0) == "cash"
+        # vix < 12 → hy_bonds
+        assert tier_for(11.9) == "hy_bonds"
 
-    def test_equity_boundary_exact(self):
+    def test_gilts_boundary(self):
         from Strategy_Auto_Trader.cash_parking.strategy import tier_for
-        # pbull == 0.60 and vix < 12 → equity (boundary inclusive)
-        assert tier_for(0.60, 11.9) == "equity"
+        # vix < 18 → gilts (but not < 12)
+        assert tier_for(17.9) == "gilts"
 
-    def test_gilts_boundary_exact(self):
+    def test_cash_boundary(self):
         from Strategy_Auto_Trader.cash_parking.strategy import tier_for
-        # pbull == 0.55, vix < 18 → gilts (boundary inclusive)
-        assert tier_for(0.55, 17.9) == "gilts"
+        # vix >= 18 → cash
+        assert tier_for(18.0) == "cash"
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +77,6 @@ class TestLiquidFloor:
         orders = mgr.rebalance(
             broker=broker,
             available_cash=5_000.0,
-            pbull_smooth=0.60,   # gilts tier (pbull>=0.55, vix<18)
             vix_level=15.0,
             current_positions={},
             today=date.today(),
@@ -99,31 +98,11 @@ class TestMinParking:
         orders = mgr.rebalance(
             broker=broker,
             available_cash=tiny_cash,
-            pbull_smooth=0.75,
             vix_level=10.0,
             current_positions={},
             today=date.today(),
         )
         assert orders == []
-
-
-class TestDedup:
-    def test_dedup_isf(self):
-        """ISF.L already in main positions → falls back to gilts tier (IGLS.L)."""
-        mgr = _make_manager(initial_cash=10_000.0)
-        broker = _make_broker(price=10_000.0)  # £100/share
-        # pbull=0.75, vix=12 → equity desired, but ISF.L held by main strategy
-        orders = mgr.rebalance(
-            broker=broker,
-            available_cash=10_000.0,
-            pbull_smooth=0.75,
-            vix_level=10.0,  # equity tier (pbull>=0.60, vix<12)
-            current_positions={"ISF.L": {"quantity": 5}},
-            today=date.today(),
-        )
-        buy_orders = [o for o in orders if o.action == "BUY"]
-        assert len(buy_orders) == 1
-        assert buy_orders[0].ticker == "IGLS.L"
 
 
 class TestT2Settlement:
@@ -144,7 +123,6 @@ class TestT2Settlement:
         orders = mgr.rebalance(
             broker=broker,
             available_cash=10_000.0,
-            pbull_smooth=0.75,
             vix_level=10.0,
             current_positions={},
             today=today,
@@ -162,7 +140,6 @@ class TestT2Settlement:
         orders = mgr.rebalance(
             broker=broker,
             available_cash=10_000.0,
-            pbull_smooth=0.75,
             vix_level=10.0,
             current_positions={},
             today=date.today(),
@@ -175,15 +152,14 @@ class TestRebalanceThreshold:
     def test_same_ticker_no_order(self):
         """Already in the desired tier/ticker → no orders."""
         mgr = _make_manager(initial_cash=10_000.0, liquid_floor_pct=0.20)
-        mgr._state.tier = "equity"
-        mgr._state.ticker = "ISF.L"
+        mgr._state.tier = "hy_bonds"
+        mgr._state.ticker = "ISXF.L"
         mgr._state.quantity = 80
 
         broker = _make_broker(price=10_000.0)
         orders = mgr.rebalance(
             broker=broker,
             available_cash=10_000.0,
-            pbull_smooth=0.75,
             vix_level=10.0,
             current_positions={},
             today=date.today(),
@@ -194,9 +170,9 @@ class TestRebalanceThreshold:
         """Switching would shift < 5% of pot → no order."""
         initial_cash = 100_000.0
         mgr = _make_manager(initial_cash=initial_cash, liquid_floor_pct=0.20)
-        # Set current position to ISF.L with 790 shares @ £101 ≈ £79,790
-        mgr._state.tier = "equity"
-        mgr._state.ticker = "ISF.L"
+        # Set current position to ISXF.L with 790 shares @ £101 ≈ £79,790
+        mgr._state.tier = "hy_bonds"
+        mgr._state.ticker = "ISXF.L"
         mgr._state.quantity = 790
 
         # parkable = 100000 * 0.80 = 80000
@@ -206,7 +182,6 @@ class TestRebalanceThreshold:
         orders = mgr.rebalance(
             broker=broker,
             available_cash=100_000.0,
-            pbull_smooth=0.75,
             vix_level=10.0,
             current_positions={},
             today=date.today(),
@@ -216,7 +191,7 @@ class TestRebalanceThreshold:
 
 class TestTierChange:
     def test_sell_then_buy_on_tier_change(self):
-        """Currently in gilts, regime shifts to equity → SELL IGLS.L + BUY ISF.L."""
+        """Currently in gilts, regime shifts to hy_bonds → SELL IGLS.L + BUY ISXF.L."""
         initial_cash = 50_000.0
         mgr = _make_manager(initial_cash=initial_cash, liquid_floor_pct=0.20)
         # Force current state to gilts with a large enough position to exceed threshold
@@ -224,11 +199,10 @@ class TestTierChange:
         mgr._state.ticker = "IGLS.L"
         mgr._state.quantity = 50  # £50 × 50 = £2500 current value; parkable = 40000; delta >> threshold
 
-        broker = _make_broker(price=500.0)  # 500p = £5/share for IGLS.L and ISF.L
+        broker = _make_broker(price=500.0)  # 500p = £5/share for IGLS.L and ISXF.L
         orders = mgr.rebalance(
             broker=broker,
             available_cash=initial_cash,
-            pbull_smooth=0.75,
             vix_level=10.0,
             current_positions={},
             today=date.today(),
@@ -238,7 +212,7 @@ class TestTierChange:
         assert "SELL" in actions
         assert "BUY" in actions
         assert "IGLS.L" in tickers
-        assert "ISF.L" in tickers
+        assert "ISXF.L" in tickers
 
 
 class TestAppStatusDict:
@@ -262,12 +236,11 @@ class TestAppStatusDict:
         mgr.rebalance(
             broker=broker,
             available_cash=10_000.0,
-            pbull_smooth=0.75,
             vix_level=10.0,
             current_positions={},
             today=date.today(),
         )
         status = mgr.app_status_dict()
-        assert status["tier"] == "equity"
-        assert status["ticker"] == "ISF.L"
+        assert status["tier"] == "hy_bonds"
+        assert status["ticker"] == "ISXF.L"
         assert status["qty"] > 0

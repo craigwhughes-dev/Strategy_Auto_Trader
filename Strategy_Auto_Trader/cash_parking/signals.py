@@ -1,18 +1,16 @@
 """Fetch daily parking signals for the cash parking module.
 
 Returns a tz-naive daily DataFrame indexed by date with columns:
-  p_bull_smooth, vix, xstr_ret, igls_ret, isxf_ret, isf_ret
+  vix, xstr_ret, igls_ret, isxf_ret
 
 All data sourced from IBKR (no yfinance):
-  - ETF daily returns (XSTR.L, IGLS.L, ISXF.L, ISF.L): IBKR hourly cache resampled to daily,
+  - ETF daily returns (XSTR.L, IGLS.L, ISXF.L): IBKR hourly cache resampled to daily,
     OR synthetic hourly from data_synthetic/hourly/ when synthetic_data_dir is supplied
     (synthetic hourly generated via Brownian bridge on IBKR daily closes — keeps
     synthetic and real caches completely separate).
-  - VIX: IBKR daily cache via fetch_vix_ibkr (always real)
-  - ISF.L HMM p_bull_smooth: IBKR daily cache (data/cache/ibkr_daily/ISF.L.csv)
-    — must be bootstrapped via `fetch_daily_ibkr("ISF.L")` before first use;
-    the ibkr_daily cache covers max available history (~5–20yr depending on IBKR
-    data subscription), well above HMMRegimeModel's min_train_bars=500.
+  - VIX: IBKR daily cache via fetch_vix_ibkr (always real).
+
+Tier decisions based on VIX level only (no market regime model needed).
 
 Used by both the standalone backtest overlay (scripts/combined_backtest_analysis.py)
 and the live_sim concurrent parking simulation (--cash-parking flag).
@@ -59,34 +57,28 @@ def fetch_parking_signals(
     end: str,
     synthetic_data_dir: str | Path | None = None,
 ) -> pd.DataFrame:
-    """Fetch daily VIX, ETF returns, and ISF.L HMM p_bull_smooth via IBKR cache.
+    """Fetch daily VIX and ETF returns via IBKR cache.
 
     synthetic_data_dir: when set (synthetic backtest mode), ETF daily returns are
     sourced from Brownian-bridge synthetic hourly CSVs in that directory instead of
-    the IBKR hourly cache. VIX and ISF.L HMM p_bull_smooth always use real IBKR
-    data. Pass live_sim's --synthetic-data-dir value here to keep synthetic and real
+    the IBKR hourly cache. VIX always uses real IBKR data.
+    Pass live_sim's --synthetic-data-dir value here to keep synthetic and real
     data completely separate.
 
-    ISF.L HMM runs on raw IBKR hourly data (not resampled to daily first) — this
-    gives ~1800+ hourly bars which is above HMMRegimeModel's min_train_bars=500.
-    Resampling to daily before the HMM would yield only ~230 bars and cause
-    p_bull_smooth=0 throughout.
-
     Returns DataFrame indexed by tz-naive date with columns:
-      p_bull_smooth, vix, xstr_ret, igls_ret, isf_ret
+      vix, xstr_ret, igls_ret, isxf_ret
     (forward-filled; NaN gaps bridged).
     Returns empty DataFrame if IBKR data is unavailable.
     """
     _synth_dir = Path(synthetic_data_dir) if synthetic_data_dir is not None else None
     from ..quant_hmm.quant_engine import fetch_vix_ibkr
-    from ..quant_hmm.consolidated_engine import consolidated_backtest
 
     _src = f"synthetic ({_synth_dir})" if _synth_dir else "IBKR hourly cache"
-    logger.info(f"Parking signals: fetching ETF daily prices via {_src} (XSTR.L, IGLS.L, ISXF.L, ISF.L)...")
+    logger.info(f"Parking signals: fetching ETF daily prices via {_src} (XSTR.L, IGLS.L, ISXF.L)...")
     etf_closes: dict[str, pd.Series] = {}
     for ticker, col in [
         ("XSTR.L", "xstr_ret"), ("IGLS.L", "igls_ret"),
-        ("ISXF.L", "isxf_ret"), ("ISF.L", "isf_ret"),
+        ("ISXF.L", "isxf_ret"),
     ]:
         s = _fetch_etf_daily(ticker, synthetic_data_dir=_synth_dir)
         if s is not None and not s.empty:
@@ -106,43 +98,15 @@ def fetch_parking_signals(
     vix_series = vix_df["Close"].dropna().rename("vix")
     vix_series.index = _STRIP_TZ(vix_series.index)
 
-    # ISF.L HMM uses IBKR daily cache (data/cache/ibkr_daily/ISF.L.csv).
-    # Hourly IBKR cache resampled to daily gives only ~230 rows — below min_train_bars=500.
-    # historical_only=True reads from on-disk cache without connecting to IBKR.
-    logger.info("Parking signals: running HMM on ISF.L daily data (IBKR daily cache)...")
-    from ..quant_hmm.quant_engine import fetch_daily_ibkr as _fetch_daily_ibkr
-    isf_daily = _fetch_daily_ibkr("ISF.L", historical_only=True)
-    if isf_daily is None or isf_daily.empty:
-        logger.warning("  ISF.L: daily fetch failed — returning empty signals")
-        return pd.DataFrame()
-    # pence → GBP for .L tickers
-    for col in ["Open", "High", "Low", "Close"]:
-        if col in isf_daily.columns:
-            isf_daily[col] = isf_daily[col] / 100.0
-    isf_daily.index = _STRIP_TZ(pd.to_datetime(isf_daily.index))
-
-    hmm_result = consolidated_backtest(isf_daily, volume_min_ratio=1.0, min_hold_bars=1)
-    detail = hmm_result["detail"]
-    detail.index = pd.to_datetime(detail.index)
-    pbull_daily = (
-        detail["p_bull_smooth"].resample("D").last().dropna().rename("p_bull_smooth")
-    )
-    pbull_daily.index = _STRIP_TZ(pbull_daily.index)
-
-    if pbull_daily.empty:
-        logger.warning("  ISF.L HMM produced no p_bull_smooth — IBKR cache may be too short")
-        return pd.DataFrame()
-
-    signals = pd.DataFrame(pbull_daily)
-    signals = signals.join(vix_series, how="left").join(etf_ret, how="left")
+    signals = pd.DataFrame(vix_series)
+    signals = signals.join(etf_ret, how="left")
     signals = signals.ffill()
 
     # Fallback chains: when a tier's primary ETF has no data (pre-launch), use
     # the next available instrument rather than earning 0%.
-    #   equity tier  (isf_ret):   ISF.L  → 0%           (back to 2003, no fallback needed)
-    #   hy_bonds tier(isxf_ret):  ISXF.L → IGLS.L → XSTR.L → 0%
-    #   gilts tier   (igls_ret):  IGLS.L → XSTR.L → 0%  (both fixed income)
-    #   cash tier    (xstr_ret):  XSTR.L → 0%
+    #   hy_bonds tier (isxf_ret): ISXF.L → IGLS.L → XSTR.L → 0%
+    #   gilts tier    (igls_ret): IGLS.L → XSTR.L → 0%  (both fixed income)
+    #   cash tier     (xstr_ret): XSTR.L → 0%
     if "isxf_ret" in signals.columns:
         if "igls_ret" in signals.columns:
             signals["isxf_ret"] = signals["isxf_ret"].where(
