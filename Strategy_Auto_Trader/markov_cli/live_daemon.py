@@ -1586,18 +1586,18 @@ def check_protective_stops(
                 _stop_failures[ticker] = n
                 portfolio.clear_stop_order(ticker)
                 portfolio.save()
-                if n >= 3:
-                    _stop_retry_after[ticker] = time.time() + 300
+                if n >= 2:
+                    _stop_retry_after[ticker] = time.time() + 180
                     logger.warning(
-                        f"{ticker}: stop re-place rejected ({n} consecutive) — suppressed 5 min"
+                        f"{ticker}: stop re-place rejected ({n} consecutive) — suppressed 3 min"
                     )
+                    try:
+                        from ..output.emailer import send_stop_failure_alert
+                        send_stop_failure_alert(ticker, n)
+                    except Exception as _e:
+                        logger.error(f"Stop failure alert send failed: {_e}")
                 else:
                     logger.warning(f"{ticker}: stop re-place rejected ({n} consecutive)")
-                try:
-                    from ..output.emailer import send_stop_failure_alert
-                    send_stop_failure_alert(ticker, n)
-                except Exception as _e:
-                    logger.error(f"Stop failure alert send failed: {_e}")
         except Exception as e:
             logger.warning(f"{ticker}: error re-placing stop: {e}")
 

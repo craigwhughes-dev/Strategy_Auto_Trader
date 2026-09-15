@@ -295,14 +295,14 @@ class IBKRAdapter:
             # before converting to pence below.
             min_tick = self._min_tick_for(contract, req.stop_price)
             native_stop = round(round(req.stop_price / min_tick) * min_tick, 8)
+            # Add 1-2 bps buffer to avoid re-rejection when LSE tick tables shift
+            # between submission attempts (MiFID II bands vary by price level).
+            if req.ticker.upper().endswith(".L"):
+                native_stop *= 1.0001
             # req.stop_price is pot currency (pounds); LSE orders quote in pence.
             exchange_stop = native_stop
             if req.ticker.upper().endswith(".L"):
                 exchange_stop = native_stop * PENCE_PER_POUND
-                # IBKR precautionary setting 10311 blocks stop orders directly
-                # routed to LSE. Switch to SMART after qualifyContracts so the
-                # conId is already resolved (market rule lookup above needed LSE).
-                contract.exchange = "SMART"
             order = StopOrder("SELL", req.quantity, exchange_stop, tif="GTC")
             trade = self._ib.placeOrder(contract, order)
             # waitOnUpdate() returns on the *first* incoming update event
