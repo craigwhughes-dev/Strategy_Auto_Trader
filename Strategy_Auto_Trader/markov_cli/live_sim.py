@@ -232,6 +232,34 @@ def _pairwise_correlation(
     return float(corr) if pd.notna(corr) else None
 
 
+def _load_csh2_returns() -> pd.DataFrame | None:
+    """Load CSH2.L daily returns (BoE-patched + real IBKR 2002-2026).
+
+    Returns: DataFrame indexed by date, column 'daily_return' (decimal).
+             None if file not found (falls back to no sweep).
+    """
+    csh2_path = Path(__file__).resolve().parent.parent.parent / "data" / "cache" / "csh2_daily_returns.csv"
+    if not csh2_path.exists():
+        logger.warning(f"CSH2 returns not found: {csh2_path}")
+        return None
+    df = pd.read_csv(csh2_path, index_col=0, parse_dates=True)
+    df.index = df.index.tz_localize(None)
+    return df
+
+
+def _get_csh2_return_for_day(csh2_returns: pd.DataFrame | None, day: pd.Timestamp) -> float | None:
+    """Get CSH2 daily return for a specific date.
+
+    Returns: daily return (decimal), or None if data unavailable.
+    """
+    if csh2_returns is None:
+        return None
+    try:
+        return float(csh2_returns.loc[day, 'daily_return'])
+    except (KeyError, TypeError):
+        return None
+
+
 def arbitrate(
     candidates: list[Candidate],
     initial_cash: float,
@@ -357,9 +385,20 @@ def arbitrate(
     prev_vix_blocked: bool = False            # for vix_recovery_window_days onset detection
     vix_recovery_start: pd.Timestamp | None = None  # first day after VIX drops below threshold
 
+    # CSH2 sweep: park excess cash in CSH2.L, auto-liquidate when trade entry needed
+    csh2_returns = _load_csh2_returns()  # DataFrame indexed by date, column 'daily_return'
+    csh2_qty = 0.0  # shares held
+    csh2_entry_price = 0.0  # GBP per share
+    csh2_pnl = 0.0  # cumulative P&L
+
     for day in all_days:
-        if prev_day is not None:
-            pass  # placeholder for future CSH2 sweep logic
+        # Accrue CSH2 return from previous day
+        if prev_day is not None and csh2_qty > 0:
+            csh2_ret = _get_csh2_return_for_day(csh2_returns, day)
+            if csh2_ret is not None:
+                csh2_value = csh2_qty * csh2_entry_price * (1 + csh2_ret)
+                csh2_pnl += csh2_value - (csh2_qty * csh2_entry_price)
+                csh2_entry_price = csh2_value / csh2_qty if csh2_qty > 0 else 0.0
         prev_day = day
 
         # 1. release cash for positions closing on/before this day
@@ -433,7 +472,16 @@ def arbitrate(
                         continue
 
             price = sizing_price(cand.ticker, cand.record.entry_price)
-            if price <= 0 or cash < price or cash <= trade_cost:
+            required_cash = max(price, trade_cost)
+
+            # Auto-liquidate CSH2 if cash insufficient
+            if cash < required_cash and csh2_qty > 0:
+                csh2_proceeds = csh2_qty * csh2_entry_price
+                cash += csh2_proceeds
+                csh2_qty = 0.0
+                csh2_entry_price = 0.0
+
+            if price <= 0 or cash < required_cash:
                 n_rejected_cash += 1
                 continue
 
@@ -494,17 +542,32 @@ def arbitrate(
         if taken or skipped:
             logger.info(f"    {day.date()}: took {taken}, skipped {skipped}  (cash={cash:,.2f})")
 
+        # CSH2 sweep: park excess cash after all entries processed
+        # Keep 1% buffer for slippage/fees; rest goes to CSH2
+        min_cash_buffer = initial_cash * 0.01
+        if cash > min_cash_buffer and csh2_qty == 0:
+            csh2_investment = cash - min_cash_buffer
+            # Assume CSH2.L price ~100 GBP for sizing (actual price fetched in real trading)
+            csh2_price_estimate = 100.0
+            csh2_qty = csh2_investment / csh2_price_estimate
+            csh2_entry_price = csh2_price_estimate
+            cash = min_cash_buffer
+
         deployed = sum(_position_value(pos, day, price_by_ticker) for pos in open_positions)
+        csh2_value = csh2_qty * csh2_entry_price if csh2_qty > 0 else 0.0
         equity_curve.append({
             "date": day,
             "cash": cash,
             "deployed": deployed,
+            "csh2_value": csh2_value,
             "n_open": len(open_positions),
-            "portfolio_value": cash + deployed,
+            "portfolio_value": cash + deployed + csh2_value,
             "realized_pnl_cum": sum(r.pnl_usd for r in executed),
+            "csh2_pnl_cum": csh2_pnl,
         })
 
-    final_cash = cash + sum(p["exit_proceeds"] for p in open_positions)
+    csh2_value = csh2_qty * csh2_entry_price if csh2_qty > 0 else 0.0
+    final_cash = cash + sum(p["exit_proceeds"] for p in open_positions) + csh2_value
     stock_pnl = sum(r.pnl_usd for r in executed)
 
     return {
@@ -519,6 +582,7 @@ def arbitrate(
         "n_rejected_vix": n_rejected_vix,
         "n_rejected_correlation": n_rejected_correlation,
         "total_stock_pnl": stock_pnl,
+        "csh2_pnl": csh2_pnl,
     }
 
 
