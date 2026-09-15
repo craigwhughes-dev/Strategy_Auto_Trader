@@ -86,23 +86,21 @@ class TestSentiment:
         from Strategy_Auto_Trader.quant_hmm.sentiment import vix_regime
         vix_df = self._fake_vix_df(12.0)
         with mock.patch("Strategy_Auto_Trader.broker.ibkr_data.IBKRDataClient.fetch_index_daily",
-                        return_value=vix_df), \
-             mock.patch("yfinance.download", side_effect=self._fake_vix3m_download(14.0)):
+                        return_value=vix_df):
             result = vix_regime()
         assert result["vix_regime"] == "low_vol"
         assert result["vix_signal"] == 1
-        assert result["vix_term_structure"] == "contango"
+        assert result["vix_term_structure"] is None
 
     def test_vix_regime_crisis(self):
         from Strategy_Auto_Trader.quant_hmm.sentiment import vix_regime
         vix_df = self._fake_vix_df(45.0)
         with mock.patch("Strategy_Auto_Trader.broker.ibkr_data.IBKRDataClient.fetch_index_daily",
-                        return_value=vix_df), \
-             mock.patch("yfinance.download", side_effect=self._fake_vix3m_download(30.0)):
+                        return_value=vix_df):
             result = vix_regime()
         assert result["vix_regime"] == "crisis"
         assert result["vix_signal"] == -1
-        assert result["vix_term_structure"] == "backwardation"
+        assert result["vix_term_structure"] is None
 
     def test_vix_regime_normal(self):
         from Strategy_Auto_Trader.quant_hmm.sentiment import vix_regime
@@ -190,13 +188,13 @@ class TestSentiment:
                 "put_call_ratio": 1.5, "put_call_signal": 1, "iv_signal": 0,
                 "iv_current": 0.2, "iv_rank": 50, "skew": 0.0}), \
              mock.patch.object(sm, "vix_regime", return_value={
-                "vix_current": 12, "vix_signal": 1, "vix_term_structure": "contango"}), \
+                "vix_current": 12, "vix_signal": 1, "vix_term_structure": None}), \
              mock.patch.object(sm, "insider_signals", return_value={
                 "insider_net": 3, "insider_signal": 1,
                 "insider_buys_90d": 3, "insider_sells_90d": 0}), \
              mock.patch.object(sm, "short_interest_signal", return_value={
                 "short_pct_float": 15.0, "short_signal": 1}):
-            result = sm.composite_sentiment("TEST")
+            result = sm.composite_sentiment("TEST", include_options=True, include_insider=True, include_short=True)
         assert result["sentiment_label"] == "bullish"
         assert result["sentiment_score"] > 0.3
         assert result["confidence"] == 4
@@ -207,13 +205,13 @@ class TestSentiment:
                 "put_call_ratio": 0.3, "put_call_signal": -1, "iv_signal": -1,
                 "iv_current": 0.5, "iv_rank": 90, "skew": 0.1}), \
              mock.patch.object(sm, "vix_regime", return_value={
-                "vix_current": 40, "vix_signal": -1, "vix_term_structure": "backwardation"}), \
+                "vix_current": 40, "vix_signal": -1, "vix_term_structure": None}), \
              mock.patch.object(sm, "insider_signals", return_value={
                 "insider_net": -3, "insider_signal": -1,
                 "insider_buys_90d": 0, "insider_sells_90d": 3}), \
              mock.patch.object(sm, "short_interest_signal", return_value={
                 "short_pct_float": 1.0, "short_signal": 0}):
-            result = sm.composite_sentiment("TEST")
+            result = sm.composite_sentiment("TEST", include_options=True, include_insider=True, include_short=True)
         assert result["sentiment_label"] == "bearish"
         assert result["sentiment_score"] < -0.3
 
@@ -229,7 +227,7 @@ class TestSentiment:
                 "insider_buys_90d": 0, "insider_sells_90d": 0}), \
              mock.patch.object(sm, "short_interest_signal", return_value={
                 "short_pct_float": None, "short_signal": 0}):
-            result = sm.composite_sentiment("TEST")
+            result = sm.composite_sentiment("TEST", include_options=True, include_insider=True, include_short=True)
         assert result["sentiment_label"] == "neutral"
         assert result["sentiment_score"] == 0.0
         assert result["confidence"] == 0

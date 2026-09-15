@@ -121,14 +121,14 @@ def options_signals(ticker: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def vix_regime() -> dict:
-    """Fetch VIX data and compute regime signal.
+    """Fetch VIX data and compute regime signal via IBKR.
 
     Returns dict with:
       - vix_current: current VIX level
       - vix_sma20: 20-day SMA of VIX
       - vix_regime: "low_vol" (<15), "normal" (15-25), "high_vol" (25-35), "crisis" (>35)
       - vix_signal: +1 (low vol, safe to enter), -1 (high vol, caution), 0 (neutral)
-      - vix_term_structure: "contango" (normal, calm) or "backwardation" (fear, near > far)
+      - vix_term_structure: always None (VIX3M deprecated by CBOE, removed 2026-09-15)
     """
     result = {
         "vix_current": None, "vix_sma20": None,
@@ -164,19 +164,6 @@ def vix_regime() -> dict:
         else:
             result["vix_regime"] = "crisis"
             result["vix_signal"] = -1
-
-        # VIX term structure: compare VIX to VIX3M (3-month)
-        try:
-            import yfinance as yf
-            vix3m = yf.download("^VIX3M", period="5d", progress=False, auto_adjust=True)
-            if not vix3m.empty:
-                if isinstance(vix3m.columns, pd.MultiIndex):
-                    vix3m.columns = vix3m.columns.get_level_values(0)
-                vix3m_val = float(vix3m["Close"].dropna().iloc[-1])
-                if vix3m_val > 0:
-                    result["vix_term_structure"] = "contango" if current < vix3m_val else "backwardation"
-        except Exception:
-            pass
 
     except Exception:
         pass
@@ -351,13 +338,16 @@ def short_interest_signal(ticker: str) -> dict:
 def composite_sentiment(
     ticker: str,
     *,
-    include_options: bool = True,
+    include_options: bool = False,
     include_vix: bool = True,
-    include_insider: bool = True,
-    include_short: bool = True,
+    include_insider: bool = False,
+    include_short: bool = False,
     vix_data: dict | None = None,
 ) -> dict:
-    """Compute a composite sentiment score from all available alternative data.
+    """Compute a composite sentiment score from available data (IBKR only).
+
+    Options, insider, and short_interest use yfinance (deprecated, disabled by default).
+    Call with include_options=True, include_insider=True, include_short=True if needed for research.
 
     Returns dict with all individual signals plus:
       - sentiment_score: weighted composite (-1 to +1)
