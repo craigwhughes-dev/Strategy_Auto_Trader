@@ -54,7 +54,6 @@ from . import full_scan
 from ..broker.symbols import sizing_price
 from ..output.journal import LIVE_JOURNAL, TradeRecord, append_trades
 from ..plugins.costs import COST_MODEL_CHOICES, make_cost_model
-from ..plugins.interest import IbkrTieredInterest
 from ..quant_hmm.ticker_ranking import (
     Candidate,
     _filter_candidates_by_daily_trend_quality,
@@ -233,13 +232,6 @@ def _pairwise_correlation(
     return float(corr) if pd.notna(corr) else None
 
 
-_PARKING_RET_COL: dict[str, str] = {
-    "equity": "isf_ret",
-    "gilts":  "igls_ret",
-    "cash":   "xstr_ret",
-}
-
-
 def arbitrate(
     candidates: list[Candidate],
     initial_cash: float,
@@ -252,7 +244,6 @@ def arbitrate(
     vix_entry_gate_threshold: float | None = None,
     daily_returns_by_ticker: dict[str, pd.Series] | None = None,
     max_correlation_to_admitted_today: float | None = None,
-    parking_signals: pd.DataFrame | None = None,
     vix_recovery_window_days: int | None = None,
     vix_recovery_kelly_mult: float = 0.5,
     vix_gate_allow_reentry: bool = False,
@@ -314,7 +305,7 @@ def arbitrate(
     Returns a dict: executed (list[TradeRecord]), equity_curve (list[dict],
     one row per event day — cash, deployed capital mark-to-market if
     price_by_ticker is given else cost-basis, portfolio_value, cumulative
-    realized P&L, cumulative interest), total_interest, final_cash,
+    realized P&L), final_cash,
     n_candidates, n_admitted, n_rejected_cash (candidates that couldn't be
     sized due to insufficient cash), n_rejected_kelly (candidates with
     kelly_fraction <= 0), n_rejected_concentration (candidates that would
@@ -334,12 +325,11 @@ def arbitrate(
 
     if not candidates:
         return {
-            "executed": [], "equity_curve": [], "total_interest": 0.0,
+            "executed": [], "equity_curve": [],
             "final_cash": initial_cash, "n_candidates": 0, "n_admitted": 0,
             "n_rejected_cash": 0, "n_rejected_kelly": 0,
             "n_rejected_concentration": 0, "n_rejected_vix": 0,
             "n_rejected_correlation": 0,
-            "total_parking_pnl": 0.0, "total_stock_pnl": 0.0,
         }
 
     by_day: dict[pd.Timestamp, list[Candidate]] = {}
@@ -356,8 +346,6 @@ def arbitrate(
     open_positions: list[dict] = []  # {ticker, entry_price, date_closed, exit_proceeds, alloc}
     executed: list[TradeRecord] = []
     equity_curve: list[dict] = []
-    interest_model = IbkrTieredInterest(currency)
-    total_interest = 0.0
     n_admitted = 0
     n_rejected_cash = 0
     n_rejected_kelly = 0
@@ -369,35 +357,10 @@ def arbitrate(
     prev_vix_blocked: bool = False            # for vix_recovery_window_days onset detection
     vix_recovery_start: pd.Timestamp | None = None  # first day after VIX drops below threshold
 
-    # Cash parking state — transparent overlay: cash/Kelly/admission are NEVER modified.
-    # _pk_principal: idle cash amount conceptually parked this period (set after main entries).
-    # _pk_tier: current parking tier (cash/gilts/equity).
-    # _pk_pnl: cumulative P&L from ETF returns on parked principal (purely additive to portfolio).
-    # T+2 not modelled — parking is transparent so no capital is actually locked.
-    _pk_principal: float = 0.0
-    _pk_tier: str = "cash"
-    _pk_pnl: float = 0.0
-
     for day in all_days:
-        prev_event_day = prev_day   # save BEFORE update; used by parking accrual below
         if prev_day is not None:
-            days_elapsed = (day - prev_day).days
-            if days_elapsed > 0:
-                interest = interest_model.daily_accrual(cash) * days_elapsed
-                cash += interest
-                total_interest += interest
+            pass  # placeholder for future CSH2 sweep logic
         prev_day = day
-
-        # Parking step A: accrue ETF return on principal set at prev event day.
-        # Transparent — no cash movement; P&L is purely additive.
-        if parking_signals is not None and _pk_principal > 0.0 and prev_event_day is not None:
-            tier_col = _PARKING_RET_COL.get(_pk_tier)
-            if tier_col and tier_col in parking_signals.columns:
-                mask = (parking_signals.index > prev_event_day) & (parking_signals.index <= day)
-                interval_rets = parking_signals.loc[mask, tier_col].fillna(0.0)
-                if len(interval_rets) > 0:
-                    cum_ret = float((1.0 + interval_rets).prod() - 1.0)
-                    _pk_pnl += _pk_principal * cum_ret
 
         # 1. release cash for positions closing on/before this day
         still_open = []
@@ -531,55 +494,22 @@ def arbitrate(
         if taken or skipped:
             logger.info(f"    {day.date()}: took {taken}, skipped {skipped}  (cash={cash:,.2f})")
 
-        # Parking step B: set principal for next period from remaining cash after main entries.
-        # Transparent — no cash movement; just records how much idle cash is conceptually parked.
-        if parking_signals is not None:
-            from ..cash_parking.strategy import (
-                tier_for as _pk_tier_for,
-                LIQUID_FLOOR_PCT as _PK_FLOOR,
-                MIN_PARKING_AMOUNT as _PK_MIN,
-            )
-            try:
-                sig = parking_signals.asof(day)
-                pbull = sig.get("p_bull_smooth") if sig is not None else None
-                vix_pk = sig.get("vix") if sig is not None else None
-            except Exception:
-                pbull = vix_pk = None
-
-            if (pbull is not None and vix_pk is not None
-                    and not pd.isna(pbull) and not pd.isna(vix_pk)):
-                desired_tier = _pk_tier_for(float(pbull), float(vix_pk))
-                parkable = cash * (1.0 - _PK_FLOOR)
-                if parkable < _PK_MIN:
-                    desired_tier = "cash"
-
-                if desired_tier != "cash":
-                    _pk_principal = parkable
-                    _pk_tier = desired_tier
-                else:
-                    _pk_principal = 0.0
-                    _pk_tier = "cash"
-
         deployed = sum(_position_value(pos, day, price_by_ticker) for pos in open_positions)
         equity_curve.append({
             "date": day,
             "cash": cash,
             "deployed": deployed,
             "n_open": len(open_positions),
-            "portfolio_value": cash + deployed + _pk_pnl,
+            "portfolio_value": cash + deployed,
             "realized_pnl_cum": sum(r.pnl_usd for r in executed),
-            "interest_cum": total_interest,
-            "parking_pnl_cum": _pk_pnl,
-            "parked": _pk_principal,
         })
 
-    final_cash = cash + sum(p["exit_proceeds"] for p in open_positions) + _pk_pnl
+    final_cash = cash + sum(p["exit_proceeds"] for p in open_positions)
     stock_pnl = sum(r.pnl_usd for r in executed)
 
     return {
         "executed": executed,
         "equity_curve": equity_curve,
-        "total_interest": total_interest,
         "final_cash": final_cash,
         "n_candidates": n_candidates,
         "n_admitted": n_admitted,
@@ -589,7 +519,6 @@ def arbitrate(
         "n_rejected_vix": n_rejected_vix,
         "n_rejected_correlation": n_rejected_correlation,
         "total_stock_pnl": stock_pnl,
-        "total_parking_pnl": _pk_pnl,
     }
 
 
@@ -759,12 +688,6 @@ def main(argv: list[str] | None = None) -> int:
                         help="Upper bound for the synthetic data window (--start-date is the lower "
                              "bound). Required together with --synthetic-data-dir — arbitrate() has "
                              "no other end-of-window concept, and the synthetic CSVs span decades.")
-    parser.add_argument("--cash-parking", dest="cash_parking", action="store_true", default=False,
-                        help="Simulate concurrent cash parking on idle cash alongside the main "
-                             "strategy. Parking uses ISF.L HMM p_bull_smooth + VIX to select a "
-                             "tier (XSTR.L/IGLS.L/ISF.L) on each event day after main entries. "
-                             "P&L is tracked separately: stock_pnl, parking_pnl, interest. "
-                             "Adds ~1 min for ISF.L HMM fit. Not supported in synthetic-data mode.")
     args = parser.parse_args(argv)
 
     if bool(args.tickers) == bool(args.universe):
@@ -801,22 +724,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.position_summary is None:
             ts = pd.Timestamp.now().strftime("%Y%m%dT%H%M%S")
             args.position_summary = str(_SYNTHETIC_JOURNAL_DIR / f"live_sim_synthetic_position_summary_{ts}.csv")
-
-    # Fetch parking signals once up front (shared across all strategies/pot-sizes).
-    _parking_signals: pd.DataFrame | None = None
-    if args.cash_parking:
-        try:
-            from ..cash_parking.signals import fetch_parking_signals as _fetch_pk
-            end_date = pd.Timestamp.now().strftime("%Y-%m-%d")
-            _parking_signals = _fetch_pk(
-                args.start_date, end_date,
-                synthetic_data_dir=args.synthetic_data_dir if args.synthetic_data_dir else None,
-            )
-            logger.info(f"  parking signals: {len(_parking_signals)} days "
-                        f"({_parking_signals.index[0].date()} to "
-                        f"{_parking_signals.index[-1].date()})")
-        except Exception as _pk_err:
-            logger.warning(f"  --cash-parking: signal fetch failed ({_pk_err}) — disabled")
 
     pot_sizes = args.pot_sizes if args.pot_sizes else [args.initial_cash]
 
@@ -975,13 +882,11 @@ def main(argv: list[str] | None = None) -> int:
                 vix_recovery_window_days=vix_recovery_days,
                 vix_recovery_kelly_mult=vix_recovery_mult,
                 vix_gate_allow_reentry=vix_allow_reentry,
-                parking_signals=_parking_signals,
             )
             all_executed.extend(result["executed"])
 
             stock_pnl = result.get("total_stock_pnl", sum(r.pnl_usd for r in result["executed"]))
-            parking_pnl = result.get("total_parking_pnl", 0.0)
-            total_pnl = stock_pnl + parking_pnl + result["total_interest"]
+            total_pnl = stock_pnl
             peak_deployed = max((row["deployed"] for row in result["equity_curve"]), default=0.0)
             max_dd = _max_drawdown([row["portfolio_value"] for row in result["equity_curve"]])
             sharpe, sortino = _portfolio_sharpe_sortino(result["equity_curve"])
@@ -991,16 +896,12 @@ def main(argv: list[str] | None = None) -> int:
                            if result['n_rejected_vix'] else "")
             corr_rej_str = (f", {result['n_rejected_correlation']} rejected for correlation cap"
                             if result['n_rejected_correlation'] else "")
-            parking_str = (f", parking P&L £{parking_pnl:+,.2f}"
-                           if _parking_signals is not None else "")
             logger.info(f"  pot £{pot_size:,.0f}: {len(result['executed'])}/{result['n_candidates']} admitted "
                   f"({result['n_rejected_cash']} rejected for cash, "
                   f"{result['n_rejected_kelly']} rejected for kelly<=0, "
                   f"{result['n_rejected_concentration']} rejected for concentration cap"
                   f"{vix_rej_str}{corr_rej_str}), "
                   f"final £{result['final_cash']:,.2f} (stock P&L £{stock_pnl:+,.2f}, "
-                  f"interest £{result['total_interest']:+,.2f}"
-                  f"{parking_str}, "
                   f"peak deployed £{peak_deployed:,.2f}, max drawdown {max_dd*100:.1f}%, "
                   f"Sharpe {sharpe_str}, Sortino {sortino_str})")
 
@@ -1011,8 +912,6 @@ def main(argv: list[str] | None = None) -> int:
                 "cash": result["final_cash"], "deployed": peak_deployed, "n_open": 0,
                 "portfolio_value": result["final_cash"],
                 "realized_pnl_cum": stock_pnl,
-                "parking_pnl_cum": parking_pnl,
-                "interest_cum": result["total_interest"],
                 "n_candidates": result["n_candidates"], "n_admitted": result["n_admitted"],
                 "n_rejected_cash": result["n_rejected_cash"],
                 "n_rejected_kelly": result["n_rejected_kelly"],
