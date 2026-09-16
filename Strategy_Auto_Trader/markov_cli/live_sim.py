@@ -556,13 +556,14 @@ def arbitrate(
 
         deployed = sum(_position_value(pos, day, price_by_ticker) for pos in open_positions)
         csh2_value = csh2_qty * csh2_entry_price if csh2_qty > 0 else 0.0
+        csh2_value = 0.0 if not pd.notna(csh2_value) else csh2_value  # Force NaN → 0
         equity_curve.append({
             "date": day,
             "cash": cash,
             "deployed": deployed,
             "csh2_value": csh2_value,
             "n_open": len(open_positions),
-            "portfolio_value": cash + deployed + (csh2_value if pd.notna(csh2_value) else 0.0),
+            "portfolio_value": cash + deployed + csh2_value,
             "realized_pnl_cum": sum(r.pnl_usd for r in executed),
             "csh2_pnl_cum": csh2_pnl,
         })
@@ -975,11 +976,13 @@ def main(argv: list[str] | None = None) -> int:
             last_row = result["equity_curve"][-1] if result["equity_curve"] else {}
             final_portfolio_value = last_row.get("portfolio_value", result["final_cash"])
             final_cash_val = last_row.get("cash", result["final_cash"])
-            summary_rows.append({
+            summary_row = {
                 "strategy": strategy_name, "pot_size": pot_size, "date": "SUMMARY",
                 "cash": final_cash_val, "deployed": peak_deployed, "n_open": 0,
                 "portfolio_value": final_portfolio_value,
                 "realized_pnl_cum": stock_pnl,
+                "csh2_value": last_row.get("csh2_value"),
+                "csh2_pnl_cum": last_row.get("csh2_pnl_cum"),
                 "n_candidates": result["n_candidates"], "n_admitted": result["n_admitted"],
                 "n_rejected_cash": result["n_rejected_cash"],
                 "n_rejected_kelly": result["n_rejected_kelly"],
@@ -989,7 +992,8 @@ def main(argv: list[str] | None = None) -> int:
                 "max_drawdown": max_dd,
                 "sharpe": sharpe,
                 "sortino": sortino,
-            })
+            }
+            summary_rows.append(summary_row)
 
     journal_path = Path(args.journal) if args.journal else LIVE_JOURNAL
     n_logged = append_trades(journal_path, all_executed)
