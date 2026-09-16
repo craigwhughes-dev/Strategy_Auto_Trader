@@ -53,7 +53,8 @@ def fetch_data(
 
     # Asset list depends on source
     if source == "ibkr":
-        defensive = ["CSH2", "GLD", "TLT"]
+        # CSH2 not resolvable on IBKR (2026-09-16 investigation). Use SHV (short-term treasury ETF).
+        defensive = ["SHV", "GLD", "TLT"]
         tickers = [market_ticker] + defensive + ["VIX"]
         historical_only = False  # Fetch fresh data
     else:
@@ -292,7 +293,8 @@ def main():
 
     # Set defensive asset defaults based on data source
     if args.defensive_assets is None:
-        args.defensive_assets = ["SHV", "GLD", "TLT"] if args.source == "yfinance" else ["CSH2", "GLD", "TLT"]
+        # Both sources use SHV (CSH2 not resolvable on IBKR as of 2026-09-16)
+        args.defensive_assets = ["SHV", "GLD", "TLT"]
 
     logging.basicConfig(
         level=logging.INFO,

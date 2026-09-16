@@ -40,7 +40,7 @@ _LSE_DOT_SYMBOLS = {"AV", "BA", "BP", "JD", "NG", "RR", "SN", "UU"}
 # LSE-listed ETFs use exchange "LSEETF" on IBKR, not "LSE" (which is for equities).
 # Stock("ISF","LSE","GBP") returns Error 200; Stock("ISF","LSEETF","GBP") resolves correctly.
 # Verified 2026-09-14 on paper Gateway port 4002: conIds 13444223/104145585/68490081.
-_LSEETF_SYMBOLS: frozenset[str] = frozenset({"ISF", "XSTR", "IGLS", "ISXF"})
+_LSEETF_SYMBOLS: frozenset[str] = frozenset({"ISF", "XSTR", "IGLS", "ISXF", "CSH2"})  # CSH2 = Invesco Cash ETF, LSE listing
 
 
 def ibkr_contract_params(ticker: str) -> tuple[str, str, str]:
