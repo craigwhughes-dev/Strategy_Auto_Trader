@@ -55,7 +55,7 @@ def yearly_breakdown(
         pnl_by_tier = grp.groupby("asset")["nav_delta"].sum()
         pnl_spy = pnl_by_tier.get("SPY", 0.0)
         pnl_isfl = pnl_by_tier.get("ISF.L", 0.0)
-        pnl_shv = pnl_by_tier.get("SHV", 0.0)
+        pnl_csh2 = pnl_by_tier.get("CSH2.L", 0.0)
 
         def bh_pct(df: pd.DataFrame) -> float:
             yr = df.loc[f"{year}-01-01":f"{year}-12-31"]
@@ -69,7 +69,7 @@ def yearly_breakdown(
             "combined_pnl": combined_pnl,
             "spy_tier_pnl": pnl_spy,
             "isfl_tier_pnl": pnl_isfl,
-            "shv_tier_pnl": pnl_shv,
+            "csh2_tier_pnl": pnl_csh2,
             "spy_bh_pct": bh_pct(spy_df),
             "isfl_bh_pct": bh_pct(isfl_df),
         })
@@ -95,16 +95,16 @@ def main():
     _log.info(f"Loading synthetic daily data ({args.start_date} to {args.end_date})...")
     spy_df = load_synthetic_daily(data_dir / "SPY.csv", args.start_date, args.end_date)
     isfl_df = load_synthetic_daily(data_dir / "ISF.L.csv", args.start_date, args.end_date)
-    shv_df = load_synthetic_daily(data_dir / "SHV.csv", args.start_date, args.end_date)
+    shv_df = load_synthetic_daily(data_dir / "CSH2.L.csv", args.start_date, args.end_date)
     vix_df = load_synthetic_daily(data_dir / "VIX.csv", args.start_date, args.end_date)
 
-    _log.info(f"SPY: {len(spy_df)} days, ISF.L: {len(isfl_df)} days, SHV: {len(shv_df)} days, VIX: {len(vix_df)} days")
+    _log.info(f"SPY: {len(spy_df)} days, ISF.L: {len(isfl_df)} days, CSH2.L: {len(shv_df)} days, VIX: {len(vix_df)} days")
 
     dates = spy_df.index.intersection(isfl_df.index).intersection(shv_df.index).intersection(vix_df.index)
     _log.info(f"Common dates: {len(dates)} ({dates.min()} to {dates.max()})")
 
     print("\n" + "=" * 120)
-    print("MULTI-TIER ALLOCATION: 26-YEAR SYNTHETIC SWEEP (SPY / ISF.L / SHV)")
+    print("MULTI-TIER ALLOCATION: 26-YEAR SYNTHETIC SWEEP (SPY / ISF.L / CSH2.L)")
     print("=" * 120)
     print(f"\nData: {data_dir}, common range {dates.min().date()} to {dates.max().date()} ({len(dates)} daily bars)")
     print(f"Initial capital: ${args.initial_cash:,.0f}\n")
@@ -129,14 +129,19 @@ def main():
             print("\n" + "=" * 140)
             print(f"YEARLY BREAKDOWN (ISF.L threshold <= {isfl_threshold})")
             print("=" * 140)
-            print(f"{'Year':<6}{'Combined %':>11}{'Combined P&L':>15}{'SPY tier P&L':>15}{'ISF.L tier P&L':>16}{'SHV tier P&L':>15}{'SPY B&H %':>12}{'FTSE B&H %':>12}")
+            print(f"{'Year':<6}{'Combined %':>11}{'Combined P&L':>15}{'SPY tier P&L':>15}{'ISF.L tier P&L':>16}{'CSH2 tier P&L':>15}{'SPY B&H %':>12}{'FTSE B&H %':>12}")
             for _, r in yearly_df.iterrows():
-                print(f"{int(r['year']):<6}{r['combined_return_pct']:>10.2f}%{r['combined_pnl']:>14,.0f} {r['spy_tier_pnl']:>14,.0f} {r['isfl_tier_pnl']:>15,.0f} {r['shv_tier_pnl']:>14,.0f} {r['spy_bh_pct']:>11.2f}% {r['isfl_bh_pct']:>11.2f}%")
+                print(f"{int(r['year']):<6}{r['combined_return_pct']:>10.2f}%{r['combined_pnl']:>14,.0f} {r['spy_tier_pnl']:>14,.0f} {r['isfl_tier_pnl']:>15,.0f} {r['csh2_tier_pnl']:>14,.0f} {r['spy_bh_pct']:>11.2f}% {r['isfl_bh_pct']:>11.2f}%")
             print("=" * 140)
-            print(f"Totals: combined P&L ${yearly_df['combined_pnl'].sum():,.0f}, SPY-tier P&L ${yearly_df['spy_tier_pnl'].sum():,.0f}, ISF.L-tier P&L ${yearly_df['isfl_tier_pnl'].sum():,.0f}, SHV-tier P&L ${yearly_df['shv_tier_pnl'].sum():,.0f}")
+            print(f"Totals: combined P&L ${yearly_df['combined_pnl'].sum():,.0f}, SPY-tier P&L ${yearly_df['spy_tier_pnl'].sum():,.0f}, ISF.L-tier P&L ${yearly_df['isfl_tier_pnl'].sum():,.0f}, CSH2-tier P&L ${yearly_df['csh2_tier_pnl'].sum():,.0f}")
             yearly_out = Path(f"data/allocation_backtest/multi_tier_yearly_synthetic_isfl{isfl_threshold}.csv")
             yearly_out.parent.mkdir(parents=True, exist_ok=True)
-            yearly_df.to_csv(yearly_out, index=False)
+            # Format percentages as strings to avoid 100x multiplication on re-read
+            yearly_df_out = yearly_df.copy()
+            yearly_df_out['combined_return_pct'] = yearly_df_out['combined_return_pct'].apply(lambda x: f"{x:.2f}%")
+            yearly_df_out['spy_bh_pct'] = yearly_df_out['spy_bh_pct'].apply(lambda x: f"{x:.2f}%")
+            yearly_df_out['isfl_bh_pct'] = yearly_df_out['isfl_bh_pct'].apply(lambda x: f"{x:.2f}%")
+            yearly_df_out.to_csv(yearly_out, index=False)
             print(f"Saved: {yearly_out}")
 
     print("=" * 120)
