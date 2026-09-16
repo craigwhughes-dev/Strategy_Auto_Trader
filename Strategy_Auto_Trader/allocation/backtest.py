@@ -32,7 +32,7 @@ def fetch_data(
     market_ticker: str = "SPY",
     ibkr_client: IBKRDataClient | None = None,
     use_cache: bool = True,
-    prefer_yfinance: bool = False,
+    source: str = "ibkr",
 ) -> dict[str, pd.DataFrame]:
     """Fetch daily OHLCV for all assets and VIX.
 
@@ -42,51 +42,59 @@ def fetch_data(
         market_ticker: Market asset to test (SPY, ^FTSE, etc.)
         ibkr_client: IBKR client (created if None)
         use_cache: Use on-disk cache if available
-        prefer_yfinance: Use yfinance instead of IBKR (for testing)
+        source: "ibkr" or "yfinance"
 
     Returns:
-        Dict with market_ticker, GLD, TLT, SHV/CSH2, VIX keys.
-        CSH2 replaced with SHV (short-term treasury) for yfinance compatibility.
+        Dict with market_ticker, GLD, TLT, CSH2, VIX keys (IBKR)
+        or SHV instead of CSH2 (yfinance compatibility).
     """
     if ibkr_client is None:
         ibkr_client = IBKRDataClient()
 
-    # yfinance doesn't have CSH2 (UK fund), use SHV as proxy
-    defensive = ["SHV", "GLD", "TLT"] if prefer_yfinance else ["CSH2", "GLD", "TLT"]
-    tickers = [market_ticker] + defensive + ["VIX"]
+    # Asset list depends on source
+    if source == "ibkr":
+        defensive = ["CSH2", "GLD", "TLT"]
+        tickers = [market_ticker] + defensive + ["VIX"]
+        historical_only = False  # Fetch fresh data
+    else:
+        # yfinance doesn't have CSH2, use SHV
+        defensive = ["SHV", "GLD", "TLT"]
+        tickers = [market_ticker] + defensive + ["VIX"]
+        historical_only = False
+
     data = {}
 
     for ticker in tickers:
         df = None
 
-        if prefer_yfinance and HAS_YFINANCE:
+        if source == "yfinance" and HAS_YFINANCE:
             yf_ticker = ticker if ticker != "VIX" else "^VIX"
             try:
                 df = yf.download(yf_ticker, start=start_date, end=end_date, progress=False)
                 if df is not None and not df.empty:
-                    # yfinance returns MultiIndex columns (price_type, ticker)
-                    # Extract price_type (first element) and uppercase
                     if isinstance(df.columns, pd.MultiIndex):
                         df.columns = [col[0] for col in df.columns]
                     df.columns = [col.upper() for col in df.columns]
                     df.index.name = None
-                    _log.info(f"Fetched {ticker} (yfinance): {len(df)} bars, columns={df.columns.tolist()}")
+                    _log.info(f"Fetched {ticker} (yfinance): {len(df)} bars")
             except Exception as e:
                 _log.warning(f"yfinance fetch {ticker} failed: {e}")
                 df = None
-        else:
-            if ticker == "VIX":
-                # Fetch VIX as index, not stock
-                df = ibkr_client.fetch_index_daily("VIX", "CBOE", currency="USD",
-                                                    historical_only=False)
-            else:
-                df = ibkr_client.fetch_daily(ticker, period="max", use_cache=use_cache,
-                                              historical_only=False)
+        else:  # IBKR
+            try:
+                if ticker == "VIX":
+                    df = ibkr_client.fetch_index_daily("VIX", "CBOE", currency="USD",
+                                                        historical_only=historical_only)
+                else:
+                    df = ibkr_client.fetch_daily(ticker, period="max", use_cache=use_cache,
+                                                  historical_only=historical_only)
 
-            if df is not None and not df.empty:
-                # Trim to requested date range
-                df = df.loc[start_date:end_date]
-                _log.info(f"Fetched {ticker} (IBKR): {len(df)} bars")
+                if df is not None and not df.empty:
+                    df = df.loc[start_date:end_date]
+                    _log.info(f"Fetched {ticker} (IBKR): {len(df)} bars")
+            except Exception as e:
+                _log.warning(f"IBKR fetch {ticker} failed: {e}")
+                df = None
 
         if df is not None and not df.empty:
             data[ticker] = df
@@ -271,19 +279,20 @@ def main():
     parser.add_argument(
         "--no-cache",
         action="store_true",
-        help="Don't use IBKR cache",
+        help="Don't use IBKR cache (IBKR source only)",
     )
     parser.add_argument(
-        "--use-yfinance",
-        action="store_true",
-        help="Use yfinance instead of IBKR (testing only)",
+        "--source",
+        choices=["ibkr", "yfinance"],
+        default="ibkr",
+        help="Data source: IBKR (default) or yfinance (testing)",
     )
 
     args = parser.parse_args()
 
     # Set defensive asset defaults based on data source
     if args.defensive_assets is None:
-        args.defensive_assets = ["SHV", "GLD", "TLT"] if args.use_yfinance else ["CSH2", "GLD", "TLT"]
+        args.defensive_assets = ["SHV", "GLD", "TLT"] if args.source == "yfinance" else ["CSH2", "GLD", "TLT"]
 
     logging.basicConfig(
         level=logging.INFO,
@@ -295,7 +304,7 @@ def main():
 
     _log.info(f"Output: {output_dir}")
     _log.info(f"Period: {args.start_date} to {args.end_date}")
-    _log.info(f"Data source: {'yfinance (testing)' if args.use_yfinance else 'IBKR'}")
+    _log.info(f"Data source: {args.source.upper()}")
     _log.info(f"Market asset: {args.market_ticker}")
     _log.info(f"Allocation mode: {args.mode}")
     if args.mode == "graduated":
@@ -307,14 +316,14 @@ def main():
 
     # Fetch data
     _log.info("Fetching data...")
-    ibkr_client = IBKRDataClient()
+    ibkr_client = IBKRDataClient() if args.source == "ibkr" else None
     data = fetch_data(
         args.start_date,
         args.end_date,
         market_ticker=args.market_ticker,
         ibkr_client=ibkr_client,
         use_cache=not args.no_cache,
-        prefer_yfinance=args.use_yfinance,
+        source=args.source,
     )
 
     # Run sweep
