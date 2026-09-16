@@ -172,7 +172,9 @@ class TestMainCLI:
             return daily
 
         with patch.object(generate, "generate_synthetic_hourly", side_effect=_side_effect):
-            generate.main(["--tickers", "AAPL", "BAD", "--workers", "2", "--output-dir", str(tmp_path)])
+            with pytest.raises(SystemExit) as exc_info:
+                generate.main(["--tickers", "AAPL", "BAD", "--workers", "2", "--output-dir", str(tmp_path)])
+            assert exc_info.value.code == 1
 
         assert (tmp_path / "AAPL.csv").exists()
         assert not (tmp_path / "BAD.csv").exists()

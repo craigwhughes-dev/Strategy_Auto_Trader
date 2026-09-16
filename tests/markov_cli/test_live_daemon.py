@@ -560,7 +560,7 @@ def test_process_cycle_defaults_signal_reports_only_on(monkeypatch):
     assert captured["defaults"]["signal_reports_only"] is True
 
 
-def test_process_cycle_feeds_closes_to_dry_run_broker(monkeypatch):
+def test_process_cycle_feeds_closes_to_dry_run_broker(monkeypatch, tmp_path):
     """The NullBroker must be given this cycle's closes so dry fills are priced."""
     from Strategy_Auto_Trader.broker.null_adapter import NullBroker
     from Strategy_Auto_Trader.markov_cli import batch, execute
@@ -574,6 +574,10 @@ def test_process_cycle_feeds_closes_to_dry_run_broker(monkeypatch):
     monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
     monkeypatch.setattr(execute, "execute_signals",
                         lambda *a, **k: ([], [], []))
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    (tmp_path / "top_k_universe.json").write_text(
+        json.dumps({"tickers": ["AAPL"]}), encoding="utf-8"
+    )
 
     broker = NullBroker(prices={})
     config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
@@ -1344,7 +1348,7 @@ class TestReconciliation:
         assert read_marker(marker_path) is None
 
 
-def test_process_cycle_halt_flag_blocks_new_entries(monkeypatch):
+def test_process_cycle_halt_flag_blocks_new_entries(monkeypatch, tmp_path):
     """halt_new_entries passes allow_new_entries=False into execute_signals."""
     from Strategy_Auto_Trader.markov_cli import batch, execute
 
@@ -1363,6 +1367,10 @@ def test_process_cycle_halt_flag_blocks_new_entries(monkeypatch):
     monkeypatch.setattr(execute, "execute_signals", fake_execute_signals)
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
     monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    (tmp_path / "top_k_universe.json").write_text(
+        json.dumps({"tickers": ["AAPL"]}), encoding="utf-8"
+    )
 
     config = {
         "daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0},
@@ -1376,7 +1384,7 @@ def test_process_cycle_halt_flag_blocks_new_entries(monkeypatch):
     assert captured["allow_new_entries"] is False
 
 
-def test_process_cycle_halt_top_k_stale_blocks_new_entries(monkeypatch):
+def test_process_cycle_halt_top_k_stale_blocks_new_entries(monkeypatch, tmp_path):
     """halt_top_k_stale passes allow_new_entries=False into execute_signals."""
     from Strategy_Auto_Trader.markov_cli import batch, execute
 
@@ -1395,6 +1403,10 @@ def test_process_cycle_halt_top_k_stale_blocks_new_entries(monkeypatch):
     monkeypatch.setattr(execute, "execute_signals", fake_execute_signals)
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
     monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    (tmp_path / "top_k_universe.json").write_text(
+        json.dumps({"tickers": ["AAPL"]}), encoding="utf-8"
+    )
 
     config = {
         "daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0},
@@ -2521,7 +2533,7 @@ class TestKillStrayDaemons:
         assert logger.warning.called
 
 
-def test_process_cycle_paused_by_user_blocks_new_entries(monkeypatch):
+def test_process_cycle_paused_by_user_blocks_new_entries(monkeypatch, tmp_path):
     """paused_by_user passes allow_new_entries=False into execute_signals."""
     from Strategy_Auto_Trader.markov_cli import batch, execute
 
@@ -2540,6 +2552,10 @@ def test_process_cycle_paused_by_user_blocks_new_entries(monkeypatch):
     monkeypatch.setattr(execute, "execute_signals", fake_execute_signals)
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
     monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    (tmp_path / "top_k_universe.json").write_text(
+        json.dumps({"tickers": ["AAPL"]}), encoding="utf-8"
+    )
 
     config = {
         "daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0},
@@ -2553,7 +2569,7 @@ def test_process_cycle_paused_by_user_blocks_new_entries(monkeypatch):
     assert captured["allow_new_entries"] is False
 
 
-def test_process_cycle_halt_and_paused_independent(monkeypatch):
+def test_process_cycle_halt_and_paused_independent(monkeypatch, tmp_path):
     """halt_new_entries and paused_by_user both pass allow_new_entries=False."""
     from Strategy_Auto_Trader.markov_cli import batch, execute
 
@@ -2572,6 +2588,10 @@ def test_process_cycle_halt_and_paused_independent(monkeypatch):
     monkeypatch.setattr(execute, "execute_signals", fake_execute_signals)
     monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: ["AAPL"])
     monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
+    monkeypatch.setattr(live_daemon, "STATE_DIR", tmp_path)
+    (tmp_path / "top_k_universe.json").write_text(
+        json.dumps({"tickers": ["AAPL"]}), encoding="utf-8"
+    )
 
     config = {
         "daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0},
