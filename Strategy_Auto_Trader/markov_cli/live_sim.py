@@ -972,10 +972,13 @@ def main(argv: list[str] | None = None) -> int:
 
             for row in result["equity_curve"]:
                 summary_rows.append({"strategy": strategy_name, "pot_size": pot_size, **row})
+            last_row = result["equity_curve"][-1] if result["equity_curve"] else {}
+            final_portfolio_value = last_row.get("portfolio_value", result["final_cash"])
+            final_cash_val = last_row.get("cash", result["final_cash"])
             summary_rows.append({
                 "strategy": strategy_name, "pot_size": pot_size, "date": "SUMMARY",
-                "cash": result["final_cash"], "deployed": peak_deployed, "n_open": 0,
-                "portfolio_value": result["final_cash"],
+                "cash": final_cash_val, "deployed": peak_deployed, "n_open": 0,
+                "portfolio_value": final_portfolio_value,
                 "realized_pnl_cum": stock_pnl,
                 "n_candidates": result["n_candidates"], "n_admitted": result["n_admitted"],
                 "n_rejected_cash": result["n_rejected_cash"],
