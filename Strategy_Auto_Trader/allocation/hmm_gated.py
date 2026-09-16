@@ -122,10 +122,10 @@ class HMMGatedAllocator(AllocationRotator):
         pbull_values = pbull_series.loc[dates].values if pbull_series is not None else [None] * len(dates)
 
         nav = initial_cash
-        navs = [nav]
+        navs = []
         allocations = []
         reasons = []
-        returns = [0.0]
+        daily_returns = []
 
         prev_market_price = market_prices[0]
         prev_defensive_price = defensive_prices[0]
@@ -142,21 +142,22 @@ class HMMGatedAllocator(AllocationRotator):
 
             blended_return = allocation * market_return + (1 - allocation) * defensive_return
             nav = nav * (1 + blended_return)
-            returns.append(blended_return * 100)
+            navs.append(nav)
+            daily_returns.append(blended_return * 100)
 
             prev_market_price = market_prices[i]
             prev_defensive_price = defensive_prices[i]
 
         daily_nav = pd.DataFrame({
             "date": dates,
-            "nav": navs[1:],
+            "nav": navs,
             "allocation_pct": [a * 100 for a in allocations],
-            "daily_return_pct": returns[1:],
+            "daily_return_pct": daily_returns,
         })
         daily_nav["cumulative_return_pct"] = (daily_nav["nav"] / initial_cash - 1) * 100
 
-        rets = np.array(returns[1:]) / 100
-        summary = self._compute_summary(rets, allocations, initial_cash, navs[-1])
+        rets = np.array(daily_returns) / 100
+        summary = self._compute_summary(rets, allocations, initial_cash, nav)
         summary["vix_threshold"] = self.vix_threshold
         summary["pbull_gate"] = self.pbull_gate
 
