@@ -1214,24 +1214,33 @@ def process_cycle(
             from datetime import date as _date
             today = _date.today()
             try:
-                # Get current prices for all three assets from latest market data
-                # (stub: in production, fetch from broker or cached quotes)
-                current_prices = {
-                    "SPY": 500.0,  # Placeholder — will be fetched from broker
-                    "ISF.L": 200.0,
-                    "SHV": 105.0,
-                }
-                orders = allocation_mgr.rebalance(
-                    today=today,
-                    vix=vix_current,
-                    current_price=current_prices,
-                    available_cash=portfolio.available_cash,
-                    positions=portfolio.positions,
-                )
-                for order in orders:
-                    broker.place_order(order)
+                # Fetch current prices from broker (3 tickers × ~2s each = ~6s latency).
+                # TODO: optimize with cached quotes or batch fetch if cycle latency becomes issue.
+                current_prices = {}
+                for ticker in ["SPY", "ISF.L", "SHV"]:
+                    try:
+                        price = broker.get_last_price(ticker)
+                        current_prices[ticker] = price if price > 0 else None
+                    except Exception as _price_err:
+                        logger.warning(f"[{market_name}] Failed to fetch price for {ticker}: {_price_err}")
+                        current_prices[ticker] = None
+
+                # Only rebalance if all three prices are available
+                if all(p is not None for p in current_prices.values()):
+                    orders = allocation_mgr.rebalance(
+                        today=today,
+                        vix=vix_current,
+                        current_price=current_prices,
+                        available_cash=portfolio.available_cash,
+                        positions=portfolio.positions,
+                    )
+                    for order in orders:
+                        broker.place_order(order)
+                else:
+                    _missing = [t for t, p in current_prices.items() if p is None]
+                    logger.warning(f"[{market_name}] Allocation: missing prices for {_missing} — skipping rebalance")
             except Exception as _alloc_err:
-                logger.warning(f"[{market_name}] Allocation rebalance error: {_alloc_err}")
+                logger.error(f"[{market_name}] Allocation rebalance error: {_alloc_err}")
         else:
             logger.debug(f"[{market_name}] Allocation: VIX unavailable — skipping rebalance")
 
