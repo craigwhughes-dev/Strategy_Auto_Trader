@@ -47,14 +47,15 @@ def test_hmm_gated_allocation():
     print("\nLoading hourly SPY for HMM...")
     hmm_cache_path = Path(__file__).resolve().parent.parent.parent / "data" / "cache" / "ibkr_hourly" / "SPY.csv"
     if hmm_cache_path.exists():
-        hmm_data = pd.read_csv(hmm_cache_path, index_col=0, parse_dates=True)
-        hmm_dates = hmm_data.index
-        hmm_closes = hmm_data["Close"].values
-        print(f"Hourly SPY: {len(hmm_data)} bars, {hmm_dates[0]} to {hmm_dates[-1]}")
+        hourly_df = pd.read_csv(hmm_cache_path, index_col=0, parse_dates=True)
+        hmm_dates = hourly_df.index
+        hmm_closes = hourly_df["Close"].values
+        print(f"Hourly SPY: {len(hourly_df)} bars, {hmm_dates[0]} to {hmm_dates[-1]}")
     else:
         print(f"WARNING: Hourly SPY not found at {hmm_cache_path}")
         hmm_dates = None
         hmm_closes = None
+        hourly_df = None
 
     # Test VIX-only allocation (baseline)
     print("\n" + "-" * 100)
@@ -79,20 +80,24 @@ def test_hmm_gated_allocation():
     print("-" * 100)
 
     if hmm_dates is not None and hmm_closes is not None:
+        from .extract_daily_pbull import extract_daily_pbull_from_hourly
+
+        print("Extracting daily P(Bull) from hourly HMM...")
+        pbull_series = extract_daily_pbull_from_hourly(
+            pd.DataFrame({"Close": hourly_df["Close"].values}, index=hmm_dates),
+            spy.index,
+        )
+
         allocator = HMMGatedAllocator(
             market_ticker="SPY",
             vix_threshold=15.0,
             pbull_gate=0.4,
             hmm_dates=hmm_dates,
-            hmm_closes=hmm_closes,
+            hmm_closes=hourly_df["Close"].values,
         )
 
-        print("NOTE: Full HMM backtest requires daily P(Bull) signal.")
-        print("      Currently using VIX-only gate (HMM wiring needed).")
-        print("      Will implement when HMM daily regime available.\n")
-
-        # For now, just show the gating logic
-        result_hmm = allocator.backtest_with_hmm(spy, shv, vix, initial_cash=100_000)
+        print("Running HMM-gated allocation with daily P(Bull)...")
+        result_hmm = allocator.backtest_with_hmm(spy, shv, vix, pbull_series=pbull_series, initial_cash=100_000)
         summary_hmm = result_hmm["summary"]
 
         print(f"Sharpe: {summary_hmm['sharpe']:.2f}")
@@ -103,10 +108,13 @@ def test_hmm_gated_allocation():
 
         # Comparison
         print("\n" + "-" * 100)
-        print("COMPARISON")
+        print("COMPARISON: VIX-only vs HMM-gated")
         print("-" * 100)
-        print(f"Sharpe improvement: {summary_hmm['sharpe'] - summary_vix['sharpe']:.2f}")
-        print(f"DD improvement: {summary_hmm['max_drawdown_pct'] - summary_vix['max_drawdown_pct']:.2f}%")
+        print(f"Sharpe improvement: {summary_hmm['sharpe'] - summary_vix['sharpe']:+.2f}")
+        print(f"Sortino improvement: {summary_hmm['sortino'] - summary_vix['sortino']:+.2f}")
+        print(f"DD improvement: {summary_hmm['max_drawdown_pct'] - summary_vix['max_drawdown_pct']:+.2f}%")
+        print(f"Return difference: {summary_hmm['total_return_pct'] - summary_vix['total_return_pct']:+.2f}%")
+        print(f"Time in market: {summary_hmm['pct_time_in_market']:.1f}% vs {summary_vix['pct_time_in_market']:.1f}%")
 
     else:
         print("Skipping HMM-gated test (hourly data not available)")
