@@ -1,10 +1,10 @@
 """Multi-tier allocation manager for live daemon.
 
-Manages daily rebalancing between SPY/ISF.L/SHV based on VIX tiers.
+Manages daily rebalancing between SPY/ISF.L/CSH2.L based on VIX tiers.
 
 Tier 1 (VIX ≤ 15): SPY (growth)
 Tier 2 (15 < VIX ≤ 17.5): ISF.L (balanced)
-Tier 3 (VIX > 17.5): SHV (defensive)
+Tier 3 (VIX > 17.5): CSH2.L (defensive/money-market)
 
 Daily rebalance: if target asset differs from current, generate sell (current) + buy (target) orders.
 """
@@ -19,8 +19,8 @@ import pandas as pd
 
 _log = logging.getLogger(__name__)
 
-TIER_ASSETS = {1: "SPY", 2: "ISF.L", 3: "SHV"}
-ASSET_TIERS = {"SPY": 1, "ISF.L": 2, "SHV": 3}
+TIER_ASSETS = {1: "SPY", 2: "ISF.L", 3: "CSH2.L"}
+ASSET_TIERS = {"SPY": 1, "ISF.L": 2, "CSH2.L": 3}
 
 
 @dataclass

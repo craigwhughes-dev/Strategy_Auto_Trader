@@ -2,7 +2,7 @@
 
 Tier 1 (VIX ≤ 15): SPY
 Tier 2 (15 < VIX ≤ 20): ISF.L
-Tier 3 (VIX > 20): SHV (defensive)
+Tier 3 (VIX > 20): CSH2.L (defensive/money-market)
 
 Daily rebalance based on VIX close. Outputs portfolio composition and yearly breakdown.
 """
@@ -23,8 +23,8 @@ class MultiTierSignal:
     """Daily allocation decision: which tier (market) to hold."""
     date: pd.Timestamp
     vix: float | None
-    tier: int  # 1=SPY, 2=ISF.L, 3=SHV
-    asset: str  # "SPY", "ISF.L", or "SHV"
+    tier: int  # 1=SPY, 2=ISF.L, 3=CSH2.L
+    asset: str  # "SPY", "ISF.L", or "CSH2.L"
     reason: str
 
 
@@ -33,7 +33,7 @@ class MultiTierAllocator:
 
     Tier 1 (VIX ≤ 15): 100% SPY
     Tier 2 (15 < VIX ≤ 20): 100% ISF.L
-    Tier 3 (VIX > 20): 100% SHV (defensive)
+    Tier 3 (VIX > 20): 100% CSH2.L (defensive/money-market)
     """
 
     def __init__(self, vix_tier1: float = 15.0, vix_tier2: float = 20.0):
@@ -42,7 +42,7 @@ class MultiTierAllocator:
         Args:
             vix_tier1: VIX threshold for Tier 1 (SPY). VIX ≤ this → Tier 1
             vix_tier2: VIX threshold for Tier 2 (ISF.L). vix_tier1 < VIX ≤ this → Tier 2
-                       VIX > this → Tier 3 (SHV)
+                       VIX > this → Tier 3 (CSH2.L)
         """
         self.vix_tier1 = vix_tier1
         self.vix_tier2 = vix_tier2
@@ -71,8 +71,8 @@ class MultiTierAllocator:
             reason = f"VIX={vix:.1f} ∈ ({self.vix_tier1}, {self.vix_tier2}] → Tier 2 (ISF.L)"
         else:
             tier = 3
-            asset = "SHV"
-            reason = f"VIX={vix:.1f} > {self.vix_tier2} → Tier 3 (SHV defensive)"
+            asset = "CSH2.L"
+            reason = f"VIX={vix:.1f} > {self.vix_tier2} → Tier 3 (CSH2.L defensive)"
 
         return MultiTierSignal(
             date=date,
@@ -90,12 +90,12 @@ class MultiTierAllocator:
         vix_df: pd.DataFrame | None = None,
         initial_cash: float = 100_000.0,
     ) -> dict:
-        """Run multi-tier allocation backtest: pick SPY, ISF.L, or SHV daily.
+        """Run multi-tier allocation backtest: pick SPY, ISF.L, or CSH2.L daily.
 
         Args:
             spy_df: Daily OHLCV for SPY, index=date
             isfl_df: Daily OHLCV for ISF.L, index=date
-            shv_df: Daily OHLCV for SHV, index=date
+            shv_df: Daily OHLCV for tier-3 asset (CSH2.L), index=date
             vix_df: Daily VIX, index=date, use "Close" column (case-insensitive)
             initial_cash: Starting capital
 
@@ -119,7 +119,7 @@ class MultiTierAllocator:
 
         spy_closes = get_column(spy_df, ["Close", "CLOSE", "close"]).loc[dates].values
         isfl_closes = get_column(isfl_df, ["Close", "CLOSE", "close"]).loc[dates].values
-        shv_closes = get_column(shv_df, ["Close", "CLOSE", "close"]).loc[dates].values
+        tier3_closes = get_column(shv_df, ["Close", "CLOSE", "close"]).loc[dates].values
         vix_closes = get_column(vix_df, ["Close", "CLOSE", "close"]).loc[dates].values if vix_df is not None else [None] * len(dates)
 
         nav = initial_cash
@@ -130,7 +130,7 @@ class MultiTierAllocator:
 
         prev_spy_price = spy_closes[0]
         prev_isfl_price = isfl_closes[0]
-        prev_shv_price = shv_closes[0]
+        prev_tier3_price = tier3_closes[0]
         prev_asset = "SPY"
 
         for i, date in enumerate(dates):
@@ -143,8 +143,8 @@ class MultiTierAllocator:
                 daily_return = (spy_closes[i] - prev_spy_price) / prev_spy_price if prev_spy_price > 0 else 0
             elif signal.asset == "ISF.L":
                 daily_return = (isfl_closes[i] - prev_isfl_price) / prev_isfl_price if prev_isfl_price > 0 else 0
-            else:  # SHV
-                daily_return = (shv_closes[i] - prev_shv_price) / prev_shv_price if prev_shv_price > 0 else 0
+            else:  # CSH2.L (tier 3)
+                daily_return = (tier3_closes[i] - prev_tier3_price) / prev_tier3_price if prev_tier3_price > 0 else 0
 
             nav = nav * (1 + daily_return)
             returns.append(daily_return * 100)
@@ -152,7 +152,7 @@ class MultiTierAllocator:
             navs.append(nav)
             prev_spy_price = spy_closes[i]
             prev_isfl_price = isfl_closes[i]
-            prev_shv_price = shv_closes[i]
+            prev_tier3_price = tier3_closes[i]
             prev_asset = signal.asset
 
         daily_nav = pd.DataFrame({
