@@ -178,6 +178,9 @@ def main():
     # Add market context at the front
     df_merged = market_context.merge(df_merged, on="year", how="outer").sort_values("year")
 
+    # Fill NaN with 0 (empty tier means $0 P&L, not missing data)
+    df_merged = df_merged.fillna(0)
+
     # Output CSV with proper scaling (decimals, not %)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
