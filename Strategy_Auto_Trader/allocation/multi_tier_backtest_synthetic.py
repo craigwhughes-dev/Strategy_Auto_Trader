@@ -27,6 +27,21 @@ def load_synthetic_daily(csv_path: Path, start_date: str, end_date: str) -> pd.D
     return daily
 
 
+def count_tier_switches(daily_nav: pd.DataFrame) -> pd.DataFrame:
+    """Count tier switches per year. Switch = day-to-day asset change."""
+    daily_nav = daily_nav.copy()
+    daily_nav["date"] = pd.to_datetime(daily_nav["date"])
+    daily_nav["year"] = daily_nav["date"].dt.year
+    daily_nav["asset_changed"] = daily_nav["asset"] != daily_nav["asset"].shift(1)
+
+    rows = []
+    for year, grp in daily_nav.groupby("year"):
+        switches = grp["asset_changed"].sum()
+        rows.append({"year": year, "switches": int(switches)})
+
+    return pd.DataFrame(rows)
+
+
 def yearly_breakdown(
     result: dict,
     spy_df: pd.DataFrame,
@@ -44,6 +59,10 @@ def yearly_breakdown(
     daily_nav["year"] = daily_nav["date"].dt.year
     daily_nav["nav_prev"] = daily_nav["nav"].shift(1).fillna(initial_cash)
     daily_nav["nav_delta"] = daily_nav["nav"] - daily_nav["nav_prev"]
+
+    # Count switches per year
+    switches_df = count_tier_switches(daily_nav)
+    switches_by_year = dict(zip(switches_df["year"], switches_df["switches"]))
 
     rows = []
     for year, grp in daily_nav.groupby("year"):
@@ -72,6 +91,7 @@ def yearly_breakdown(
             "csh2_tier_pnl": pnl_csh2,
             "spy_bh_pct": bh_pct(spy_df),
             "isfl_bh_pct": bh_pct(isfl_df),
+            "tier_switches": switches_by_year.get(year, 0),
         })
 
     return pd.DataFrame(rows)
@@ -126,14 +146,15 @@ def main():
         if args.yearly_threshold is not None and isfl_threshold == args.yearly_threshold:
             yearly_df = yearly_breakdown(result, spy_df, isfl_df, args.initial_cash)
 
-            print("\n" + "=" * 140)
+            print("\n" + "=" * 160)
             print(f"YEARLY BREAKDOWN (ISF.L threshold <= {isfl_threshold})")
-            print("=" * 140)
-            print(f"{'Year':<6}{'Combined %':>11}{'Combined P&L':>15}{'SPY tier P&L':>15}{'ISF.L tier P&L':>16}{'CSH2 tier P&L':>15}{'SPY B&H %':>12}{'FTSE B&H %':>12}")
+            print("=" * 160)
+            print(f"{'Year':<6}{'Combined %':>11}{'Combined P&L':>15}{'SPY P&L':>12}{'ISF P&L':>12}{'CSH2 P&L':>12}{'SPY B&H %':>12}{'FTSE B&H %':>12}{'Switches':>9}")
             for _, r in yearly_df.iterrows():
-                print(f"{int(r['year']):<6}{r['combined_return_pct']:>10.2f}%{r['combined_pnl']:>14,.0f} {r['spy_tier_pnl']:>14,.0f} {r['isfl_tier_pnl']:>15,.0f} {r['csh2_tier_pnl']:>14,.0f} {r['spy_bh_pct']:>11.2f}% {r['isfl_bh_pct']:>11.2f}%")
-            print("=" * 140)
+                print(f"{int(r['year']):<6}{r['combined_return_pct']:>10.2f}%{r['combined_pnl']:>14,.0f} {r['spy_tier_pnl']:>11,.0f} {r['isfl_tier_pnl']:>11,.0f} {r['csh2_tier_pnl']:>11,.0f} {r['spy_bh_pct']:>11.2f}% {r['isfl_bh_pct']:>11.2f}% {int(r['tier_switches']):>8}")
+            print("=" * 160)
             print(f"Totals: combined P&L ${yearly_df['combined_pnl'].sum():,.0f}, SPY-tier P&L ${yearly_df['spy_tier_pnl'].sum():,.0f}, ISF.L-tier P&L ${yearly_df['isfl_tier_pnl'].sum():,.0f}, CSH2-tier P&L ${yearly_df['csh2_tier_pnl'].sum():,.0f}")
+            print(f"Total switches across all years: {int(yearly_df['tier_switches'].sum())}")
             yearly_out = Path(f"data/allocation_backtest/multi_tier_yearly_synthetic_isfl{isfl_threshold}.csv")
             yearly_out.parent.mkdir(parents=True, exist_ok=True)
             # Format percentages as strings to avoid 100x multiplication on re-read
@@ -142,7 +163,17 @@ def main():
             yearly_df_out['spy_bh_pct'] = yearly_df_out['spy_bh_pct'].apply(lambda x: f"{x:.2f}%")
             yearly_df_out['isfl_bh_pct'] = yearly_df_out['isfl_bh_pct'].apply(lambda x: f"{x:.2f}%")
             yearly_df_out.to_csv(yearly_out, index=False)
-            print(f"Saved: {yearly_out}")
+            print(f"Saved: {yearly_out}\n")
+
+            # Also print a summary of switches by year
+            print("TIER SWITCHES PER YEAR:")
+            print(f"{'Year':<6}{'Switches':>10}")
+            for _, r in yearly_df.iterrows():
+                print(f"{int(r['year']):<6}{int(r['tier_switches']):>10}")
+            avg_switches = yearly_df['tier_switches'].mean()
+            print(f"Average switches/year: {avg_switches:.1f}")
+            print(f"Max switches in a year: {int(yearly_df['tier_switches'].max())} ({int(yearly_df.loc[yearly_df['tier_switches'].idxmax(), 'year'])})")
+            print()
 
     print("=" * 120)
 
