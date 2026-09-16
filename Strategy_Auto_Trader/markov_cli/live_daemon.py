@@ -461,7 +461,7 @@ def write_app_status_snapshot(
     config: dict,
     last_cycle_hour: dict,
     logger: logging.Logger,
-    cash_parking_mgr: object | None = None,
+    allocation_mgr: object | None = None,
 ) -> None:
     """Write app_status.json snapshot atomically every poll loop (~60s).
 
@@ -520,7 +520,7 @@ def write_app_status_snapshot(
         "interest_accrued": portfolio.interest_accrued,
         "markets": markets_status,
         "positions": positions_snapshot,
-        "cash_parking": cash_parking_mgr.app_status_dict() if cash_parking_mgr is not None else None,
+        "allocation": allocation_mgr.app_status_dict() if allocation_mgr is not None else None,
     }
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -545,14 +545,14 @@ def _write_app_status_snapshot_safe(
     config: dict,
     last_cycle_hour: dict,
     logger: logging.Logger,
-    cash_parking_mgr: object | None = None,
+    allocation_mgr: object | None = None,
 ) -> None:
     """write_app_status_snapshot(), swallowing errors so a snapshot failure
     can't interrupt the ticker-processing loop it's interleaved into."""
     try:
         write_app_status_snapshot(
             portfolio, daemon_state, config, last_cycle_hour, logger,
-            cash_parking_mgr=cash_parking_mgr,
+            allocation_mgr=allocation_mgr,
         )
     except Exception as e:
         logger.error(f"Failed to write app_status.json: {e}", exc_info=True)
@@ -1076,7 +1076,7 @@ def process_cycle(
     protective_stops: bool = False,
     stop_buffer_pct: float = 1.5,
     workers: int = 1,
-    cash_parking_mgr: object | None = None,
+    allocation_mgr: object | None = None,
 ) -> int:
     """Run one market cycle: prioritize open positions, then round-robin through candidates.
 
@@ -1204,43 +1204,36 @@ def process_cycle(
         protective_stops=protective_stops, stop_buffer_pct=stop_buffer_pct,
     )
 
-    # Cash parking rebalance — runs once per cycle, after main signal execution.
-    # Reads ISF.L p_bull_smooth from this cycle's processed results; fails open
-    # (no rebalance) if ISF.L wasn't evaluated this cycle.
-    if cash_parking_mgr is not None:
-        pbull = next(
-            (
-                p["result"].get("p_bull_smooth")
-                for p in processed
-                if p.get("ticker") == "ISF.L" and p.get("result")
-            ),
-            None,
-        )
-        if pbull is not None:
-            from ..quant_hmm.sentiment import vix_regime as _vix_regime
-            vix_data = _vix_regime()
-            vix_current = vix_data.get("vix_current")
-            if vix_current is not None:
-                from datetime import date as _date
-                today = _date.today()
-                try:
-                    orders = cash_parking_mgr.rebalance(
-                        broker=broker,
-                        available_cash=portfolio.available_cash,
-                        vix_level=vix_current,
-                        current_positions=portfolio.positions,
-                        today=today,
-                    )
-                    for order in orders:
-                        broker.place_order(order)
-                        if order.action == "SELL":
-                            cash_parking_mgr.record_sell_settled(order.ticker, today)
-                except Exception as _cp_err:
-                    logger.warning(f"[{market_name}] Cash parking rebalance error: {_cp_err}")
-            else:
-                logger.debug(f"[{market_name}] Cash parking: VIX unavailable — skipping rebalance")
+    # Multi-tier allocation rebalance — runs once per cycle, after main signal execution.
+    # VIX-based rebalance between SPY (tier1, VIX≤15), ISF.L (tier2, 15<VIX≤17.5), SHV (tier3, VIX>17.5).
+    if allocation_mgr is not None:
+        from ..quant_hmm.sentiment import vix_regime as _vix_regime
+        vix_data = _vix_regime()
+        vix_current = vix_data.get("vix_current")
+        if vix_current is not None:
+            from datetime import date as _date
+            today = _date.today()
+            try:
+                # Get current prices for all three assets from latest market data
+                # (stub: in production, fetch from broker or cached quotes)
+                current_prices = {
+                    "SPY": 500.0,  # Placeholder — will be fetched from broker
+                    "ISF.L": 200.0,
+                    "SHV": 105.0,
+                }
+                orders = allocation_mgr.rebalance(
+                    today=today,
+                    vix=vix_current,
+                    current_price=current_prices,
+                    available_cash=portfolio.available_cash,
+                    positions=portfolio.positions,
+                )
+                for order in orders:
+                    broker.place_order(order)
+            except Exception as _alloc_err:
+                logger.warning(f"[{market_name}] Allocation rebalance error: {_alloc_err}")
         else:
-            logger.debug(f"[{market_name}] Cash parking: ISF.L not in cycle — skipping rebalance")
+            logger.debug(f"[{market_name}] Allocation: VIX unavailable — skipping rebalance")
 
     elapsed = time.time() - cycle_start
     n_timeouts = sum(
@@ -2185,8 +2178,8 @@ def main(argv: list[str] | None = None) -> int:
     currency = get_market_currency(primary_market, config)
     portfolio = PortfolioManager(capital_pot, state_path, currency=currency)
 
-    from ..cash_parking.manager import CashParkingManager
-    cash_parking_mgr = CashParkingManager(initial_cash=capital_pot)
+    from ..allocation.allocation_manager import MultiTierAllocationManager
+    allocation_mgr = MultiTierAllocationManager(vix_tier1=15.0, vix_tier2=17.5)
 
     # Broker connection is async and can hang; skip it here and let it fail gracefully
     # when trades are attempted. Daemon can still process tickers and generate signals.
@@ -2366,7 +2359,7 @@ def main(argv: list[str] | None = None) -> int:
                             protective_stops=args.protective_stops,
                             stop_buffer_pct=args.stop_buffer_pct,
                             workers=args.workers,
-                            cash_parking_mgr=cash_parking_mgr,
+                            allocation_mgr=allocation_mgr,
                         )
 
                         daemon_state["cycle_in_progress"] = None
@@ -2384,7 +2377,7 @@ def main(argv: list[str] | None = None) -> int:
                 # Write app_status.json snapshot ALWAYS, even on error — app needs fresh heartbeat
                 _write_app_status_snapshot_safe(
                     portfolio, daemon_state, config, last_cycle_hour, logger,
-                    cash_parking_mgr=cash_parking_mgr,
+                    allocation_mgr=allocation_mgr,
                 )
 
                 # Sleep before next iteration (5s on error, normal interval on

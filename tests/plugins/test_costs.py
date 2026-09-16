@@ -140,6 +140,6 @@ class TestEngineParity:
         eq = np.ones(len(detail))
         stats = _build_quant_backtest_stats(
             detail, ret, ret, eq, eq, 1000.0, vals, [], 0.1,
-            transaction_costs_total=costs, interest_earned=interest,
+            transaction_costs_total=costs,
         )
         assert stats["transaction_costs_total"] == pytest.approx(round(costs, 2))
