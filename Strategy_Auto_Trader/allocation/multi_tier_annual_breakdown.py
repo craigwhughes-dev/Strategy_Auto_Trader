@@ -58,25 +58,25 @@ def annual_breakdown(
         tier_names = grp["asset"].unique()
         tier_pnls = {name: pnl_by_tier.get(name, 0.0) for name in tier_names}
 
-        # Underlying asset B&H returns (context, not strategy comparison)
-        def bh_return(df: pd.DataFrame) -> float:
+        # Underlying market returns (what market actually did that year)
+        def market_return(df: pd.DataFrame) -> float:
             yr = df.loc[f"{year}-01-01":f"{year}-12-31"]
             if len(yr) < 2:
                 return 0.0
             return (yr["Close"].iloc[-1] - yr["Close"].iloc[0]) / yr["Close"].iloc[0]
 
-        spy_bh = bh_return(spy_df)
-        isfl_bh = bh_return(isfl_df)
-        eqgb_bh = bh_return(eqgb_df)
+        spy_mkt = market_return(spy_df)
+        isfl_mkt = market_return(isfl_df)
+        eqgb_mkt = market_return(eqgb_df)
 
         rows.append({
             "year": year,
             "combined_return": combined_return,  # Decimal (0.05 = 5%)
             "combined_pnl": combined_pnl,
             **{f"{name}_pnl": tier_pnls[name] for name in tier_names},
-            "spy_bh_pct": spy_bh,
-            "isfl_ftse_bh_pct": isfl_bh,
-            "eqgb_nasdaq_bh_pct": eqgb_bh,
+            "spy_mkt_pct": spy_mkt,
+            "isfl_ftse_mkt_pct": isfl_mkt,
+            "eqgb_nasdaq_mkt_pct": eqgb_mkt,
         })
 
     return pd.DataFrame(rows)
