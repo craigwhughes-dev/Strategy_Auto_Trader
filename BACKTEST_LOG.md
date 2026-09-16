@@ -224,7 +224,9 @@ Admission: 1479/2212 admitted (0 rejected for cash, 241 rejected for kelly≤0, 
 
 **Note on CSH2 in synthetic:** Synthetic data uses Brownian-bridge hourly generation; real calendar dates do not align with synthetic index dates. CSH2 historical returns (built from real BoE 2002-2024 + IBKR 2024-09-16 onward) cannot be matched to synthetic dates via Series.asof(). CSH2 sweep disabled (returns NaN/blank) in this run. Stock P&L unaffected; comparable to no-CSH2 baseline for this reason.
 
-**Bug noted and FIXED (commit 518105b):** When CSH2 returns unavailable (NaN), position_summary portfolio_value failed (cash + deployed + csh2_value → NaN). Fix applied: initialize csh2_value=0.0 at start, safely fallback to 0 in portfolio_value calc. Data now correct in all cases.
+**Bugs noted and FIXED:**
+- **518105b:** Initialize csh2_value=0.0, fallback NaN→0 in portfolio_value calc. Data rows fixed.
+- **b5f69ed:** SUMMARY row uses last equity_curve values instead of recalculating final_cash (which could be NaN). SUMMARY row fixed. All data now correct.
 
 **Real vs Synthetic comparison:**
 - Real (2yr, 2024-2026): Sharpe 1.71, Sortino 2.69, stock P&L +£6,155 (61.5% annualized over 2yr), max DD -1.7%
