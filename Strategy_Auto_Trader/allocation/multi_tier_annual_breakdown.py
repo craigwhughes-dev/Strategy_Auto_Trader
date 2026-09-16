@@ -153,6 +153,9 @@ def main():
     df_3tier = annual_breakdown(result_3tier, spy_df, isfl_df, eqgb_df, 100_000.0)
     df_4tier = annual_breakdown(result_4tier, spy_df, isfl_df, eqgb_df, 100_000.0)
 
+    # Remove Nasdaq market % from 3-tier (doesn't use Nasdaq)
+    df_3tier = df_3tier.drop(columns=["eqgb_nasdaq_mkt_pct"], errors="ignore")
+
     # Merge on year
     df_merged = df_3tier.merge(
         df_4tier,
