@@ -390,6 +390,7 @@ def arbitrate(
     csh2_qty = 0.0  # shares held
     csh2_entry_price = 0.0  # GBP per share
     csh2_pnl = 0.0  # cumulative P&L
+    csh2_value = 0.0  # current market value of CSH2 position
 
     for day in all_days:
         # Accrue CSH2 return from previous day
@@ -561,7 +562,7 @@ def arbitrate(
             "deployed": deployed,
             "csh2_value": csh2_value,
             "n_open": len(open_positions),
-            "portfolio_value": cash + deployed + csh2_value,
+            "portfolio_value": cash + deployed + (csh2_value if pd.notna(csh2_value) else 0.0),
             "realized_pnl_cum": sum(r.pnl_usd for r in executed),
             "csh2_pnl_cum": csh2_pnl,
         })
