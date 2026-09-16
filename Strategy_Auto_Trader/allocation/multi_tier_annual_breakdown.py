@@ -153,8 +153,19 @@ def main():
     df_3tier = annual_breakdown(result_3tier, spy_df, isfl_df, eqgb_df, 100_000.0)
     df_4tier = annual_breakdown(result_4tier, spy_df, isfl_df, eqgb_df, 100_000.0)
 
-    # Remove Nasdaq market % from 3-tier (doesn't use Nasdaq)
-    df_3tier = df_3tier.drop(columns=["eqgb_nasdaq_mkt_pct"], errors="ignore")
+    # Extract market returns once (same for both 3-tier and 4-tier)
+    market_context = df_4tier[["year", "spy_mkt_pct", "isfl_ftse_mkt_pct", "eqgb_nasdaq_mkt_pct"]].copy()
+    market_context.columns = ["year", "SPY_mkt_pct", "FTSE_mkt_pct", "Nasdaq_mkt_pct"]
+
+    # Remove market % from both dataframes (will add once)
+    df_3tier = df_3tier.drop(
+        columns=["spy_mkt_pct", "isfl_ftse_mkt_pct", "eqgb_nasdaq_mkt_pct"],
+        errors="ignore"
+    )
+    df_4tier = df_4tier.drop(
+        columns=["spy_mkt_pct", "isfl_ftse_mkt_pct", "eqgb_nasdaq_mkt_pct"],
+        errors="ignore"
+    )
 
     # Merge on year
     df_merged = df_3tier.merge(
@@ -163,6 +174,9 @@ def main():
         suffixes=("_3tier", "_4tier"),
         how="outer"
     ).sort_values("year")
+
+    # Add market context at the front
+    df_merged = market_context.merge(df_merged, on="year", how="outer").sort_values("year")
 
     # Output CSV with proper scaling (decimals, not %)
     out_dir = Path(args.out_dir)
