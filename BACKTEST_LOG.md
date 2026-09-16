@@ -2,6 +2,69 @@
 
 Running log of every backtest/scan run — newest entry on top. One block per run.
 
+---
+
+## 2026-09-16 — Nasdaq Tier VXN Gating Optimization (Phase 1 & Phase 2)
+
+Tool: vxn_threshold_backtest.py (standalone allocation backtest)
+Scope: EQGB.L (GBP-hedged Nasdaq-100 UCITS) × 6 VXN thresholds
+Journal: data/vxn_threshold_results.csv
+Data range: 2017-10-26 to 2026-09-16 (3,248 daily bars, 9 years)
+
+**Objective:** Find optimal VXN threshold for gating EQGB.L entry. Strategy: hold EQGB.L only when daily VXN < threshold, else sit in cash. Measure which threshold maximizes Sharpe/return vs buy-and-hold baseline.
+
+**Phase 1: Baseline (Buy-Hold)**
+
+Metric | Value
+---|---
+Sharpe | 0.728
+Sortino | 0.983
+Total return | 122.3%
+Max drawdown | -27.9%
+Allocation | 100% (always in)
+
+**Phase 2: VXN Gate Sweep Results**
+
+| VXN Threshold | Sharpe | Sortino | Return | Max DD | Allocation % | Notes |
+|---|---|---|---|---|---|---|
+| Baseline (always in) | 0.728 | 0.983 | 122.3% | -27.9% | 100.0% | Control |
+| VXN < 12 | — | — | 0.0% | 0.0% | 0.0% | Never triggered (VXN never <12) |
+| VXN < 15 | 0.604 | — | 5.9% | -0.04% | 1.7% | Worse than baseline (too restrictive) |
+| VXN < 18 | 1.526 | 0.730 | 75.9% | -3.0% | 13.2% | Improvement (+109% Sharpe) |
+| VXN < 20 | 1.962 | 1.335 | 233.8% | -4.1% | 24.0% | Significant improvement (+170% Sharpe) |
+| **VXN < 23** | **1.982** | **1.632** | **425.0%** | **-12.3%** | **37.6%** | **WINNER: Peak Sharpe (+172%)** |
+| VXN < 25 | 1.858 | 1.692 | 490.1% | -13.1% | 44.1% | Highest return, but Sharpe declining |
+
+**Key Finding: VXN < 23 is optimal**
+
+Metric | Improvement vs Baseline
+---|---
+Sharpe ratio | +172% (0.728 → 1.982)
+Total return | +3.5× (122.3% → 425.0%)
+Max drawdown | -56% (−27.9% → −12.3%, absolute)
+Allocation | 37.6% in-market, 62.4% cash (selective entry)
+
+Interpretation: Gating EQGB.L entry at VXN<23 yields material risk-adjusted improvement. The strategy captures 3.5× the upside of buy-hold while reducing peak drawdown by more than half. Entry occurs ~37.6% of days (mostly in calm/low-vol regimes), avoiding worst drawdowns in crisis periods.
+
+**Phase 3: Decision**
+
+Criterion | Result
+---|---
+Sharpe improvement > 0.1? | ✓ Yes (+172%) — PASS
+Drawdown acceptable? | ✓ Yes (−12.3% vs −27.9%) — PASS
+Return material? | ✓ Yes (425% vs 122%) — PASS
+Ready for live validation? | → Not yet (code changes required; see Phase 4 prep below)
+
+**Phase 4 Prep (Not Yet Executed)**
+
+Next steps for live validation:
+1. Add `vxn_entry_gate_threshold=23.0` class attribute to a new/modified allocation strategy.
+2. Integrate `fetch_index_hourly("VXN", "CBOE")` into live_daemon for real-time VXN gating.
+3. Paper-trade 2–4 weeks, confirm allocation behavior matches backtest (% days in EQGB.L ~37.6%).
+4. Monitor Sharpe/return vs baseline daemon output.
+
+---
+
 **Rule: whenever a backtest/scan finishes, or the user asks for a summary of one, update this log.** Include the per-strategy summary table below (not just prose) whenever the run covers multiple strategies. Add latest to top of file (newest entry at top, oldest at bottom -- always). Include date and time of run
 
 **Rule: any `live_sim.py` run (has a `position_summary.csv`) must ship a chart alongside the log entry.** 3-panel line chart, one line per strategy, all vs date: (1) deployed £ (amount committed to market), (2) total P&L £ (`portfolio_value - pot_size`), (3) `n_open` (number of live/open trades). Drop `date == 'SUMMARY'` rows first. Save to `reports/<journal_basename>_chart.png`, link it from the log entry (`Chart: <path>`). Isolated-pot runs (`full_scan.py`, no `position_summary.csv`) have no equity curve to chart — table only.
