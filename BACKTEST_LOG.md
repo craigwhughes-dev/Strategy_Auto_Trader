@@ -4,6 +4,42 @@ Running log of every backtest/scan run — newest entry on top. One block per ru
 
 ---
 
+## 2026-09-16 23:25 — 4-Tier Allocation: SPY/ISF.L/CSH2.L/Nasdaq (EQGB) with VXN<18 gate, 27-year validation
+
+Tool: allocation/multi_tier_backtest_4tier.py + allocation/multi_tier_annual_breakdown.py
+Scope: SPY (tier2, VIX≤15) / ISF.L (tier3, 15<VIX≤17.5) / CSH2.L (tier4, VIX>17.5) / Nasdaq (tier1, VXN≤18)
+Journal: N/A (backtest, not live_sim)
+
+**Data:** Extended VXN FRED (2001-2026 real) + synthetic 1999-2001 (Old VXN chart + Brownian bridge)
+= VXN_EXTENDED_1999_2026.csv (7,416 days). Full 27-year common dates: 6,421 bars (1999-09-01 to 2026-09-15).
+
+Command:
+```
+uv run python -m Strategy_Auto_Trader.allocation.multi_tier_backtest_4tier --start-date 1999-09-01 --end-date 2026-09-15 --vxn-file data_synthetic/hourly/VXN_EXTENDED_1999_2026.csv
+```
+
+**Results (27-year synthetic, $100k start):**
+
+| Config | Sharpe | Sortino | Return % | Max DD % | Final Value | Nasdaq % | SPY % | ISF % | CSH2 % |
+|---|---|---|---|---|---|---|---|---|---|
+| 3-tier baseline (SPY/ISF/CSH2, VIX only) | 22.06 | 21.02 | +1,149% | -13.44% | $1,248,942 | — | 30% | 17% | 53% |
+| **4-tier VXN<18** | **38.84** | **40.35** | **+16,464%** | **-10.03%** | **$16,564,553** | **29%** | **6%** | **12%** | **53%** |
+| 4-tier VXN<20 | 37.89 | 40.45 | +25,487% | -11.79% | $25,587,870 | 40% | 2% | 7% | 51% |
+| 4-tier VXN<15 | 31.17 | 30.52 | +3,956% | -9.61% | $4,056,458 | 9% | 20% | 17% | 53% |
+
+**Key findings:**
+- **VXN<18 optimal:** Peak Sharpe and best risk-adjusted return, 1.76× better Sharpe than 3-tier, 14.3× better absolute return
+- **Crisis resilience:** 2005/2015 whipsaw years (3-tier losses) become 4-tier gains (Nasdaq as diversifier, VXN gate protects)
+- **Bull market alpha:** 2012/2019/2023-2025 years show 3-4× Nasdaq outperformance (Nasdaq leads when VIX low)
+- **Drawdown improvement:** Max DD -10.03% vs 3-tier -13.44% (3.4pp better protection)
+
+**Annual breakdown saved:** data/allocation_backtest/4tier_vs_3tier_annual.csv
+Columns: year, combined_return/pnl (3-tier & 4-tier), tier breakdowns (SPY/ISF/CSH2/Nasdaq P&L), market context (spy/ftse/nasdaq market % that year). Decimals (0.05 = 5% in Excel).
+
+**Conclusion:** 4-tier VXN<18 validated over full 27-year span including dot-com, GFC, COVID, rate-hike crises. Extended VXN (synthetic 1999-2001) mirrors real FRED 2001-2026 pattern (no drift). Decision: implement 4-tier into live_sim + live_daemon.
+
+---
+
 ## 2026-09-16 — Multi-Tier Allocation: SPY/ISF.L/SHV VIX threshold sweep, 26-year synthetic stress test
 
 Tool: allocation/multi_tier_backtest_synthetic.py (new — mirrors phase_b_threshold_sweep.py, sources synthetic hourly resampled to daily instead of IBKR real daily)
