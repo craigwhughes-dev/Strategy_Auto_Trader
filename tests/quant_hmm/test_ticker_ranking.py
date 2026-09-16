@@ -112,7 +112,7 @@ class TestGenerateCandidates:
         def fake_fetch(ticker, strategy_name, vol_filter_tag, vol_filter_ok=True,
                       use_seasonal_volume=False, source="yfinance",
                       df=None, use_persistent_cache=True, hmm_cache_dir=None,
-                      historical_only=False, vol_window=504):
+                      historical_only=False, vol_window=504, end_date=None):
             rec = TradeRecord(date_opened="2026-01-12", ticker=ticker, strategy=strategy_name,
                                entry_score=1.0, kelly_fraction=0.1, return_pct=0.05)
             cand = Candidate(

@@ -462,52 +462,6 @@ class TestSimulateStrategy:
         assert len(result) == 1
         assert result[0].ticker == "AFTER"
 
-    def test_interest_accrues_on_idle_cash_across_day_gap(self, ts_base):
-        """A long idle gap between trades earns interest, growing the pool for the next entry."""
-        from Strategy_Auto_Trader.markov_cli.live_sim import simulate_strategy, Candidate
-
-        rec1 = TradeRecord(
-            date_opened="2026-01-12", ticker="A", strategy="test",
-            entry_score=1.0, kelly_fraction=0.2, return_pct=0.0, entry_price=1.0,
-        )
-        cand1 = Candidate(
-            ticker="A", date_opened=ts_base, date_closed=ts_base,  # opens and closes day 0
-            entry_score=1.0, kelly_fraction=0.2, return_pct=0.0, record=rec1,
-        )
-
-        rec2 = TradeRecord(
-            date_opened="2026-07-31", ticker="B", strategy="test",
-            entry_score=1.0, kelly_fraction=0.1, return_pct=0.10, entry_price=1.0,
-        )
-        cand2 = Candidate(
-            ticker="B", date_opened=ts_base + pd.Timedelta(days=200),
-            date_closed=ts_base + pd.Timedelta(days=205),
-            entry_score=1.0, kelly_fraction=0.1, return_pct=0.10, record=rec2,
-        )
-
-        with mock.patch(
-            "Strategy_Auto_Trader.markov_cli.live_sim.fetch_and_extract",
-            side_effect=[[cand1], [cand2]],
-        ):
-            result = simulate_strategy(
-                tickers=["A", "B"],
-                strategy_name="test",
-                start_date="2026-01-12",
-                initial_cash=5000.0,
-                trade_cost=0.0,
-            )
-
-        assert len(result) == 2
-        # Idle cash after trade A (4000) earns ~200 days of GBP tier-1 interest (4%/yr)
-        # before trade B is sized: cash = 4000 + 4000*0.04/365*200 + 1000(A's release) = 5087.67
-        # kelly-implied alloc = 0.1 * 5087.67 = 508.77 shares at $1/share, floored to
-        # 508 whole shares (entry_price=1.0 here, so 1 share == $1, isolating the
-        # floor's rounding effect cleanly); pnl_B = 508 * 0.10 = 50.80
-        pnl_b = result[1].pnl_usd
-        assert pnl_b == pytest.approx(50.8, abs=0.01)
-        # Without interest, alloc_B would be 0.1 * 5000 = 500, pnl_B = 50.00
-        assert pnl_b > 50.0
-
 
 class TestFilterCandidatesByDailyTrendQuality:
 

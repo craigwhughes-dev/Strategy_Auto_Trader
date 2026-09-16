@@ -960,17 +960,16 @@ def _execute_processed_tickers(
             logger.info(f"[{market_name}] Buying paused by user — new entries blocked")
 
         # VIX entry gate: block new entries when ^VIX >= strategy-owned threshold.
-        # Fail open (allow entries) if VIX fetch fails — a network hiccup must
-        # not prevent the daemon from trading. SELL signals are never affected.
+        # Uses hourly VIX data for real-time gating. Fail open if fetch fails.
         if allow_new_entries:
             from ..strategy.base.registry import STRATEGY_REGISTRY
-            from ..quant_hmm.sentiment import vix_regime
+            from ..quant_hmm.sentiment import fetch_vix_hourly
             strategy_name = config.get("markets", {}).get(market_name, {}).get("defaults", {}).get("strategy", "")
             entry_cls = STRATEGY_REGISTRY.get(strategy_name, {}).get("entry")
             vix_threshold = getattr(entry_cls, "vix_entry_gate_threshold", None)
             if vix_threshold is not None:
-                vix_data = vix_regime()
-                vix_current = vix_data.get("vix_current")
+                vix_df = fetch_vix_hourly()
+                vix_current = float(vix_df["Close"].iloc[-1]) if vix_df is not None and not vix_df.empty else None
                 if vix_current is not None and vix_current >= vix_threshold:
                     allow_new_entries = False
                     logger.warning(
@@ -1207,9 +1206,9 @@ def process_cycle(
     # Multi-tier allocation rebalance — runs once per cycle, after main signal execution.
     # VIX-based rebalance between SPY (tier1, VIX≤15), ISF.L (tier2, 15<VIX≤17.5), SHV (tier3, VIX>17.5).
     if allocation_mgr is not None:
-        from ..quant_hmm.sentiment import vix_regime as _vix_regime
-        vix_data = _vix_regime()
-        vix_current = vix_data.get("vix_current")
+        from ..quant_hmm.sentiment import fetch_vix_hourly as _fetch_vix_hourly
+        vix_df = _fetch_vix_hourly()
+        vix_current = float(vix_df["Close"].iloc[-1]) if vix_df is not None and not vix_df.empty else None
         if vix_current is not None:
             from datetime import date as _date
             today = _date.today()
@@ -2005,10 +2004,6 @@ def check_nightly_reconciliation(
         # A broker fetch error is not a daily result — leave the date unset so
         # it retries on the next poll within the run window.
         if outcome in ("clean", "mismatch"):
-            # Accrue daily interest on uninvested cash
-            interest = portfolio.accrue_daily_interest()
-            if interest > 0.01:
-                logger.info(f"Daily interest accrued: {interest:.2f}")
             portfolio.save()
             daemon_state["last_reconcile_date"] = today
             daemon_state["reconciliation_consecutive_error_days"] = 0

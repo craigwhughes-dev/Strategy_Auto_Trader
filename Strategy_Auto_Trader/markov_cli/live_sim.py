@@ -643,8 +643,7 @@ def simulate_strategy(
     executed = result["executed"]
     total_pnl = sum(r.pnl_usd for r in executed)
     logger.info(f"\n  {strategy_name}: {len(executed)} trade(s) executed, "
-          f"final pot £{result['final_cash']:,.2f} (P&L £{total_pnl:+,.2f} on £{initial_cash:,.0f} start, "
-          f"£{result['total_interest']:,.2f} interest on idle cash)")
+          f"final pot £{result['final_cash']:,.2f} (P&L £{total_pnl:+,.2f} on £{initial_cash:,.0f} start)")
 
     return executed
 

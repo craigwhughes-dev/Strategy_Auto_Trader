@@ -10,7 +10,6 @@ from pathlib import Path
 from .types import FillResult
 from ..core.atomic_io import atomic_write_json
 from ..plugins.costs import IbkrTieredCost
-from ..plugins.interest import IbkrTieredInterest
 
 
 def slippage_bps(signal_price: float, fill_price: float, action: str) -> float | None:
@@ -41,7 +40,6 @@ class PortfolioManager:
         self._capital_pot = capital_pot
         self._path = state_path
         self._currency = currency
-        self._interest = IbkrTieredInterest(currency)
         self._state: dict = self._load()
 
     # -- Persistence --------------------------------------------------------
@@ -208,8 +206,3 @@ class PortfolioManager:
             self._state["positions"][ticker]["stop_perm_id"] = None
             self._state["positions"][ticker]["stop_price"] = None
 
-    def accrue_daily_interest(self) -> float:
-        """Accrue one day of interest on available cash. Returns interest earned."""
-        accrual = self._interest.daily_accrual(self.available_cash)
-        self._state["interest_accrued"] = round(self._state.get("interest_accrued", 0.0) + accrual, 2)
-        return accrual

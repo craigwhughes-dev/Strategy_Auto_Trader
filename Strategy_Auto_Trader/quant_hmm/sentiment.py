@@ -175,23 +175,20 @@ def vix_regime() -> dict:
 # VIX as HMM observable (for 2D HMM)
 # ---------------------------------------------------------------------------
 
-def fetch_vix_hourly(period: str = "730d") -> pd.Series | None:
-    """Fetch hourly VIX data for use as second HMM observable."""
-    import yfinance as yf
+def fetch_vix_hourly(period: str = "730d") -> pd.DataFrame | None:
+    """Fetch hourly VIX from IBKR cache (incremental tail-fetch).
 
+    Returns full OHLCV DataFrame, not just Close series.
+    Uses IBKRDataClient's fetch_index_hourly with cache.
+    """
     try:
-        df = yf.download("^VIX", period=period, interval="1h",
-                         progress=False, auto_adjust=True)
+        from ..broker.ibkr_data import IBKRDataClient
+        vix_df = IBKRDataClient(client_id=2).fetch_index_hourly("VIX", "CBOE", "USD", historical_only=False)
+        if vix_df is None or vix_df.empty:
+            return None
+        return vix_df
     except Exception:
         return None
-
-    if df.empty:
-        return None
-
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    return df["Close"].dropna()
 
 
 # ---------------------------------------------------------------------------
