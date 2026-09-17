@@ -105,8 +105,9 @@ class IBKRAdapter:
         self._ib.sleep(0.5)  # Wait for contract qualification
         if not contract.conId:
             raise ValueError(f"{ticker}: contract qualification failed (no conId)")
+        self._ib.reqMarketDataType(1)  # 1 = live market data
         tdata = self._ib.reqMktData(contract, "", True, False)
-        self._ib.sleep(2)
+        self._ib.sleep(3)  # Wait for market data to populate
         mid = tdata.midpoint()
         if mid and mid > 0:
             return float(mid)
