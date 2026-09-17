@@ -133,7 +133,7 @@ class MultiTierAllocationManager:
             target_asset = "SPY"
             reason = f"Tier 2 (SPY/Balanced): VIX={vix:.2f} ≤ {self.vix_tier1}"
 
-        # Tier 3: VIX > tier1 and <= tier2 (ISF.L)
+        # Tier 3: VIX <= tier2 threshold (ISF.L)
         if vix is not None:
             tier3_pass = (vix > self.vix_tier1) and (vix <= self.vix_tier2)
             log.info(f"[{today}]   Tier 3 (ISF.L/Defensive): VIX={vix:.2f} ≤ {self.vix_tier2} [{'PASS' if tier3_pass else 'FAIL'}]")
