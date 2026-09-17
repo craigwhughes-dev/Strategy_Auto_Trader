@@ -1714,6 +1714,14 @@ def run_reconciliation(
         for resolution in resolved_stops:
             logger.info(f"  {resolution}")
 
+    # Log unmanaged broker positions (will be ignored by reconcile_positions)
+    internal_tickers = set(portfolio.positions.keys())
+    unmanaged = {t: qty for t, qty in broker_positions.items() if t not in internal_tickers}
+    if unmanaged:
+        logger.info(f"Reconciliation: found {len(unmanaged)} unmanaged broker position(s) (ignored):")
+        for ticker, qty in sorted(unmanaged.items()):
+            logger.info(f"  {ticker}: {qty} shares")
+
     discrepancies = reconcile_positions(portfolio.positions, broker_positions)
 
     if discrepancies:
@@ -2104,6 +2112,7 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("="*64)
     logger.info("Live daemon starting")
     logger.info("="*64)
+    logger.info(f"Startup config: {vars(args)}")
 
     # Handle --send-nightly-roundup flag (send email and exit)
     if args.send_nightly_roundup:

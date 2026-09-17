@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 import logging
+import time
 
 import pandas as pd
 
@@ -78,6 +79,8 @@ class MultiTierAllocationManager:
         self.current_asset = "SPY"  # Default starting position
         self.current_price = None  # Snapshot of entry price for tracking
         self.last_rebalance_date = None
+        self._last_known_cash = None  # Track cash for detecting user deposits
+        self._last_cash_check_time = None  # Timestamp of last cash baseline
 
     def signal(self, today: date, vxn: float | None, vix: float | None) -> AllocationSignal:
         """Compute daily allocation decision.
@@ -149,6 +152,10 @@ class MultiTierAllocationManager:
         Returns:
             List of AllocationOrder (sell current + buy target, or empty if no rebalance needed)
         """
+        # Exclude recent cash increases (deposits or manual sales) for 1 hour
+        # to allow user to place manual trades before daemon allocates the cash
+        allocatable_cash = self._filter_cash_for_allocation(available_cash)
+
         signal = self.signal(today, vxn, vix)
 
         if not signal.needs_rebalance:
@@ -172,18 +179,18 @@ class MultiTierAllocationManager:
                     )
                 )
                 proceeds = current_qty * sell_price * (1 - self.commission_pct / 100)
-                available_cash += proceeds
+                allocatable_cash += proceeds
                 _log.info(
                     f"[{today}] Allocation SELL {current_qty} {signal.current_asset} @ {sell_price:.2f} "
                     f"(proceeds ~{proceeds:.2f}, comm {self.commission_pct}%)"
                 )
 
-        # Buy target asset with available cash
+        # Buy target asset with allocatable cash
         target_price = current_price.get(signal.target_asset, 0)
         if target_price > 0:
             # Buy as many whole shares as we can afford (after commission)
             cost_per_share = target_price * (1 + self.commission_pct / 100)
-            buy_qty = int(available_cash / cost_per_share)
+            buy_qty = int(allocatable_cash / cost_per_share)
 
             if buy_qty > 0:
                 orders.append(
@@ -203,7 +210,7 @@ class MultiTierAllocationManager:
             else:
                 _log.warning(
                     f"[{today}] Allocation: insufficient cash to buy {signal.target_asset} "
-                    f"(have {available_cash:.2f}, need ≥{cost_per_share:.2f}/share)"
+                    f"(have {allocatable_cash:.2f}, need ≥{cost_per_share:.2f}/share)"
                 )
 
         # Update internal state
@@ -214,6 +221,48 @@ class MultiTierAllocationManager:
             _log.info(f"[{today}] Allocation rebalance: {signal.reason}")
 
         return orders
+
+    def _filter_cash_for_allocation(self, current_cash: float) -> float:
+        """Filter cash to exclude recent deposits/increases.
+
+        If cash increased within the last hour (user added funds or made manual trades),
+        allocate only the baseline amount to give user time to deploy their own trades.
+        After 1 hour, treat the increase as "user had time to deploy it" and allocate all.
+
+        Returns: allocatable_cash (may be less than current_cash if increase is recent)
+        """
+        now = time.time()
+        grace_period_seconds = 3600  # 1 hour
+
+        if self._last_known_cash is None:
+            # First call: initialize baseline
+            self._last_known_cash = current_cash
+            self._last_cash_check_time = now
+            return current_cash
+
+        increase = current_cash - self._last_known_cash
+        time_since_baseline = now - self._last_cash_check_time
+
+        if increase > 0 and time_since_baseline < grace_period_seconds:
+            # Recent increase detected: allocate only the baseline
+            _log.info(
+                f"Cash increase detected (+{increase:.2f}); "
+                f"grace period {grace_period_seconds - time_since_baseline:.0f}s remaining. "
+                f"Allocating baseline {self._last_known_cash:.2f} only."
+            )
+            return self._last_known_cash
+        elif increase > 0:
+            # Grace period expired: update baseline and allocate all
+            _log.info(f"Cash grace period expired; updating baseline to {current_cash:.2f}")
+            self._last_known_cash = current_cash
+            self._last_cash_check_time = now
+            return current_cash
+        else:
+            # No increase (decrease or flat): update baseline if time has passed
+            if time_since_baseline >= grace_period_seconds:
+                self._last_known_cash = current_cash
+                self._last_cash_check_time = now
+            return current_cash
 
     def app_status_dict(self) -> dict:
         """Return current state for app_status.json."""

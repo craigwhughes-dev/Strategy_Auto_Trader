@@ -40,10 +40,9 @@ def reconcile_positions(
 
     for ticker in sorted(broker_positions):
         if ticker not in expected:
-            discrepancies.append(
-                f"{ticker}: broker shows {broker_positions[ticker]} shares, "
-                f"no internal position"
-            )
+            # Broker positions not tracked internally are unmanaged (e.g., manual trades in a mixed account).
+            # Skip them — reconciliation only flags mismatches on daemon-managed positions.
+            pass
 
     return discrepancies
 
