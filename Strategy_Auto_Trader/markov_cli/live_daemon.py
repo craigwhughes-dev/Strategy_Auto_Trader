@@ -1218,10 +1218,14 @@ def process_cycle(
             from datetime import date as _date
             today = _date.today()
             try:
+                # Determine active tier first (to know which prices we actually need)
+                tier_signal = allocation_mgr.signal(today, vxn_current, vix_current)
+                required_tickers = ["EQGB.L", "SPY", "ISF.L", "CSH2.L"]
+
                 # Fetch current prices from broker (4 tickers × ~2s each = ~8s latency).
                 # TODO: optimize with cached quotes or batch fetch if cycle latency becomes issue.
                 current_prices = {}
-                for ticker in ["EQGB.L", "SPY", "ISF.L", "CSH2.L"]:
+                for ticker in required_tickers:
                     try:
                         price = broker.get_last_price(ticker)
                         current_prices[ticker] = price if price > 0 else None
@@ -1229,8 +1233,12 @@ def process_cycle(
                         logger.warning(f"[{market_name}] Failed to fetch price for {ticker}: {_price_err}")
                         current_prices[ticker] = None
 
-                # Only rebalance if all four prices are available
-                if all(p is not None for p in current_prices.values()):
+                # Only require prices for active tier + current position (if switching)
+                required_prices = {tier_signal.target_asset}
+                if allocation_mgr.current_asset and allocation_mgr.current_asset != tier_signal.target_asset:
+                    required_prices.add(allocation_mgr.current_asset)
+
+                if all(current_prices.get(t) is not None for t in required_prices):
                     orders = allocation_mgr.rebalance(
                         today=today,
                         vxn=vxn_current,
@@ -1242,8 +1250,8 @@ def process_cycle(
                     for order in orders:
                         broker.place_order(order)
                 else:
-                    _missing = [t for t, p in current_prices.items() if p is None]
-                    logger.warning(f"[{market_name}] Allocation: missing prices for {_missing} — skipping rebalance")
+                    _missing = [t for t in required_prices if current_prices.get(t) is None]
+                    logger.warning(f"[{market_name}] Allocation: missing required prices for {_missing} — skipping rebalance")
             except Exception as _alloc_err:
                 logger.error(f"[{market_name}] Allocation rebalance error: {_alloc_err}")
         else:
