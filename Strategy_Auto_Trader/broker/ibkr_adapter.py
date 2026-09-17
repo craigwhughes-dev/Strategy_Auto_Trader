@@ -102,7 +102,10 @@ class IBKRAdapter:
         from ib_async import Stock
         contract = Stock(*ibkr_contract_params(ticker))
         self._ib.qualifyContracts(contract)
-        self._ib.sleep(0.5)  # Wait for contract to be qualified (conId populated)
+        self._ib.sleep(1.5)  # Wait for contract qualification (conId/exchange resolution)
+        if not contract.conId:
+            logger.error(f"Contract qualification failed for {ticker}: no conId after wait")
+            return 0.0
         tdata = self._ib.reqMktData(contract, "", True, False)
         self._ib.sleep(2)
         mid = tdata.midpoint()
