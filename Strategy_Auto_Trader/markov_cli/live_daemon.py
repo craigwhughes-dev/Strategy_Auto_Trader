@@ -1233,10 +1233,6 @@ def process_cycle(
                         logger.warning(f"[{market_name}] Failed to fetch price for {ticker}: {_price_err}")
                         current_prices[ticker] = None
 
-                # CSH2.L resolution failure — log as ERROR for LogSentinel/monitoring
-                if current_prices.get("CSH2.L") is None:
-                    logger.error(f"[{market_name}] CSH2.L price fetch failed (investigate)")
-
                 # Only require prices for active tier + current position (if switching)
                 required_prices = {tier_signal.target_asset}
                 if allocation_mgr.current_asset and allocation_mgr.current_asset != tier_signal.target_asset:
