@@ -4,6 +4,57 @@ Running log of every backtest/scan run — newest entry on top. One block per ru
 
 ---
 
+## 2026-09-17 13:15 — Tier-4 cash asset: XSTR.L (distributing) vs CSH2.L (accumulating), total-return comparison
+
+Tool: scripts/compare_tier4_assets.py (rewritten — old version was price-only and showed XSTR as negative; XSTR pays semi-annual dividends so price-only is wrong. Yahoo "Adj Close" is NOT dividend-adjusted for XSTR.L either)
+Scope: XSTR.L real IBKR daily closes 2012-03-15 to 2026-09-14 + 18 dividends (yfinance, pence, 2013-07-24 to 2026-08-18, saved to `data/cache/XSTR.L_dividends.csv`) vs CSH2.L real IBKR hourly resampled to daily 2024-03-25 to 2026-09-15. Dividends reinvested at the ex-date close (rolled to next bar if ex-date is a non-trading day).
+Journal: N/A (asset comparison, not live_sim)
+
+Command:
+```
+# 1. Pull/refresh real IBKR data (IB Gateway paper, port 4002 — incremental cache, only fetches the gap since last cached bar)
+uv run python -c "from Strategy_Auto_Trader.quant_hmm.quant_engine import fetch_daily_ibkr; print(fetch_daily_ibkr('XSTR.L', period='max').tail())"
+uv run python -c "from Strategy_Auto_Trader.quant_hmm.quant_engine import fetch_hourly; print(fetch_hourly('CSH2.L', period='730d', source='ibkr').tail())"
+# -> data/cache/ibkr_daily/XSTR.L.csv, data/cache/ibkr_hourly/CSH2.L.csv
+
+# 2. XSTR dividends (IBKR has no dividend-history endpoint; yfinance, pence)
+uv run python -c "import yfinance as yf, pandas as pd; d=yf.Ticker('XSTR.L').history(period='max', actions=True)['Dividends']; d=d[d>0].rename('dividend_pence'); d.index=pd.to_datetime(d.index, utc=True).tz_convert(None).normalize(); d.index.name='ex_date'; d.to_csv('data/cache/XSTR.L_dividends.csv')"
+
+# 3. Compare
+uv run python scripts/compare_tier4_assets.py
+```
+
+Data range: real-vs-real overlap 2024-03-25 to 2026-09-14 (CSH2 IBKR history starts 2024-03-25). XSTR calendar-year total returns back to 2013.
+
+| Series | Total | CAGR | Vol | Max DD |
+|---|---|---|---|---|
+| XSTR total return (divi reinvested) | +10.90% | 4.27% | 3.68% | -2.51% |
+| XSTR price only | -0.48% | -0.19% | 3.36% | -3.63% |
+| **CSH2 (acc)** | **+12.30%** | **4.80%** | **0.51%** | **-0.16%** |
+
+Calendar-year total returns:
+
+| Year | XSTR TR | XSTR px | CSH2 |
+|---|---|---|---|
+| 2022 | +1.25% | +0.91% | — |
+| 2023 | +4.53% | +0.38% | — |
+| 2024 | +5.07% | -0.07% | — |
+| 2025 | +4.15% | -0.50% | +4.69% |
+| 2026 YTD | +2.56% | -1.22% | +2.93% |
+
+(2013-2021: XSTR TR +0.03% to +0.55%/yr, near-zero rate era; dividends tiny and annual. Semi-annual Feb/Aug payments from 2023, ~330-470p on ~£180 share, current yield ~3.8% and falling with Bank Rate.)
+
+**Key findings:**
+- Returns roughly match. CSH2 leads by +0.53%/yr CAGR — TER 0.15% (XSTR) vs 0.05% (CSH2), plus CSH2's swap targets SONIA + spread while XSTR tracks SONIA flat.
+- XSTR vol and max DD are inflated by thin trading / wide bid-ask on IBKR daily bars, not real risk — both are cash-like.
+- XSTR price series alone drifts ~-0.2%/yr as distributions leave the fund; any XSTR backtest must use the total-return series.
+
+**Conclusion:** XSTR is a viable tier-4 substitute where cleaner income reporting matters (GIA), costing ~0.5%/yr vs CSH2. In an ISA keep CSH2. No change to the 4-tier allocation (CSH2 stays tier 4).
+
+Side note: `data/cache/csh2_daily_returns.csv` `close` column splices 100-scale BoE proxy onto pence-scale IBKR at 2024-09 (jumps to 125170). Harmless — `live_sim._load_csh2_returns` reads `daily_return` only, which is clean.
+
+---
+
 ## 2026-09-16 23:25 — 4-Tier Allocation: SPY/ISF.L/CSH2.L/Nasdaq (EQGB) with VXN<18 gate, 27-year validation
 
 Tool: allocation/multi_tier_backtest_4tier.py + allocation/multi_tier_annual_breakdown.py

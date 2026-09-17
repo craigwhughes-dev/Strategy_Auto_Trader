@@ -158,8 +158,12 @@ class MultiTierAllocationManager:
 
         signal = self.signal(today, vxn, vix)
 
-        if not signal.needs_rebalance:
-            _log.debug(f"[{today}] Allocation: {signal.reason} (no order)")
+        # Generate orders if: rebalancing tiers OR bootstrapping (no positions + cash available)
+        has_any_position = any(positions.values())
+        needs_action = signal.needs_rebalance or (not has_any_position and allocatable_cash > 0)
+
+        if not needs_action:
+            _log.debug(f"[{today}] Allocation: {signal.reason} (no action)")
             return []
 
         orders = []
@@ -218,7 +222,8 @@ class MultiTierAllocationManager:
             self.current_asset = signal.target_asset
             self.current_price = target_price
             self.last_rebalance_date = today
-            _log.info(f"[{today}] Allocation rebalance: {signal.reason}")
+            action_type = "bootstrap" if not has_any_position else "rebalance"
+            _log.info(f"[{today}] Allocation {action_type}: {signal.reason}")
 
         return orders
 
