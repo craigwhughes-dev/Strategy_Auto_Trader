@@ -133,15 +133,15 @@ class MultiTierAllocationManager:
         else:
             log.info(f"[{today}]   Tier 2 (SPY/Balanced): VIX unavailable [FAIL]")
 
-        # Tier 3: VIX in (tier1, tier2] (ISF.L)
+        # Tier 3: VIX > tier1 and <= tier2 (ISF.L)
         if vix is not None:
             tier3_pass = (vix > self.vix_tier1) and (vix <= self.vix_tier2)
             result = "← SELECTED" if (tier3_pass and tier is None) else ""
-            log.info(f"[{today}]   Tier 3 (ISF.L/Defensive): VIX={vix:.2f} in ({self.vix_tier1}, {self.vix_tier2}] [{'PASS' if tier3_pass else 'FAIL'}] {result}")
+            log.info(f"[{today}]   Tier 3 (ISF.L/Defensive): VIX={vix:.2f} ≤ {self.vix_tier2} [{'PASS' if tier3_pass else 'FAIL'}] {result}")
             if tier3_pass and tier is None:
                 tier = 3
                 target_asset = "ISF.L"
-                reason = f"Tier 3 (ISF.L/Defensive): {self.vix_tier1} < VIX={vix:.2f} ≤ {self.vix_tier2}"
+                reason = f"Tier 3 (ISF.L/Defensive): VIX={vix:.2f} ≤ {self.vix_tier2}"
         else:
             log.info(f"[{today}]   Tier 3 (ISF.L/Defensive): VIX unavailable [FAIL]")
 
