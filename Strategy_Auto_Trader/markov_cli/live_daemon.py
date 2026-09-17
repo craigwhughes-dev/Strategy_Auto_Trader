@@ -1214,8 +1214,24 @@ def process_cycle(
         vix_df = _fetch_vix_hourly()
         vxn_df = _fetch_vxn_hourly()
         logger.debug(f"[{market_name}] Allocation: VIX rows={len(vix_df) if vix_df is not None else 0}, VXN rows={len(vxn_df) if vxn_df is not None else 0}")
-        vix_current = float(vix_df["Close"].iloc[-1]) if vix_df is not None and not vix_df.empty else None
-        vxn_current = float(vxn_df["Close"].iloc[-1]) if vxn_df is not None and not vxn_df.empty else None
+
+        # Extract current values safely
+        vix_current = None
+        vxn_current = None
+        try:
+            if vix_df is not None and not vix_df.empty:
+                vix_current = float(vix_df["Close"].iloc[-1])
+                logger.debug(f"[{market_name}] Allocation: VIX current = {vix_current:.2f}")
+        except Exception as e:
+            logger.error(f"[{market_name}] Allocation: failed to extract VIX current: {e}")
+
+        try:
+            if vxn_df is not None and not vxn_df.empty:
+                vxn_current = float(vxn_df["Close"].iloc[-1])
+                logger.debug(f"[{market_name}] Allocation: VXN current = {vxn_current:.2f}")
+        except Exception as e:
+            logger.error(f"[{market_name}] Allocation: failed to extract VXN current: {e}")
+
         if vix_current is not None or vxn_current is not None:
             from datetime import date as _date
             today = _date.today()
