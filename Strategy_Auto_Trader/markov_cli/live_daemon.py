@@ -1258,7 +1258,19 @@ def process_cycle(
                     )
                     from ..broker.symbols import normalize_fill_price
                     from ..broker.types import FillResult
+                    # Halt still allows exiting a tier position (frees capital,
+                    # reduces exposure) — only new BUYs are blocked, same as the
+                    # per-ticker round-robin path's allow_new_entries gate.
+                    allow_new_entries = not (
+                        daemon_state.get("halt_new_entries") or daemon_state.get("paused_by_user")
+                    )
                     for order in orders:
+                        if order.action == "BUY" and not allow_new_entries:
+                            logger.warning(
+                                f"[{market_name}] Allocation: new entries halted — skipping "
+                                f"BUY {order.quantity} {order.ticker}"
+                            )
+                            continue
                         fill = broker.place_order(order)
                         if fill is None:
                             logger.warning(
@@ -1283,6 +1295,7 @@ def process_cycle(
                                 signal_price=current_prices.get(order.ticker) or 0.0,
                                 market=market_name,
                                 currency=order_currency,
+                                stop_managed=False,
                             )
                         else:
                             portfolio.record_exit(
@@ -1600,6 +1613,9 @@ def check_protective_stops(
         return
 
     for ticker, pos in list(portfolio.positions.items()):
+        if not pos.get("stop_managed", True):
+            continue
+
         perm_id = pos.get("stop_perm_id")
         if perm_id and perm_id in open_stops:
             continue
@@ -2251,9 +2267,17 @@ def main(argv: list[str] | None = None) -> int:
     currency = get_market_currency(primary_market, config)
     portfolio = PortfolioManager(capital_pot, state_path, currency=currency)
 
-    from ..allocation.allocation_manager import MultiTierAllocationManager
+    from ..allocation.allocation_manager import ASSET_TIERS, MultiTierAllocationManager
     allocation_mgr = MultiTierAllocationManager(vxn_threshold=18.0, vix_tier1=15.0, vix_tier2=17.5)
-    logger.info(f"Allocation manager initialized: tier_mode={args.tier_mode}")
+    # current_asset is in-memory only — reseed it from the ledger so a restart
+    # doesn't forget which tier asset is actually held and attempt a spurious
+    # sell-phantom/rebuy-real rebalance against the wrong "current" asset.
+    held_tier_assets = [t for t in portfolio.positions if t in ASSET_TIERS]
+    if held_tier_assets:
+        if len(held_tier_assets) > 1:
+            logger.warning(f"Allocation: multiple tier assets held at startup {held_tier_assets}, using first")
+        allocation_mgr.current_asset = held_tier_assets[0]
+    logger.info(f"Allocation manager initialized: tier_mode={args.tier_mode}, current_asset={allocation_mgr.current_asset}")
 
     # Broker connection is async and can hang; skip it here and let it fail gracefully
     # when trades are attempted. Daemon can still process tickers and generate signals.

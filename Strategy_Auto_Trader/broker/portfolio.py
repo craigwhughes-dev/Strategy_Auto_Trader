@@ -60,6 +60,7 @@ class PortfolioManager:
                     for pos in data.get("positions", {}).values():
                         pos.setdefault("stop_perm_id", None)
                         pos.setdefault("stop_price", None)
+                        pos.setdefault("stop_managed", True)
                     return data
             except Exception:
                 pass
@@ -134,8 +135,14 @@ class PortfolioManager:
         signal_price: float = 0.0,
         market: str = "",
         currency: str = "",
+        stop_managed: bool = True,
     ) -> None:
-        """Record a new open position after a BUY fill."""
+        """Record a new open position after a BUY fill.
+
+        stop_managed: False for positions that don't use a per-trade protective
+        stop (e.g. tier-allocation holdings, which exit on regime change, not
+        a stop-loss) — check_protective_stops() skips these entirely.
+        """
         today = datetime.now(timezone.utc).date().isoformat()
         cost_value = fill.fill_price * fill.quantity
         entry_cost = IbkrTieredCost(ticker).cost(cost_value, is_buy=True)
@@ -150,6 +157,7 @@ class PortfolioManager:
             "kelly_fraction": kelly_fraction,
             "stop_level": stop_level,
             "target_level": target_level,
+            "stop_managed": stop_managed,
             "stop_perm_id": None,
             "stop_price": None,
         }
