@@ -1254,6 +1254,7 @@ def process_cycle(
                         current_price=current_prices,
                         available_cash=portfolio.available_cash,
                         positions=portfolio.positions,
+                        logger=logger,
                     )
                     for order in orders:
                         broker.place_order(order)
