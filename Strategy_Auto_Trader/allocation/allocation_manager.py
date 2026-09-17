@@ -136,7 +136,7 @@ class MultiTierAllocationManager:
         # Tier 3: VIX <= tier2 threshold (ISF.L)
         if vix is not None:
             tier3_pass = (vix > self.vix_tier1) and (vix <= self.vix_tier2)
-            log.info(f"[{today}]   Tier 3 (ISF.L/Defensive): VIX={vix:.2f} ≤ {self.vix_tier2} [{'PASS' if tier3_pass else 'FAIL'}]")
+            log.info(f"[{today}]   Tier 3 (ISF.L/Defensive): VIX={vix:.2f} vs gate={self.vix_tier2} [{'PASS' if tier3_pass else 'FAIL'}]")
         else:
             tier3_pass = False
             log.info(f"[{today}]   Tier 3 (ISF.L/Defensive): VIX unavailable [FAIL]")
