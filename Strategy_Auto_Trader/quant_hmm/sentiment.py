@@ -191,6 +191,22 @@ def fetch_vix_hourly(period: str = "730d") -> pd.DataFrame | None:
         return None
 
 
+def fetch_vxn_hourly(period: str = "730d") -> pd.DataFrame | None:
+    """Fetch hourly VXN (Nasdaq volatility) from IBKR cache.
+
+    Returns full OHLCV DataFrame, not just Close series.
+    Uses IBKRDataClient's fetch_index_hourly with cache.
+    """
+    try:
+        from ..broker.ibkr_data import IBKRDataClient
+        vxn_df = IBKRDataClient(client_id=2).fetch_index_hourly("VXN", "CBOE", "USD", historical_only=False)
+        if vxn_df is None or vxn_df.empty:
+            return None
+        return vxn_df
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Insider transaction signals
 # ---------------------------------------------------------------------------

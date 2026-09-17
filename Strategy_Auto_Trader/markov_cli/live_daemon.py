@@ -1076,8 +1076,11 @@ def process_cycle(
     stop_buffer_pct: float = 1.5,
     workers: int = 1,
     allocation_mgr: object | None = None,
+    tier_mode: bool = False,
 ) -> int:
     """Run one market cycle: prioritize open positions, then round-robin through candidates.
+
+    In tier_mode, skip round-robin and only manage tier rebalancing.
 
     Returns number of tickers processed.
     """
@@ -1129,11 +1132,11 @@ def process_cycle(
         result = _evaluate_ticker(ticker, overrides, defaults, logger, market_name, pin_open_strategy=True)
         processed.append(result)
 
-    # Stage 2: candidates (round-robin through rest)
+    # Stage 2: candidates (round-robin through rest) — skipped in tier_mode
     remaining_budget = max_seconds - (time.time() - cycle_start)
     buffer_secs = config.get("daytime", {}).get("cycle_buffer_minutes", 5) * 60
     cursor_start = cursor_end = round_robin_universe_len = None
-    if remaining_budget > buffer_secs:
+    if not tier_mode and remaining_budget > buffer_secs:
         remaining_budget -= buffer_secs
         round_robin_universe = [t for t in in_scope if t not in must_run]
         round_robin_universe_len = len(round_robin_universe)
@@ -1204,19 +1207,21 @@ def process_cycle(
     )
 
     # Multi-tier allocation rebalance — runs once per cycle, after main signal execution.
-    # VIX-based rebalance between SPY (tier1, VIX≤15), ISF.L (tier2, 15<VIX≤17.5), SHV (tier3, VIX>17.5).
+    # 4-tier rebalance: Nasdaq/EQGB.L (VXN), SPY (VIX≤15), ISF.L (15<VIX≤17.5), CSH2.L (VIX>17.5).
     if allocation_mgr is not None:
-        from ..quant_hmm.sentiment import fetch_vix_hourly as _fetch_vix_hourly
+        from ..quant_hmm.sentiment import fetch_vix_hourly as _fetch_vix_hourly, fetch_vxn_hourly as _fetch_vxn_hourly
         vix_df = _fetch_vix_hourly()
+        vxn_df = _fetch_vxn_hourly()
         vix_current = float(vix_df["Close"].iloc[-1]) if vix_df is not None and not vix_df.empty else None
-        if vix_current is not None:
+        vxn_current = float(vxn_df["Close"].iloc[-1]) if vxn_df is not None and not vxn_df.empty else None
+        if vix_current is not None or vxn_current is not None:
             from datetime import date as _date
             today = _date.today()
             try:
-                # Fetch current prices from broker (3 tickers × ~2s each = ~6s latency).
+                # Fetch current prices from broker (4 tickers × ~2s each = ~8s latency).
                 # TODO: optimize with cached quotes or batch fetch if cycle latency becomes issue.
                 current_prices = {}
-                for ticker in ["SPY", "ISF.L", "SHV"]:
+                for ticker in ["EQGB.L", "SPY", "ISF.L", "CSH2.L"]:
                     try:
                         price = broker.get_last_price(ticker)
                         current_prices[ticker] = price if price > 0 else None
@@ -1224,10 +1229,11 @@ def process_cycle(
                         logger.warning(f"[{market_name}] Failed to fetch price for {ticker}: {_price_err}")
                         current_prices[ticker] = None
 
-                # Only rebalance if all three prices are available
+                # Only rebalance if all four prices are available
                 if all(p is not None for p in current_prices.values()):
                     orders = allocation_mgr.rebalance(
                         today=today,
+                        vxn=vxn_current,
                         vix=vix_current,
                         current_price=current_prices,
                         available_cash=portfolio.available_cash,
@@ -1241,7 +1247,7 @@ def process_cycle(
             except Exception as _alloc_err:
                 logger.error(f"[{market_name}] Allocation rebalance error: {_alloc_err}")
         else:
-            logger.debug(f"[{market_name}] Allocation: VIX unavailable — skipping rebalance")
+            logger.debug(f"[{market_name}] Allocation: VIX and VXN unavailable — skipping rebalance")
 
     elapsed = time.time() - cycle_start
     n_timeouts = sum(
@@ -2087,6 +2093,9 @@ def main(argv: list[str] | None = None) -> int:
         "--workers", type=int, default=None,
         help="Parallel worker threads for round-robin Stage 2 (default: daytime.workers config or 1)")
     parser.add_argument(
+        "--tier-mode", action="store_true", default=False,
+        help="Run in tier-rebalance-only mode (skip candidate scanning)")
+    parser.add_argument(
         "--send-nightly-roundup", action="store_true",
         help="Send nightly roundup email with today's results and exit")
     args = parser.parse_args(argv)
@@ -2183,7 +2192,7 @@ def main(argv: list[str] | None = None) -> int:
     portfolio = PortfolioManager(capital_pot, state_path, currency=currency)
 
     from ..allocation.allocation_manager import MultiTierAllocationManager
-    allocation_mgr = MultiTierAllocationManager(vix_tier1=15.0, vix_tier2=17.5)
+    allocation_mgr = MultiTierAllocationManager(vxn_threshold=18.0, vix_tier1=15.0, vix_tier2=17.5)
 
     # Broker connection is async and can hang; skip it here and let it fail gracefully
     # when trades are attempted. Daemon can still process tickers and generate signals.
@@ -2364,6 +2373,7 @@ def main(argv: list[str] | None = None) -> int:
                             stop_buffer_pct=args.stop_buffer_pct,
                             workers=args.workers,
                             allocation_mgr=allocation_mgr,
+                            tier_mode=args.tier_mode,
                         )
 
                         daemon_state["cycle_in_progress"] = None

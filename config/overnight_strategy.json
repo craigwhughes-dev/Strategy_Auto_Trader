@@ -60,7 +60,7 @@
     "workers": 4
   },
   "execution": {
-    "capital_pot": 100000,
+    "capital_pot": 20000,
     "dry_run": false
   },
   "broker": {

@@ -1,10 +1,11 @@
 """Multi-tier allocation manager for live daemon.
 
-Manages daily rebalancing between SPY/ISF.L/CSH2.L based on VIX tiers.
+Manages daily rebalancing between Nasdaq/SPY/ISF.L/CSH2.L based on VXN + VIX tiers.
 
-Tier 1 (VIX ≤ 15): SPY (growth)
-Tier 2 (15 < VIX ≤ 17.5): ISF.L (balanced)
-Tier 3 (VIX > 17.5): CSH2.L (defensive/money-market)
+Tier 1 (VXN ≤ 18): Nasdaq/EQGB.L (growth)
+Tier 2 (VIX ≤ 15): SPY (balanced)
+Tier 3 (15 < VIX ≤ 17.5): ISF.L (defensive)
+Tier 4 (VIX > 17.5): CSH2.L (money-market)
 
 Daily rebalance: if target asset differs from current, generate sell (current) + buy (target) orders.
 """
@@ -19,8 +20,8 @@ import pandas as pd
 
 _log = logging.getLogger(__name__)
 
-TIER_ASSETS = {1: "SPY", 2: "ISF.L", 3: "CSH2.L"}
-ASSET_TIERS = {"SPY": 1, "ISF.L": 2, "CSH2.L": 3}
+TIER_ASSETS = {1: "EQGB.L", 2: "SPY", 3: "ISF.L", 4: "CSH2.L"}
+ASSET_TIERS = {"EQGB.L": 1, "SPY": 2, "ISF.L": 3, "CSH2.L": 4}
 
 
 @dataclass
@@ -38,6 +39,7 @@ class AllocationSignal:
     """Daily allocation decision."""
     date: date
     vix: float | None
+    vxn: float | None
     tier: int
     target_asset: str
     current_asset: str
@@ -46,13 +48,17 @@ class AllocationSignal:
 
 
 class MultiTierAllocationManager:
-    """Manage daily multi-tier allocation rebalances.
+    """Manage daily 4-tier allocation rebalances with VXN + VIX gating.
 
-    Tracks current holding and generates buy/sell orders when target tier changes.
+    Tier 1: Nasdaq/EQGB.L (VXN ≤ vxn_threshold)
+    Tier 2: SPY (VIX ≤ vix_tier1)
+    Tier 3: ISF.L (vix_tier1 < VIX ≤ vix_tier2)
+    Tier 4: CSH2.L (defensive, always available)
     """
 
     def __init__(
         self,
+        vxn_threshold: float = 18.0,
         vix_tier1: float = 15.0,
         vix_tier2: float = 17.5,
         commission_pct: float = 0.1,
@@ -60,10 +66,12 @@ class MultiTierAllocationManager:
         """Initialize allocation manager.
 
         Args:
-            vix_tier1: VIX threshold for tier 1→2 boundary (VIX ≤ this → SPY)
-            vix_tier2: VIX threshold for tier 2→3 boundary (VIX ≤ this → ISF.L)
+            vxn_threshold: VXN threshold for tier 1 (Nasdaq). VXN ≤ this → Nasdaq
+            vix_tier1: VIX threshold for tier 2 (SPY). VIX ≤ this → SPY
+            vix_tier2: VIX threshold for tier 3 (ISF.L). VIX ≤ this → ISF.L
             commission_pct: Commission as % of order value (e.g., 0.1 for 0.1%)
         """
+        self.vxn_threshold = vxn_threshold
         self.vix_tier1 = vix_tier1
         self.vix_tier2 = vix_tier2
         self.commission_pct = commission_pct
@@ -71,32 +79,39 @@ class MultiTierAllocationManager:
         self.current_price = None  # Snapshot of entry price for tracking
         self.last_rebalance_date = None
 
-    def signal(self, today: date, vix: float | None) -> AllocationSignal:
+    def signal(self, today: date, vxn: float | None, vix: float | None) -> AllocationSignal:
         """Compute daily allocation decision.
 
         Args:
             today: Current date
+            vxn: Daily VXN close (None if unavailable)
             vix: Daily VIX close (None if unavailable)
 
         Returns:
             AllocationSignal with tier, target asset, and rebalance decision
         """
-        if vix is None:
+        # Tier 1: Check VXN (Nasdaq)
+        if vxn is not None and vxn <= self.vxn_threshold:
             tier = 1
-            target_asset = "SPY"
-            reason = "no VIX data, default to SPY"
+            target_asset = "EQGB.L"
+            reason = f"VXN={vxn:.1f} ≤ {self.vxn_threshold} → Tier 1 (Nasdaq)"
+        # Tier 2-4: VIX-based fallback
+        elif vix is None:
+            tier = 4
+            target_asset = "CSH2.L"
+            reason = "no VIX data, fallback to CSH2.L"
         elif vix <= self.vix_tier1:
-            tier = 1
-            target_asset = "SPY"
-            reason = f"VIX={vix:.1f} ≤ {self.vix_tier1} → Tier 1 (SPY)"
-        elif vix <= self.vix_tier2:
             tier = 2
-            target_asset = "ISF.L"
-            reason = f"VIX={vix:.1f} ∈ ({self.vix_tier1}, {self.vix_tier2}] → Tier 2 (ISF.L)"
-        else:
+            target_asset = "SPY"
+            reason = f"VIX={vix:.1f} ≤ {self.vix_tier1} → Tier 2 (SPY)"
+        elif vix <= self.vix_tier2:
             tier = 3
-            target_asset = "SHV"
-            reason = f"VIX={vix:.1f} > {self.vix_tier2} → Tier 3 (SHV)"
+            target_asset = "ISF.L"
+            reason = f"VIX={vix:.1f} ∈ ({self.vix_tier1}, {self.vix_tier2}] → Tier 3 (ISF.L)"
+        else:
+            tier = 4
+            target_asset = "CSH2.L"
+            reason = f"VIX={vix:.1f} > {self.vix_tier2} → Tier 4 (CSH2.L)"
 
         needs_rebalance = target_asset != self.current_asset
         rebalance_reason = reason + (" (rebalance needed)" if needs_rebalance else " (holding)")
@@ -104,6 +119,7 @@ class MultiTierAllocationManager:
         return AllocationSignal(
             date=today,
             vix=vix,
+            vxn=vxn,
             tier=tier,
             target_asset=target_asset,
             current_asset=self.current_asset,
@@ -114,6 +130,7 @@ class MultiTierAllocationManager:
     def rebalance(
         self,
         today: date,
+        vxn: float | None,
         vix: float | None,
         current_price: dict[str, float],
         available_cash: float,
@@ -123,15 +140,16 @@ class MultiTierAllocationManager:
 
         Args:
             today: Current date
+            vxn: Daily VXN close
             vix: Daily VIX close
-            current_price: Dict {ticker: price} for all three assets
+            current_price: Dict {ticker: price} for all four assets
             available_cash: Available cash to buy
             positions: Current positions {ticker: quantity}
 
         Returns:
             List of AllocationOrder (sell current + buy target, or empty if no rebalance needed)
         """
-        signal = self.signal(today, vix)
+        signal = self.signal(today, vxn, vix)
 
         if not signal.needs_rebalance:
             _log.debug(f"[{today}] Allocation: {signal.reason} (no order)")
