@@ -103,6 +103,8 @@ class IBKRAdapter:
         contract = Stock(*ibkr_contract_params(ticker))
         self._ib.qualifyContracts(contract)
         self._ib.sleep(0.5)  # Wait for contract qualification
+        if not contract.conId:
+            raise ValueError(f"{ticker}: contract qualification failed (no conId)")
         tdata = self._ib.reqMktData(contract, "", True, False)
         self._ib.sleep(2)
         mid = tdata.midpoint()
@@ -111,7 +113,9 @@ class IBKRAdapter:
         if tdata.last and tdata.last > 0:
             return float(tdata.last)
         close = tdata.close
-        return float(close) if close and close > 0 else 0.0
+        if close and close > 0:
+            return float(close)
+        raise ValueError(f"{ticker}: no valid price (mid={tdata.midpoint()}, last={tdata.last}, close={tdata.close})")
 
     def place_order(self, req: OrderRequest) -> FillResult | None:
         """Submit a market order and wait for fill (up to self._timeout seconds).
