@@ -88,7 +88,9 @@ class MultiTierAllocationManager:
         self._vxn_cache = None
         self._vxn_cache_date = None
 
-    def signal(self, today: date, vxn: float | None, vix: float | None, logger=None) -> AllocationSignal:
+    def signal(
+        self, today: date, vxn: float | None, vix: float | None, logger=None, verbose: bool = True
+    ) -> AllocationSignal:
         """Compute daily allocation decision.
 
         Args:
@@ -96,71 +98,46 @@ class MultiTierAllocationManager:
             vxn: Daily VXN close (None if unavailable)
             vix: Daily VIX close (None if unavailable)
             logger: Logger to use (if None, uses module logger)
+            verbose: Log the full tier-by-tier breakdown at INFO level. Set False for
+                a quiet lookup (e.g. speculative pre-checks) so the breakdown appears
+                only once, at the call site that actually acts on it.
 
         Returns:
             AllocationSignal with tier, target asset, and rebalance decision
         """
         log = logger or _log
-        log.info(f"[{today}] Signal evaluation: VXN={vxn}, VIX={vix}, current_asset={self.current_asset}")
+        log_level = log.info if verbose else log.debug
+        log_level(f"[{today}] Signal evaluation: VXN={vxn}, VIX={vix}, current_asset={self.current_asset}")
 
-        # Evaluate all 4 tiers, select first (highest) that passes
-        tier = None
-        target_asset = None
-        reason = None
+        # Evaluate every tier independently (each computes its own pass/fail + reason),
+        # log the result, then pick the best (lowest-numbered) tier that passed.
+        tiers = [
+            (1, "EQGB.L", "Nasdaq",
+             vxn is not None and vxn <= self.vxn_threshold,
+             f"VXN={vxn:.2f} vs gate={self.vxn_threshold}" if vxn is not None else "VXN unavailable"),
+            (2, "SPY", "Balanced",
+             vix is not None and vix <= self.vix_tier1,
+             f"VIX={vix:.2f} vs gate={self.vix_tier1}" if vix is not None else "VIX unavailable"),
+            (3, "ISF.L", "Defensive",
+             vix is not None and self.vix_tier1 < vix <= self.vix_tier2,
+             f"VIX={vix:.2f} vs gate={self.vix_tier2}" if vix is not None else "VIX unavailable"),
+            (4, "CSH2.L", "Money-Market", True, "always available fallback"),
+        ]
 
-        # Tier 1: Check VXN (Nasdaq)
-        tier1_pass = vxn is not None and vxn <= self.vxn_threshold
-        if vxn is not None:
-            log.info(f"[{today}]   Tier 1 (EQGB.L/Nasdaq): VXN={vxn:.2f} vs gate={self.vxn_threshold} [{'PASS' if tier1_pass else 'FAIL'}]")
-        else:
-            log.info(f"[{today}]   Tier 1 (EQGB.L/Nasdaq): VXN unavailable [FAIL]")
+        for tier_num, asset, label, passed, detail in tiers:
+            log_level(f"[{today}]   Tier {tier_num} ({asset}/{label}): {detail} [{'PASS' if passed else 'FAIL'}]")
 
-        if tier1_pass and tier is None:
-            tier = 1
-            target_asset = "EQGB.L"
-            reason = f"Tier 1 (EQGB.L/Nasdaq): VXN={vxn:.2f} ≤ {self.vxn_threshold}"
+        tier, target_asset, reason = next(
+            (t, asset, f"Tier {t} ({asset}/{label}): {detail}")
+            for t, asset, label, passed, detail in tiers
+            if passed
+        )
 
-        # Tier 2: VIX ≤ tier1 threshold (SPY)
-        if vix is not None:
-            tier2_pass = vix <= self.vix_tier1
-            log.info(f"[{today}]   Tier 2 (SPY/Balanced): VIX={vix:.2f} vs gate={self.vix_tier1} [{'PASS' if tier2_pass else 'FAIL'}]")
-        else:
-            tier2_pass = False
-            log.info(f"[{today}]   Tier 2 (SPY/Balanced): VIX unavailable [FAIL]")
-
-        if tier2_pass and tier is None:
-            tier = 2
-            target_asset = "SPY"
-            reason = f"Tier 2 (SPY/Balanced): VIX={vix:.2f} ≤ {self.vix_tier1}"
-
-        # Tier 3: VIX <= tier2 threshold (ISF.L)
-        if vix is not None:
-            tier3_pass = (vix > self.vix_tier1) and (vix <= self.vix_tier2)
-            log.info(f"[{today}]   Tier 3 (ISF.L/Defensive): VIX={vix:.2f} vs gate={self.vix_tier2} [{'PASS' if tier3_pass else 'FAIL'}]")
-        else:
-            tier3_pass = False
-            log.info(f"[{today}]   Tier 3 (ISF.L/Defensive): VIX unavailable [FAIL]")
-
-        if tier3_pass and tier is None:
-            tier = 3
-            target_asset = "ISF.L"
-            reason = f"Tier 3 (ISF.L/Defensive): VIX={vix:.2f} ≤ {self.vix_tier2}"
-
-        # Tier 4: Always available fallback (no gate)
-        tier4_pass = True
-        log.info(f"[{today}]   Tier 4 (CSH2.L/Money-Market): [PASS - always available fallback]")
-
-        if tier4_pass and tier is None:
-            tier = 4
-            target_asset = "CSH2.L"
-            reason = f"Tier 4 (CSH2.L/Money-Market): fallback"
-
-        # Log which tier was selected
-        log.info(f"[{today}]   → SELECTED: Tier {tier} ({target_asset})")
+        log_level(f"[{today}]   → SELECTED: Tier {tier} ({target_asset})")
 
         needs_rebalance = target_asset != self.current_asset
         if needs_rebalance:
-            log.info(f"[{today}]   ACTION: {self.current_asset} → {target_asset} (REBALANCE)")
+            log_level(f"[{today}]   ACTION: {self.current_asset} → {target_asset} (REBALANCE)")
         else:
             log.debug(f"[{today}]   ACTION: HOLD {target_asset} (no change)")
 
@@ -207,6 +184,9 @@ class MultiTierAllocationManager:
         allocatable_cash = self._filter_cash_for_allocation(available_cash)
         log.info(f"[{today}]   allocatable_cash={allocatable_cash:.2f} (after grace period filter)")
 
+        # Verbose tier breakdown logged here (not at any earlier speculative signal()
+        # call) so it lands right next to the resulting order, not 10-20s earlier
+        # across an unrelated price-fetch gap.
         signal = self.signal(today, vxn, vix, logger=log)
 
         # Generate orders if: rebalancing tiers OR bootstrapping (no positions + cash available)

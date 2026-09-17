@@ -1223,19 +1223,19 @@ def process_cycle(
         if vix_current is not None or vxn_current is not None:
             from datetime import date as _date
             today = _date.today()
-            logger.debug(f"[{market_name}] Allocation: calling signal(vxn={vxn_current}, vix={vix_current})")
             try:
-                # Determine active tier first (to know which prices we actually need)
-                tier_signal = allocation_mgr.signal(today, vxn_current, vix_current)
-                logger.debug(f"[{market_name}] Allocation: signal returned tier={tier_signal.tier}, target={tier_signal.target_asset}")
+                # Determine active tier first (to know which prices we actually need).
+                # Quiet — the full tier breakdown is logged once, inside rebalance().
+                tier_signal = allocation_mgr.signal(today, vxn_current, vix_current, verbose=False)
                 required_tickers = ["EQGB.L", "SPY", "ISF.L", "CSH2.L"]
 
                 # Fetch current prices from broker (4 tickers × ~2s each = ~8s latency).
                 # TODO: optimize with cached quotes or batch fetch if cycle latency becomes issue.
+                from ..broker.symbols import sizing_price
                 current_prices = {}
                 for ticker in required_tickers:
                     try:
-                        price = broker.get_last_price(ticker)
+                        price = sizing_price(ticker, broker.get_last_price(ticker))
                         current_prices[ticker] = price if price > 0 else None
                     except Exception as _price_err:
                         logger.error(f"[{market_name}] Failed to fetch price for {ticker}: {_price_err}")
@@ -1253,11 +1253,45 @@ def process_cycle(
                         vix=vix_current,
                         current_price=current_prices,
                         available_cash=portfolio.available_cash,
-                        positions=portfolio.positions,
+                        positions={t: p.get("quantity", 0) for t, p in portfolio.positions.items()},
                         logger=logger,
                     )
+                    from ..broker.symbols import normalize_fill_price
+                    from ..broker.types import FillResult
                     for order in orders:
-                        broker.place_order(order)
+                        fill = broker.place_order(order)
+                        if fill is None:
+                            logger.warning(
+                                f"[{market_name}] Allocation order not filled: "
+                                f"{order.action} {order.quantity} {order.ticker}"
+                            )
+                            continue
+                        quote_pence = (current_prices.get(order.ticker) or 0.0) * 100
+                        fill = FillResult(
+                            ticker=fill.ticker, action=fill.action,
+                            fill_price=normalize_fill_price(order.ticker, fill.fill_price, quote_pence),
+                            quantity=fill.quantity, timestamp=fill.timestamp,
+                        )
+                        order_currency = "GBP" if order.ticker.endswith(".L") else "USD"
+                        if order.action == "BUY":
+                            portfolio.record_entry(
+                                ticker=order.ticker,
+                                fill=fill,
+                                kelly_fraction=1.0,
+                                stop_level=0.0,
+                                target_level=0.0,
+                                signal_price=current_prices.get(order.ticker) or 0.0,
+                                market=market_name,
+                                currency=order_currency,
+                            )
+                        else:
+                            portfolio.record_exit(
+                                ticker=order.ticker,
+                                fill=fill,
+                                signal_price=current_prices.get(order.ticker) or 0.0,
+                                exit_type="strategy_exit",
+                            )
+                        portfolio.save()
                 else:
                     _missing = [t for t in required_prices if current_prices.get(t) is None]
                     logger.warning(f"[{market_name}] Allocation: missing required prices for {_missing} — skipping rebalance")
