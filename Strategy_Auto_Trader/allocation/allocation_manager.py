@@ -103,7 +103,7 @@ class MultiTierAllocationManager:
         log = logger or _log
         log.info(f"[{today}] Signal evaluation: VXN={vxn}, VIX={vix}, current_asset={self.current_asset}")
 
-        # Evaluate all tiers and log each
+        # Evaluate all 4 tiers, select first (highest) that passes
         tier = None
         target_asset = None
         reason = None
@@ -111,12 +111,11 @@ class MultiTierAllocationManager:
         # Tier 1: Check VXN (Nasdaq)
         tier1_pass = vxn is not None and vxn <= self.vxn_threshold
         if vxn is not None:
-            result = "← SELECTED" if tier1_pass else ""
-            log.info(f"[{today}]   Tier 1 (EQGB.L/Nasdaq): VXN={vxn:.2f} vs gate={self.vxn_threshold} [{'PASS' if tier1_pass else 'FAIL'}] {result}")
+            log.info(f"[{today}]   Tier 1 (EQGB.L/Nasdaq): VXN={vxn:.2f} vs gate={self.vxn_threshold} [{'PASS' if tier1_pass else 'FAIL'}]")
         else:
             log.info(f"[{today}]   Tier 1 (EQGB.L/Nasdaq): VXN unavailable [FAIL]")
 
-        if tier1_pass:
+        if tier1_pass and tier is None:
             tier = 1
             target_asset = "EQGB.L"
             reason = f"Tier 1 (EQGB.L/Nasdaq): VXN={vxn:.2f} ≤ {self.vxn_threshold}"
@@ -124,39 +123,44 @@ class MultiTierAllocationManager:
         # Tier 2: VIX ≤ tier1 threshold (SPY)
         if vix is not None:
             tier2_pass = vix <= self.vix_tier1
-            result = "← SELECTED" if (tier2_pass and tier is None) else ""
-            log.info(f"[{today}]   Tier 2 (SPY/Balanced): VIX={vix:.2f} vs gate={self.vix_tier1} [{'PASS' if tier2_pass else 'FAIL'}] {result}")
-            if tier2_pass and tier is None:
-                tier = 2
-                target_asset = "SPY"
-                reason = f"Tier 2 (SPY/Balanced): VIX={vix:.2f} ≤ {self.vix_tier1}"
+            log.info(f"[{today}]   Tier 2 (SPY/Balanced): VIX={vix:.2f} vs gate={self.vix_tier1} [{'PASS' if tier2_pass else 'FAIL'}]")
         else:
+            tier2_pass = False
             log.info(f"[{today}]   Tier 2 (SPY/Balanced): VIX unavailable [FAIL]")
+
+        if tier2_pass and tier is None:
+            tier = 2
+            target_asset = "SPY"
+            reason = f"Tier 2 (SPY/Balanced): VIX={vix:.2f} ≤ {self.vix_tier1}"
 
         # Tier 3: VIX > tier1 and <= tier2 (ISF.L)
         if vix is not None:
             tier3_pass = (vix > self.vix_tier1) and (vix <= self.vix_tier2)
-            result = "← SELECTED" if (tier3_pass and tier is None) else ""
-            log.info(f"[{today}]   Tier 3 (ISF.L/Defensive): VIX={vix:.2f} ≤ {self.vix_tier2} [{'PASS' if tier3_pass else 'FAIL'}] {result}")
-            if tier3_pass and tier is None:
-                tier = 3
-                target_asset = "ISF.L"
-                reason = f"Tier 3 (ISF.L/Defensive): VIX={vix:.2f} ≤ {self.vix_tier2}"
+            log.info(f"[{today}]   Tier 3 (ISF.L/Defensive): VIX={vix:.2f} ≤ {self.vix_tier2} [{'PASS' if tier3_pass else 'FAIL'}]")
         else:
+            tier3_pass = False
             log.info(f"[{today}]   Tier 3 (ISF.L/Defensive): VIX unavailable [FAIL]")
 
-        # Tier 4: VIX > tier2 or no VIX (CSH2.L) — always fallback
+        if tier3_pass and tier is None:
+            tier = 3
+            target_asset = "ISF.L"
+            reason = f"Tier 3 (ISF.L/Defensive): VIX={vix:.2f} ≤ {self.vix_tier2}"
+
+        # Tier 4: Fallback — VIX > tier2 threshold, or always available if VIX unavailable
         if vix is not None:
             tier4_pass = vix > self.vix_tier2
-            result = "← SELECTED" if tier is None else ""
-            log.info(f"[{today}]   Tier 4 (CSH2.L/Money-Market): VIX={vix:.2f} > {self.vix_tier2} [{'PASS' if tier4_pass else 'FAIL'}] {result}")
+            log.info(f"[{today}]   Tier 4 (CSH2.L/Money-Market): VIX={vix:.2f} > {self.vix_tier2} [{'PASS' if tier4_pass else 'FAIL'}]")
         else:
-            log.info(f"[{today}]   Tier 4 (CSH2.L/Money-Market): no VIX data [PASS] ← SELECTED")
+            tier4_pass = True  # Fallback always available
+            log.info(f"[{today}]   Tier 4 (CSH2.L/Money-Market): VIX unavailable [ALWAYS AVAILABLE]")
 
-        if tier is None:
+        if tier4_pass and tier is None:
             tier = 4
             target_asset = "CSH2.L"
             reason = f"Tier 4 (CSH2.L/Money-Market): fallback"
+
+        # Log which tier was selected
+        log.info(f"[{today}]   → SELECTED: Tier {tier} ({target_asset})")
 
         needs_rebalance = target_asset != self.current_asset
         if needs_rebalance:
