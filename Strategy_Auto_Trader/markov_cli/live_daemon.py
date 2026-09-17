@@ -1235,9 +1235,11 @@ def process_cycle(
         if vix_current is not None or vxn_current is not None:
             from datetime import date as _date
             today = _date.today()
+            logger.debug(f"[{market_name}] Allocation: calling signal(vxn={vxn_current}, vix={vix_current})")
             try:
                 # Determine active tier first (to know which prices we actually need)
                 tier_signal = allocation_mgr.signal(today, vxn_current, vix_current)
+                logger.debug(f"[{market_name}] Allocation: signal returned tier={tier_signal.tier}, target={tier_signal.target_asset}")
                 required_tickers = ["EQGB.L", "SPY", "ISF.L", "CSH2.L"]
 
                 # Fetch current prices from broker (4 tickers × ~2s each = ~8s latency).
