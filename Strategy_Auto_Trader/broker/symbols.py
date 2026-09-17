@@ -49,10 +49,13 @@ def ibkr_contract_params(ticker: str) -> tuple[str, str, str]:
     ".L" suffix → LSE/GBP with the suffix stripped and share-class hyphen
     turned into IBKR's dot (plus the _LSE_DOT_SYMBOLS trailing-dot fixups
     above). LSE ETFs in _LSEETF_SYMBOLS use exchange "LSEETF" instead of "LSE".
+    Exception: CSH2.L trades on IBIS (Xetra) in EUR, not LSE in GBP.
     Everything else is treated as a US equity on SMART/USD; US dual-class
     tickers use yfinance's hyphen (e.g. "BRK-B", "BF-B") where IBKR wants
     a space ("BRK B", "BF B").
     """
+    if ticker.upper() == "CSH2.L":
+        return "CSH2", "IBIS", "EUR"
     if ticker.upper().endswith(".L"):
         base = ticker[:-2].replace("-", ".")
         if base.upper() in _LSE_DOT_SYMBOLS:
