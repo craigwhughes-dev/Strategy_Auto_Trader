@@ -103,40 +103,64 @@ class MultiTierAllocationManager:
         log = logger or _log
         log.info(f"[{today}] Signal evaluation: VXN={vxn}, VIX={vix}, current_asset={self.current_asset}")
 
+        # Evaluate all tiers and log each
+        tier = None
+        target_asset = None
+        reason = None
+
         # Tier 1: Check VXN (Nasdaq)
-        if vxn is not None and vxn <= self.vxn_threshold:
+        tier1_pass = vxn is not None and vxn <= self.vxn_threshold
+        if vxn is not None:
+            log.info(f"[{today}]   Tier 1 (EQGB.L/Nasdaq): VXN={vxn:.2f} vs gate={self.vxn_threshold} [{'PASS' if tier1_pass else 'FAIL'}]")
+        else:
+            log.info(f"[{today}]   Tier 1 (EQGB.L/Nasdaq): VXN unavailable [FAIL]")
+
+        if tier1_pass:
             tier = 1
             target_asset = "EQGB.L"
-            gate_result = "PASS" if vxn <= self.vxn_threshold else "FAIL"
-            reason = f"Tier 1 (EQGB.L/Nasdaq): VXN={vxn:.2f} vs gate={self.vxn_threshold} [{gate_result}]"
-            log.info(f"[{today}]   → {reason}")
-        # Tier 2-4: VIX-based fallback
-        elif vix is None:
+            reason = f"Tier 1 (EQGB.L/Nasdaq): VXN={vxn:.2f} ≤ {self.vxn_threshold}"
+
+        # Tier 2: VIX ≤ tier1 threshold (SPY)
+        if tier is None:
+            if vix is not None:
+                tier2_pass = vix <= self.vix_tier1
+                log.info(f"[{today}]   Tier 2 (SPY/Balanced): VIX={vix:.2f} vs gate={self.vix_tier1} [{'PASS' if tier2_pass else 'FAIL'}]")
+                if tier2_pass:
+                    tier = 2
+                    target_asset = "SPY"
+                    reason = f"Tier 2 (SPY/Balanced): VIX={vix:.2f} ≤ {self.vix_tier1}"
+            else:
+                log.info(f"[{today}]   Tier 2 (SPY/Balanced): VIX unavailable [FAIL]")
+
+        # Tier 3: VIX in (tier1, tier2] (ISF.L)
+        if tier is None:
+            if vix is not None:
+                tier3_pass = vix <= self.vix_tier2
+                log.info(f"[{today}]   Tier 3 (ISF.L/Defensive): VIX={vix:.2f} in ({self.vix_tier1}, {self.vix_tier2}] [{'PASS' if tier3_pass else 'FAIL'}]")
+                if tier3_pass:
+                    tier = 3
+                    target_asset = "ISF.L"
+                    reason = f"Tier 3 (ISF.L/Defensive): {self.vix_tier1} < VIX={vix:.2f} ≤ {self.vix_tier2}"
+            else:
+                log.info(f"[{today}]   Tier 3 (ISF.L/Defensive): VIX unavailable [FAIL]")
+
+        # Tier 4: VIX > tier2 or no VIX (CSH2.L) — always fallback
+        if tier is None:
+            if vix is not None:
+                log.info(f"[{today}]   Tier 4 (CSH2.L/Money-Market): VIX={vix:.2f} > {self.vix_tier2} [PASS] ← SELECTED")
+            else:
+                log.info(f"[{today}]   Tier 4 (CSH2.L/Money-Market): no VIX data [PASS] ← SELECTED")
             tier = 4
             target_asset = "CSH2.L"
-            reason = f"Tier 4 (CSH2.L/Defensive): no VIX data, fallback"
-            log.info(f"[{today}]   → {reason}")
-        elif vix <= self.vix_tier1:
-            tier = 2
-            target_asset = "SPY"
-            reason = f"Tier 2 (SPY/Balanced): VIX={vix:.2f} vs gate={self.vix_tier1} [PASS]"
-            log.info(f"[{today}]   → {reason}")
-        elif vix <= self.vix_tier2:
-            tier = 3
-            target_asset = "ISF.L"
-            reason = f"Tier 3 (ISF.L/Defensive): VIX={vix:.2f} ∈ ({self.vix_tier1}, {self.vix_tier2}] [PASS]"
-            log.info(f"[{today}]   → {reason}")
+            reason = f"Tier 4 (CSH2.L/Money-Market): fallback"
         else:
-            tier = 4
-            target_asset = "CSH2.L"
-            reason = f"Tier 4 (CSH2.L/Money-Market): VIX={vix:.2f} > {self.vix_tier2} [PASS]"
-            log.info(f"[{today}]   → {reason}")
+            log.info(f"[{today}]   Tier 4 (CSH2.L/Money-Market): [SKIPPED, tier {tier} already selected]")
 
         needs_rebalance = target_asset != self.current_asset
         if needs_rebalance:
-            log.info(f"[{today}]   → Rebalance needed: {self.current_asset} → {target_asset}")
+            log.info(f"[{today}]   ACTION: {self.current_asset} → {target_asset} (REBALANCE)")
         else:
-            log.debug(f"[{today}]   → Holding {target_asset} (no change)")
+            log.debug(f"[{today}]   ACTION: HOLD {target_asset} (no change)")
 
         return AllocationSignal(
             date=today,
