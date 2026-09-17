@@ -1230,7 +1230,7 @@ def process_cycle(
                         price = broker.get_last_price(ticker)
                         current_prices[ticker] = price if price > 0 else None
                     except Exception as _price_err:
-                        logger.warning(f"[{market_name}] Failed to fetch price for {ticker}: {_price_err}")
+                        logger.error(f"[{market_name}] Failed to fetch price for {ticker}: {_price_err}")
                         current_prices[ticker] = None
 
                 # Only require prices for active tier + current position (if switching)
