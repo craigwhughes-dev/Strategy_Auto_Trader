@@ -146,13 +146,9 @@ class MultiTierAllocationManager:
             target_asset = "ISF.L"
             reason = f"Tier 3 (ISF.L/Defensive): VIX={vix:.2f} ≤ {self.vix_tier2}"
 
-        # Tier 4: Fallback — VIX > tier2 threshold, or always available if VIX unavailable
-        if vix is not None:
-            tier4_pass = vix > self.vix_tier2
-            log.info(f"[{today}]   Tier 4 (CSH2.L/Money-Market): VIX={vix:.2f} > {self.vix_tier2} [{'PASS' if tier4_pass else 'FAIL'}]")
-        else:
-            tier4_pass = True  # Fallback always available
-            log.info(f"[{today}]   Tier 4 (CSH2.L/Money-Market): VIX unavailable [ALWAYS AVAILABLE]")
+        # Tier 4: Always available fallback (no gate)
+        tier4_pass = True
+        log.info(f"[{today}]   Tier 4 (CSH2.L/Money-Market): [PASS - always available fallback]")
 
         if tier4_pass and tier is None:
             tier = 4
