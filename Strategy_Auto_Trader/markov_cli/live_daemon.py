@@ -1235,7 +1235,7 @@ def process_cycle(
 
                 # CSH2.L resolution failure — log as ERROR for LogSentinel/monitoring
                 if current_prices.get("CSH2.L") is None:
-                    logger.error(f"[{market_name}] CSH2.L unresolvable (IBKR paper gateway issue — investigate)")
+                    logger.error(f"[{market_name}] CSH2.L price fetch failed (investigate)")
 
                 # Only require prices for active tier + current position (if switching)
                 required_prices = {tier_signal.target_asset}
