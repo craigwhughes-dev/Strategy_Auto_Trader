@@ -82,6 +82,12 @@ class MultiTierAllocationManager:
         self._last_known_cash = None  # Track cash for detecting user deposits
         self._last_cash_check_time = None  # Timestamp of last cash baseline
 
+        # Daily cache for VIX/VXN to avoid reloading 80k rows every cycle
+        self._vix_cache = None
+        self._vix_cache_date = None
+        self._vxn_cache = None
+        self._vxn_cache_date = None
+
     def signal(self, today: date, vxn: float | None, vix: float | None) -> AllocationSignal:
         """Compute daily allocation decision.
 
@@ -286,6 +292,70 @@ class MultiTierAllocationManager:
                 self._last_known_cash = current_cash
                 self._last_cash_check_time = now
             return current_cash
+
+    def _get_vix_current(self, fetcher) -> float | None:
+        """Get current VIX value with daily cache (fetches incremental on stale).
+
+        Args:
+            fetcher: callable that fetches VIX DataFrame from IBKR
+
+        Returns:
+            Current VIX close value, or None if unavailable
+        """
+        from datetime import date as _date
+        today = _date.today()
+
+        # If cache exists and is from today, use it
+        if self._vix_cache is not None and self._vix_cache_date == today:
+            try:
+                return float(self._vix_cache["Close"].iloc[-1])
+            except Exception as e:
+                _log.warning(f"Failed to extract VIX from cache: {e}")
+                return None
+
+        # Cache is stale or missing; fetch fresh (incremental append to disk)
+        try:
+            df = fetcher()
+            if df is not None and not df.empty:
+                self._vix_cache = df
+                self._vix_cache_date = today
+                _log.debug(f"VIX cache refreshed: {len(df)} rows, date={today}")
+                return float(df["Close"].iloc[-1])
+        except Exception as e:
+            _log.error(f"Failed to fetch VIX: {e}")
+        return None
+
+    def _get_vxn_current(self, fetcher) -> float | None:
+        """Get current VXN value with daily cache (fetches incremental on stale).
+
+        Args:
+            fetcher: callable that fetches VXN DataFrame from IBKR
+
+        Returns:
+            Current VXN close value, or None if unavailable
+        """
+        from datetime import date as _date
+        today = _date.today()
+
+        # If cache exists and is from today, use it
+        if self._vxn_cache is not None and self._vxn_cache_date == today:
+            try:
+                return float(self._vxn_cache["Close"].iloc[-1])
+            except Exception as e:
+                _log.warning(f"Failed to extract VXN from cache: {e}")
+                return None
+
+        # Cache is stale or missing; fetch fresh (incremental append to disk)
+        try:
+            df = fetcher()
+            if df is not None and not df.empty:
+                self._vxn_cache = df
+                self._vxn_cache_date = today
+                _log.debug(f"VXN cache refreshed: {len(df)} rows, date={today}")
+                return float(df["Close"].iloc[-1])
+        except Exception as e:
+            _log.error(f"Failed to fetch VXN: {e}")
+        return None
 
     def app_status_dict(self) -> dict:
         """Return current state for app_status.json."""

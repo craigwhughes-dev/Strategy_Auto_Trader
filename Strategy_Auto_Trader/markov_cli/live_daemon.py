@@ -1209,28 +1209,16 @@ def process_cycle(
     # Multi-tier allocation rebalance — runs once per cycle, after main signal execution.
     # 4-tier rebalance: Nasdaq/EQGB.L (VXN), SPY (VIX≤15), ISF.L (15<VIX≤17.5), CSH2.L (VIX>17.5).
     if allocation_mgr is not None:
-        logger.debug(f"[{market_name}] Allocation: fetching VIX/VXN for tier rebalance")
         from ..quant_hmm.sentiment import fetch_vix_hourly as _fetch_vix_hourly, fetch_vxn_hourly as _fetch_vxn_hourly
-        vix_df = _fetch_vix_hourly()
-        vxn_df = _fetch_vxn_hourly()
-        logger.debug(f"[{market_name}] Allocation: VIX rows={len(vix_df) if vix_df is not None else 0}, VXN rows={len(vxn_df) if vxn_df is not None else 0}")
+        logger.debug(f"[{market_name}] Allocation: getting VIX/VXN current values (with daily cache)")
 
-        # Extract current values safely
-        vix_current = None
-        vxn_current = None
-        try:
-            if vix_df is not None and not vix_df.empty:
-                vix_current = float(vix_df["Close"].iloc[-1])
-                logger.debug(f"[{market_name}] Allocation: VIX current = {vix_current:.2f}")
-        except Exception as e:
-            logger.error(f"[{market_name}] Allocation: failed to extract VIX current: {e}")
+        vix_current = allocation_mgr._get_vix_current(_fetch_vix_hourly)
+        vxn_current = allocation_mgr._get_vxn_current(_fetch_vxn_hourly)
 
-        try:
-            if vxn_df is not None and not vxn_df.empty:
-                vxn_current = float(vxn_df["Close"].iloc[-1])
-                logger.debug(f"[{market_name}] Allocation: VXN current = {vxn_current:.2f}")
-        except Exception as e:
-            logger.error(f"[{market_name}] Allocation: failed to extract VXN current: {e}")
+        if vix_current is not None:
+            logger.debug(f"[{market_name}] Allocation: VIX current = {vix_current:.2f}")
+        if vxn_current is not None:
+            logger.debug(f"[{market_name}] Allocation: VXN current = {vxn_current:.2f}")
 
         if vix_current is not None or vxn_current is not None:
             from datetime import date as _date
