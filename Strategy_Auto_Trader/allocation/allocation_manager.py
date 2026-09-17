@@ -93,31 +93,42 @@ class MultiTierAllocationManager:
         Returns:
             AllocationSignal with tier, target asset, and rebalance decision
         """
+        _log.info(f"[{today}] Signal evaluation: VXN={vxn}, VIX={vix}, current_asset={self.current_asset}")
+
         # Tier 1: Check VXN (Nasdaq)
         if vxn is not None and vxn <= self.vxn_threshold:
             tier = 1
             target_asset = "EQGB.L"
-            reason = f"VXN={vxn:.1f} ≤ {self.vxn_threshold} → Tier 1 (Nasdaq)"
+            gate_result = "PASS" if vxn <= self.vxn_threshold else "FAIL"
+            reason = f"Tier 1 (EQGB.L/Nasdaq): VXN={vxn:.2f} vs gate={self.vxn_threshold} [{gate_result}]"
+            _log.info(f"[{today}]   → {reason}")
         # Tier 2-4: VIX-based fallback
         elif vix is None:
             tier = 4
             target_asset = "CSH2.L"
-            reason = "no VIX data, fallback to CSH2.L"
+            reason = f"Tier 4 (CSH2.L/Defensive): no VIX data, fallback"
+            _log.info(f"[{today}]   → {reason}")
         elif vix <= self.vix_tier1:
             tier = 2
             target_asset = "SPY"
-            reason = f"VIX={vix:.1f} ≤ {self.vix_tier1} → Tier 2 (SPY)"
+            reason = f"Tier 2 (SPY/Balanced): VIX={vix:.2f} vs gate={self.vix_tier1} [PASS]"
+            _log.info(f"[{today}]   → {reason}")
         elif vix <= self.vix_tier2:
             tier = 3
             target_asset = "ISF.L"
-            reason = f"VIX={vix:.1f} ∈ ({self.vix_tier1}, {self.vix_tier2}] → Tier 3 (ISF.L)"
+            reason = f"Tier 3 (ISF.L/Defensive): VIX={vix:.2f} ∈ ({self.vix_tier1}, {self.vix_tier2}] [PASS]"
+            _log.info(f"[{today}]   → {reason}")
         else:
             tier = 4
             target_asset = "CSH2.L"
-            reason = f"VIX={vix:.1f} > {self.vix_tier2} → Tier 4 (CSH2.L)"
+            reason = f"Tier 4 (CSH2.L/Money-Market): VIX={vix:.2f} > {self.vix_tier2} [PASS]"
+            _log.info(f"[{today}]   → {reason}")
 
         needs_rebalance = target_asset != self.current_asset
-        rebalance_reason = reason + (" (rebalance needed)" if needs_rebalance else " (holding)")
+        if needs_rebalance:
+            _log.info(f"[{today}]   → Rebalance needed: {self.current_asset} → {target_asset}")
+        else:
+            _log.debug(f"[{today}]   → Holding {target_asset} (no change)")
 
         return AllocationSignal(
             date=today,
@@ -127,7 +138,7 @@ class MultiTierAllocationManager:
             target_asset=target_asset,
             current_asset=self.current_asset,
             needs_rebalance=needs_rebalance,
-            reason=rebalance_reason,
+            reason=reason,
         )
 
     def rebalance(
@@ -152,9 +163,12 @@ class MultiTierAllocationManager:
         Returns:
             List of AllocationOrder (sell current + buy target, or empty if no rebalance needed)
         """
+        _log.info(f"[{today}] Rebalance: available_cash={available_cash:.2f}, positions={positions}")
+
         # Exclude recent cash increases (deposits or manual sales) for 1 hour
         # to allow user to place manual trades before daemon allocates the cash
         allocatable_cash = self._filter_cash_for_allocation(available_cash)
+        _log.info(f"[{today}]   allocatable_cash={allocatable_cash:.2f} (after grace period filter)")
 
         signal = self.signal(today, vxn, vix)
 
@@ -191,6 +205,8 @@ class MultiTierAllocationManager:
 
         # Buy target asset with allocatable cash
         target_price = current_price.get(signal.target_asset, 0)
+        _log.info(f"[{today}]   target={signal.target_asset}, price={target_price:.2f}")
+
         if target_price > 0:
             # Buy as many whole shares as we can afford (after commission)
             cost_per_share = target_price * (1 + self.commission_pct / 100)
@@ -208,14 +224,16 @@ class MultiTierAllocationManager:
                 )
                 cost = buy_qty * target_price * (1 + self.commission_pct / 100)
                 _log.info(
-                    f"[{today}] Allocation BUY {buy_qty} {signal.target_asset} @ {target_price:.2f} "
-                    f"(cost ~{cost:.2f}, comm {self.commission_pct}%)"
+                    f"[{today}]   BUY {buy_qty} shares @ {target_price:.2f} "
+                    f"(total cost ~{cost:.2f}, incl {self.commission_pct}% commission)"
                 )
             else:
                 _log.warning(
-                    f"[{today}] Allocation: insufficient cash to buy {signal.target_asset} "
-                    f"(have {allocatable_cash:.2f}, need ≥{cost_per_share:.2f}/share)"
+                    f"[{today}]   Insufficient cash: have {allocatable_cash:.2f}, "
+                    f"need ≥{cost_per_share:.2f}/share to buy even 1"
                 )
+        else:
+            _log.error(f"[{today}]   Target price invalid for {signal.target_asset}: {target_price}")
 
         # Update internal state
         if orders:
