@@ -213,6 +213,97 @@ class TestBroker:
         fill = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
         assert fill is None
 
+    def test_ibkr_adapter_place_order_uses_smart_routed_contract(self):
+        pytest.importorskip("ib_async")
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        from Strategy_Auto_Trader.broker.types import OrderRequest
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+        adapter._ib.isConnected.return_value = True
+        mock_trade = MagicMock()
+        mock_trade.orderStatus.status = "Filled"
+        mock_trade.orderStatus.avgFillPrice = 1044.6
+        adapter._ib.placeOrder.return_value = mock_trade
+
+        adapter.place_order(OrderRequest("ISF.L", "BUY", 19))
+
+        contract = adapter._ib.placeOrder.call_args.args[0]
+        assert (contract.symbol, contract.exchange, contract.currency,
+                contract.primaryExchange) == ("ISF", "SMART", "GBP", "LSEETF")
+
+    def test_ibkr_adapter_place_order_logs_ibkr_reject_reason(self, caplog):
+        pytest.importorskip("ib_async")
+        import logging
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        from Strategy_Auto_Trader.broker.types import OrderRequest
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+        adapter._ib.isConnected.return_value = True
+        mock_trade = MagicMock()
+        mock_trade.orderStatus.status = "Cancelled"
+        mock_trade.orderStatus.avgFillPrice = 0.0
+        mock_trade.log = [
+            SimpleNamespace(status="PendingSubmit", errorCode=0, message=""),
+            SimpleNamespace(status="Cancelled", errorCode=10311,
+                            message="This order will be directly routed to LSEETF."),
+        ]
+        adapter._ib.placeOrder.return_value = mock_trade
+
+        with caplog.at_level(logging.WARNING, logger="Strategy_Auto_Trader.broker.ibkr_adapter"):
+            assert adapter.place_order(OrderRequest("ISF.L", "BUY", 19)) is None
+        assert "errorCode=10311 msg=This order will be directly routed to LSEETF." in caplog.text
+
+    @staticmethod
+    def _stop_adapter(rule_increments=None):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        from Strategy_Auto_Trader.broker.ibkr_adapter import IBKRAdapter
+        adapter = IBKRAdapter()
+        adapter._ib = MagicMock()
+        adapter._ib.isConnected.return_value = True
+        if rule_increments is None:
+            adapter._ib.reqContractDetails.return_value = []
+        else:
+            adapter._ib.reqContractDetails.return_value = [SimpleNamespace(marketRuleIds="1919")]
+            adapter._ib.reqMarketRule.return_value = [
+                SimpleNamespace(lowEdge=low, increment=inc) for low, inc in rule_increments]
+        trade = MagicMock()
+        trade.orderStatus.status = "Submitted"
+        trade.order.permId = 4242
+        adapter._ib.placeOrder.return_value = trade
+        return adapter
+
+    def test_ibkr_adapter_stop_price_rounds_to_whole_pence_for_lse(self):
+        """Exchange tick (0.1p at £5-10) is finer than a penny — penny wins,
+        and no post-rounding buffer may reintroduce sub-tick noise (Error 110)."""
+        pytest.importorskip("ib_async")
+        from Strategy_Auto_Trader.broker.types import StopOrderRequest
+        adapter = self._stop_adapter(rule_increments=[(0.0, 0.0001), (5.0, 0.001), (10.0, 0.002)])
+        result = adapter.place_stop_order(StopOrderRequest("ISF.L", 19, 9.396939))
+        assert result is not None and result.perm_id == 4242
+        contract, order = adapter._ib.placeOrder.call_args.args
+        assert (contract.exchange, contract.primaryExchange) == ("SMART", "LSEETF")
+        assert order.auxPrice == pytest.approx(940.0)
+
+    def test_ibkr_adapter_stop_price_uses_exchange_tick_when_coarser(self):
+        pytest.importorskip("ib_async")
+        from Strategy_Auto_Trader.broker.types import StopOrderRequest
+        adapter = self._stop_adapter(rule_increments=[(0.0, 0.001), (100.0, 0.02), (500.0, 0.1)])
+        adapter.place_stop_order(StopOrderRequest("CSH2.L", 1, 1234.567))
+        order = adapter._ib.placeOrder.call_args.args[1]
+        assert order.auxPrice == pytest.approx(123460.0)
+
+    def test_ibkr_adapter_stop_price_us_ticker_rounds_to_cents(self):
+        pytest.importorskip("ib_async")
+        from Strategy_Auto_Trader.broker.types import StopOrderRequest
+        adapter = self._stop_adapter()
+        adapter.place_stop_order(StopOrderRequest("SPY", 5, 684.39149))
+        order = adapter._ib.placeOrder.call_args.args[1]
+        assert order.auxPrice == pytest.approx(684.39)
+
     def test_ibkr_adapter_place_order_returns_none_when_partially_filled(self):
         pytest.importorskip("ib_async")
         from unittest.mock import MagicMock

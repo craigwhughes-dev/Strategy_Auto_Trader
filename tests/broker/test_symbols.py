@@ -7,6 +7,7 @@ import pytest
 from Strategy_Auto_Trader.broker.symbols import (
     IBKR_UNRESOLVABLE,
     ibkr_contract_params,
+    ibkr_order_contract_kwargs,
     normalize_fill_price,
     yfinance_ticker,
     sizing_price,
@@ -44,6 +45,30 @@ class TestIbkrContractParams:
     ])
     def test_lse_trailing_dot_symbols(self, ticker, ibkr_symbol):
         assert ibkr_contract_params(ticker) == (ibkr_symbol, "LSE", "GBP")
+
+    def test_lse_etf_maps_to_lseetf_exchange(self):
+        assert ibkr_contract_params("ISF.L") == ("ISF", "LSEETF", "GBP")
+        assert ibkr_contract_params("EQGB.L") == ("EQGB", "LSEETF", "GBP")
+
+    def test_csh2_maps_to_plain_lse_gbp_line(self):
+        # IBKR lists CSH2's GBP share class on LSE (tradingClass ETFS), not
+        # LSEETF; the IBIS/EUR line has no market-data permission (2026-09-17).
+        assert ibkr_contract_params("CSH2.L") == ("CSH2", "LSE", "GBP")
+        assert ibkr_contract_params("csh2.l") == ("csh2", "LSE", "GBP")
+
+    def test_order_contract_is_smart_routed_with_listing_venue(self):
+        # Gateway API precaution rejects direct-routed orders (Error 10311).
+        assert ibkr_order_contract_kwargs("HSBA.L") == {
+            "symbol": "HSBA", "exchange": "SMART", "currency": "GBP", "primaryExchange": "LSE"}
+        assert ibkr_order_contract_kwargs("ISF.L") == {
+            "symbol": "ISF", "exchange": "SMART", "currency": "GBP", "primaryExchange": "LSEETF"}
+        assert ibkr_order_contract_kwargs("CSH2.L") == {
+            "symbol": "CSH2", "exchange": "SMART", "currency": "GBP", "primaryExchange": "LSE"}
+        assert ibkr_order_contract_kwargs("BP.L")["symbol"] == "BP."
+
+    def test_order_contract_for_us_ticker_has_no_primary_exchange(self):
+        assert ibkr_order_contract_kwargs("BRK-B") == {
+            "symbol": "BRK B", "exchange": "SMART", "currency": "USD"}
 
     def test_lse_dot_symbol_not_confused_with_similar_prefix(self):
         """"BAE" isn't in the trailing-dot set — must not get a dot appended."""

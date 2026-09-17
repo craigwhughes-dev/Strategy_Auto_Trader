@@ -14,7 +14,8 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from .symbols import PENCE_PER_POUND, ibkr_contract_params, yfinance_ticker
+from .symbols import (PENCE_PER_POUND, ibkr_contract_params,
+                      ibkr_order_contract_kwargs, yfinance_ticker)
 from .types import FillResult, OrderRequest, PendingCancelEvent
 
 logger = logging.getLogger(__name__)
@@ -24,10 +25,41 @@ logger = logging.getLogger(__name__)
 _WORKING_STATUSES = ("PendingSubmit", "PreSubmitted", "Submitted", "ApiPending", "Acknowledged")
 _TERMINAL_NON_FILL_STATUSES = ("Cancelled", "ApiCancelled", "Inactive")
 
+# Coarsest precision a stop price is ever submitted at, in pot currency
+# (0.01 = whole pence for LSE, cents for US). The exchange tick from
+# reqMarketRule is used when it is coarser (LSE names above £100 tick at
+# 2p+), never when finer — sub-penny stop precision buys nothing and the
+# old 1-2 bps "re-rejection buffer" applied after tick rounding produced
+# non-conforming prices (Error 110, e.g. 939.69396p for ISF.L).
+STOP_PRICE_TICK_FLOOR = 0.01
+
 # How long a cancel can stay unconfirmed before we send one alert about it.
 # Non-blocking: checked once per daemon cycle via check_pending_cancels(),
 # never waited-for synchronously inside place_order().
 PENDING_CANCEL_ALERT_SECONDS = 30 * 60
+
+
+def _trade_log_detail(trade) -> str:
+    """IBKR's own reason for an order outcome, from the trade log.
+
+    The ib_async logger is silenced at connect time, so a rejection such as
+    Error 10311 (direct-routing precaution) or 201 (order discarded) is only
+    visible through the TradeLogEntry messages attached to the Trade.
+    """
+    entries = [e for e in (getattr(trade, "log", None) or []) if getattr(e, "message", None)]
+    if not entries:
+        return "no IBKR message"
+    return "; ".join(
+        f"errorCode={getattr(e, 'errorCode', None)} msg={e.message}" for e in entries[-3:]
+    )
+
+
+def _first_positive(*values) -> float | None:
+    """First value that is a finite number > 0 (IBKR reports missing ticks as NaN)."""
+    for v in values:
+        if v is not None and v == v and v > 0:
+            return float(v)
+    return None
 
 
 class IBKRAdapter:
@@ -98,25 +130,57 @@ class IBKRAdapter:
             return False
 
     def get_last_price(self, ticker: str) -> float:
-        """Return last traded / midpoint price (pence for LSE tickers, EUR for CSH2)."""
+        """Return last traded / midpoint price (pence for LSE tickers).
+
+        This account has no live market-data subscriptions, so market data
+        type 3 is requested: IBKR serves live ticks where a subscription
+        exists and otherwise falls back to 15-min delayed ticks (type 1 would
+        return NaN with Error 354/10089 instead). If the snapshot still has
+        no usable price (e.g. Error 10197 "competing live session" when the
+        same login is open elsewhere), the close of the latest 1-min
+        historical bar is used. IBKR's own error text is collected while the
+        request is in flight and included in the raised ValueError, since the
+        ib_async logger is silenced at connect time.
+        """
         from ib_async import Stock
         contract = Stock(*ibkr_contract_params(ticker))
         self._ib.qualifyContracts(contract)
         self._ib.sleep(0.5)  # Wait for contract qualification
         if not contract.conId:
             raise ValueError(f"{ticker}: contract qualification failed (no conId)")
-        self._ib.reqMarketDataType(1)  # 1 = live market data
-        tdata = self._ib.reqMktData(contract, "", True, False)
-        self._ib.sleep(3)  # Wait for market data to populate
-        mid = tdata.midpoint()
-        if mid and mid > 0:
-            return float(mid)
-        if tdata.last and tdata.last > 0:
-            return float(tdata.last)
-        close = tdata.close
-        if close and close > 0:
-            return float(close)
-        raise ValueError(f"{ticker}: no valid price (mid={tdata.midpoint()}, last={tdata.last}, close={tdata.close})")
+
+        errors: list[str] = []
+
+        def _on_error(reqId, errorCode, errorString, contract_=None, *_):
+            if contract_ is None or getattr(contract_, "conId", None) == contract.conId:
+                errors.append(f"{errorCode}: {errorString}")
+
+        self._ib.errorEvent += _on_error
+        try:
+            self._ib.reqMarketDataType(3)  # live if subscribed, else delayed
+            tdata = self._ib.reqMktData(contract, "", True, False)
+            self._ib.sleep(3)  # Wait for snapshot ticks to populate
+            price = _first_positive(tdata.midpoint(), tdata.last, tdata.close)
+            if price is not None:
+                return price
+            bars = self._ib.reqHistoricalData(
+                contract, endDateTime="", durationStr="1 D",
+                barSizeSetting="1 min", whatToShow="TRADES", useRTH=False,
+            )
+            if bars:
+                price = _first_positive(bars[-1].close)
+                if price is not None:
+                    logger.warning(
+                        "%s: snapshot had no price (%s); using last 1-min bar close %s at %s",
+                        ticker, "; ".join(errors) or "no IBKR error", price, bars[-1].date,
+                    )
+                    return price
+        finally:
+            self._ib.errorEvent -= _on_error
+        raise ValueError(
+            f"{ticker}: no valid price (mid={tdata.midpoint()}, last={tdata.last}, "
+            f"close={tdata.close}); IBKR errors: {'; '.join(errors) or 'none'}"
+        )
 
     def place_order(self, req: OrderRequest) -> FillResult | None:
         """Submit a market order and wait for fill (up to self._timeout seconds).
@@ -131,7 +195,7 @@ class IBKRAdapter:
 
         try:
             from ib_async import Stock, MarketOrder
-            contract = Stock(*ibkr_contract_params(req.ticker))
+            contract = Stock(**ibkr_order_contract_kwargs(req.ticker))
             self._ib.qualifyContracts(contract)
             order = MarketOrder(req.action, req.quantity, tif="GTC")
             logger.info(
@@ -203,7 +267,7 @@ class IBKRAdapter:
                 else:
                     logger.warning(
                         f"Order not filled for {req.ticker}: status={order_status}, "
-                        f"requested_qty={req.quantity}"
+                        f"requested_qty={req.quantity}, {_trade_log_detail(trade)}"
                     )
                     return None
 
@@ -286,7 +350,7 @@ class IBKRAdapter:
 
         try:
             from ib_async import Stock, StopOrder
-            contract = Stock(*ibkr_contract_params(req.ticker))
+            contract = Stock(**ibkr_order_contract_kwargs(req.ticker))
             self._ib.qualifyContracts(contract)
             # Stop price math (stop_level * (1 - buffer_pct)) produces floats
             # with far more precision than the exchange accepts — IBKR rejects
@@ -299,16 +363,12 @@ class IBKRAdapter:
             # contract's native currency (pounds for LSE, not pence), so find
             # the tick and round in req.stop_price's own units (pot currency)
             # before converting to pence below.
-            min_tick = self._min_tick_for(contract, req.stop_price)
+            min_tick = max(self._min_tick_for(contract, req.stop_price), STOP_PRICE_TICK_FLOOR)
             native_stop = round(round(req.stop_price / min_tick) * min_tick, 8)
-            # Add 1-2 bps buffer to avoid re-rejection when LSE tick tables shift
-            # between submission attempts (MiFID II bands vary by price level).
-            if req.ticker.upper().endswith(".L"):
-                native_stop *= 1.0001
             # req.stop_price is pot currency (pounds); LSE orders quote in pence.
             exchange_stop = native_stop
             if req.ticker.upper().endswith(".L"):
-                exchange_stop = native_stop * PENCE_PER_POUND
+                exchange_stop = round(native_stop * PENCE_PER_POUND, 6)
             order = StopOrder("SELL", req.quantity, exchange_stop, tif="GTC")
             trade = self._ib.placeOrder(contract, order)
             # waitOnUpdate() returns on the *first* incoming update event
@@ -326,16 +386,9 @@ class IBKRAdapter:
                 order_status = trade.orderStatus.status
 
             if order_status not in ("PreSubmitted", "Submitted", "Acknowledged"):
-                log_entries = getattr(trade, "log", None) or []
-                last_log = log_entries[-1] if log_entries else None
-                error_detail = (
-                    f"errorCode={getattr(last_log, 'errorCode', None)} "
-                    f"msg={getattr(last_log, 'message', None)}"
-                    if last_log else "no trade log entries"
-                )
                 logger.warning(
                     f"Stop order not accepted for {req.ticker}: status={order_status}, "
-                    f"exchange_stop={exchange_stop}, min_tick={min_tick}, {error_detail}"
+                    f"exchange_stop={exchange_stop}, min_tick={min_tick}, {_trade_log_detail(trade)}"
                 )
                 return None
 

@@ -40,7 +40,16 @@ _LSE_DOT_SYMBOLS = {"AV", "BA", "BP", "JD", "NG", "RR", "SN", "UU"}
 # LSE-listed ETFs use exchange "LSEETF" on IBKR, not "LSE" (which is for equities).
 # Stock("ISF","LSE","GBP") returns Error 200; Stock("ISF","LSEETF","GBP") resolves correctly.
 # Verified 2026-09-14 on paper Gateway port 4002: conIds 13444223/104145585/68490081.
-_LSEETF_SYMBOLS: frozenset[str] = frozenset({"ISF", "XSTR", "IGLS", "ISXF", "CSH2", "EQGB"})  # CSH2 = Invesco Cash ETF; EQGB = Invesco Nasdaq-100 GBP-hedged UCITS
+_LSEETF_SYMBOLS: frozenset[str] = frozenset({"ISF", "XSTR", "IGLS", "ISXF", "EQGB"})  # EQGB = Invesco Nasdaq-100 GBP-hedged UCITS
+
+# CSH2 (Amundi Smart Overnight Return UCITS ETF, GBP-hedged share class) is
+# registered on IBKR as Stock("CSH2", "LSE", "GBP") — conId 196610715,
+# tradingClass ETFS — not on LSEETF like the other LSE ETFs above. The
+# IBIS/EUR line (conId 185829298) qualifies but this account has no market
+# data permission for IBIS at all (Error 354 live/delayed, Error 162
+# historical), so quotes come back NaN. Verified 2026-09-17 on paper Gateway
+# port 4002: LSE/GBP returns delayed quotes and 1-min historical bars.
+_LSE_EXPLICIT_EXCHANGE: dict[str, str] = {"CSH2": "LSE"}
 
 
 def ibkr_contract_params(ticker: str) -> tuple[str, str, str]:
@@ -49,20 +58,44 @@ def ibkr_contract_params(ticker: str) -> tuple[str, str, str]:
     ".L" suffix → LSE/GBP with the suffix stripped and share-class hyphen
     turned into IBKR's dot (plus the _LSE_DOT_SYMBOLS trailing-dot fixups
     above). LSE ETFs in _LSEETF_SYMBOLS use exchange "LSEETF" instead of "LSE".
-    Exception: CSH2.L trades on IBIS (Xetra) in EUR, not LSE in GBP.
+    _LSE_EXPLICIT_EXCHANGE pins the exchange for LSE ETFs that IBKR lists
+    outside LSEETF (CSH2 lives on plain LSE with tradingClass ETFS).
     Everything else is treated as a US equity on SMART/USD; US dual-class
     tickers use yfinance's hyphen (e.g. "BRK-B", "BF-B") where IBKR wants
     a space ("BRK B", "BF B").
     """
-    if ticker.upper() == "CSH2.L":
-        return "CSH2", "IBIS", "EUR"
     if ticker.upper().endswith(".L"):
         base = ticker[:-2].replace("-", ".")
         if base.upper() in _LSE_DOT_SYMBOLS:
             base = base + "."
-        exch = "LSEETF" if base.upper() in _LSEETF_SYMBOLS else "LSE"
+        if base.upper() in _LSE_EXPLICIT_EXCHANGE:
+            exch = _LSE_EXPLICIT_EXCHANGE[base.upper()]
+        else:
+            exch = "LSEETF" if base.upper() in _LSEETF_SYMBOLS else "LSE"
         return base, exch, "GBP"
     return ticker.replace("-", " "), "SMART", "USD"
+
+
+def ibkr_order_contract_kwargs(ticker: str) -> dict[str, str]:
+    """Keyword args for the ib_async Stock used to PLACE ORDERS for ticker.
+
+    Orders are always SMART-routed, with the listing venue carried as
+    primaryExchange for disambiguation. The Gateway's API precautionary
+    settings reject every direct-routed (non-SMART) order with Error 10311
+    "This order will be directly routed to <exchange>" followed by Error 201
+    "Order was discarded" — observed since 2026-09-10 for LSE and LSEETF alike
+    (last direct-routed fill 2026-08-28). Verified 2026-09-17 on paper
+    Gateway: SMART+primaryExchange fills for HSBA, ISF, EQGB and CSH2.
+
+    Market/historical data keeps using ibkr_contract_params() (direct venue):
+    reqHistoricalData on a SMART contract returns "HMDS query returned no
+    data" for LSE ETFs such as CSH2.
+    """
+    symbol, exchange, currency = ibkr_contract_params(ticker)
+    kwargs = {"symbol": symbol, "exchange": "SMART", "currency": currency}
+    if exchange != "SMART":
+        kwargs["primaryExchange"] = exchange
+    return kwargs
 
 
 def yfinance_ticker(symbol: str, currency: str) -> str:
