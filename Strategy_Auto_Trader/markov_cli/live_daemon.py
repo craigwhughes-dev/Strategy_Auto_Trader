@@ -1209,9 +1209,11 @@ def process_cycle(
     # Multi-tier allocation rebalance — runs once per cycle, after main signal execution.
     # 4-tier rebalance: Nasdaq/EQGB.L (VXN), SPY (VIX≤15), ISF.L (15<VIX≤17.5), CSH2.L (VIX>17.5).
     if allocation_mgr is not None:
+        logger.debug(f"[{market_name}] Allocation: fetching VIX/VXN for tier rebalance")
         from ..quant_hmm.sentiment import fetch_vix_hourly as _fetch_vix_hourly, fetch_vxn_hourly as _fetch_vxn_hourly
         vix_df = _fetch_vix_hourly()
         vxn_df = _fetch_vxn_hourly()
+        logger.debug(f"[{market_name}] Allocation: VIX rows={len(vix_df) if vix_df is not None else 0}, VXN rows={len(vxn_df) if vxn_df is not None else 0}")
         vix_current = float(vix_df["Close"].iloc[-1]) if vix_df is not None and not vix_df.empty else None
         vxn_current = float(vxn_df["Close"].iloc[-1]) if vxn_df is not None and not vxn_df.empty else None
         if vix_current is not None or vxn_current is not None:
@@ -2210,6 +2212,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from ..allocation.allocation_manager import MultiTierAllocationManager
     allocation_mgr = MultiTierAllocationManager(vxn_threshold=18.0, vix_tier1=15.0, vix_tier2=17.5)
+    logger.info(f"Allocation manager initialized: tier_mode={args.tier_mode}")
 
     # Broker connection is async and can hang; skip it here and let it fail gracefully
     # when trades are attempted. Daemon can still process tickers and generate signals.
