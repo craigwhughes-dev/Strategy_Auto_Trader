@@ -166,6 +166,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         help="Only render the chart, HTML daily summary and company lookup "
                              "when the current signal is BUY or SELL (used by the live "
                              "daemon to keep hourly cycles fast)")
+    parser.add_argument("--tier-mode", action="store_true", default=False,
+                        help="Suppress main strategy engine output (backtest summary, "
+                             "P&L, yearly P&L) — used when running in allocation tier mode "
+                             "(default: off)")
     parser.add_argument("--no-email", dest="no_email", action="store_true", default=False,
                         help="Suppress trade alert emails even when SMTP_PASSWORD is set "
                              "(used by batch/daemon which handle email decisions externally)")
@@ -313,7 +317,10 @@ def _write_quality_gate(run_dir: Path, flag: str, reason: str = "") -> None:
     (run_dir / "qualityGate.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def _print_backtest_summary(bt: dict) -> None:
+def _print_backtest_summary(bt: dict, tier_mode: bool = False) -> None:
+    if tier_mode:
+        return
+
     def _pct(v: float) -> str:
         return f"{v*100:.2f}%" if np.isfinite(v) else "NaN"
     def _f(v: float) -> str:
@@ -496,7 +503,7 @@ def main(argv: list[str] | None = None) -> int:
         _write_quality_gate(run_dir, "HOLD", "insufficient data")
         return 0
 
-    _print_backtest_summary(bt)
+    _print_backtest_summary(bt, tier_mode=args.tier_mode)
 
     detail = bt["detail"]
     atomic_write_csv(run_dir / "compositeBacktest.csv", detail)

@@ -153,6 +153,9 @@ def _build_argv(ticker_cfg: dict, defaults: dict) -> list[str]:
     if merged.get("signal_reports_only", False):
         argv.append("--signal-reports-only")
 
+    if merged.get("tier_mode", False):
+        argv.append("--tier-mode")
+
     # batch/daemon always suppress run.py's own email send — email decisions
     # are made here in batch.py after the subprocess returns, not inside run.py.
     argv.append("--no-email")

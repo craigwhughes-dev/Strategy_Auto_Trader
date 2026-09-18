@@ -843,6 +843,7 @@ def _evaluate_ticker(
     *,
     pin_open_strategy: bool,
     state_lock=None,
+    tier_mode: bool = False,
 ) -> dict:
     """Build ticker_cfg and run process_ticker for a single ticker.
 
@@ -853,6 +854,8 @@ def _evaluate_ticker(
     from .batch import process_ticker
 
     ticker_cfg = {"ticker": ticker, **overrides.get(ticker, {})}
+    if tier_mode:
+        ticker_cfg["tier_mode"] = True
     if pin_open_strategy:
         from ..output.trade_state import get_open_strategy
         pinned_strategy = get_open_strategy(ticker)
@@ -1129,7 +1132,7 @@ def process_cycle(
         _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
 
         logger.debug(f"  Processing {ticker}")
-        result = _evaluate_ticker(ticker, overrides, defaults, logger, market_name, pin_open_strategy=True)
+        result = _evaluate_ticker(ticker, overrides, defaults, logger, market_name, pin_open_strategy=True, tier_mode=tier_mode)
         processed.append(result)
 
     # Stage 2: candidates (round-robin through rest) — skipped in tier_mode
@@ -1159,7 +1162,7 @@ def process_cycle(
                 futures = {
                     executor.submit(
                         _evaluate_ticker, t, overrides, defaults, logger,
-                        market_name, pin_open_strategy=False, state_lock=state_lock,
+                        market_name, pin_open_strategy=False, state_lock=state_lock, tier_mode=tier_mode,
                     ): t
                     for t in candidates
                 }
@@ -1192,7 +1195,7 @@ def process_cycle(
                 _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
 
                 logger.debug(f"  Processing {ticker}")
-                result = _evaluate_ticker(ticker, overrides, defaults, logger, market_name, pin_open_strategy=False)
+                result = _evaluate_ticker(ticker, overrides, defaults, logger, market_name, pin_open_strategy=False, tier_mode=tier_mode)
                 processed.append(result)
                 n_attempted += 1
 
@@ -1337,8 +1340,15 @@ def check_overnight_screening(
     config: dict,
     daemon_state: dict,
     logger: logging.Logger,
+    tier_mode: bool = False,
 ) -> None:
-    """Check if overnight screening should run, and run if needed."""
+    """Check if overnight screening should run, and run if needed.
+
+    Skipped when tier_mode=True (tier allocation only, no candidate discovery).
+    """
+    if tier_mode:
+        return
+
     tz = ZoneInfo(config.get("overnight_timezone", "Europe/London"))
     now = datetime.now(tz)
     run_time_str = config.get("overnight_run_time", "02:00")
@@ -2326,7 +2336,7 @@ def main(argv: list[str] | None = None) -> int:
                 check_ibkr_data_reconciliation(config, daemon_state, logger)
 
                 # Check overnight screening
-                check_overnight_screening(config, daemon_state, logger)
+                check_overnight_screening(config, daemon_state, logger, tier_mode=args.tier_mode)
 
                 # Market-open check, used both to gate protective-stop checks below
                 # and to decide whether startup-reconciliation retries need to back off.
