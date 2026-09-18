@@ -92,6 +92,7 @@ class MultiTierAllocationManager:
         self._last_vix = None
         self._last_vxn = None
         self._last_tier_num = None
+        self._last_target_asset = None  # Target asset selected by last signal
         self._last_action = None  # "HOLD" | "BUY" | "SELL"
 
     def signal(
@@ -156,6 +157,7 @@ class MultiTierAllocationManager:
         self._last_vix = vix
         self._last_vxn = vxn
         self._last_tier_num = tier
+        self._last_target_asset = target_asset
         self._last_action = action
 
         return AllocationSignal(
@@ -441,7 +443,7 @@ class MultiTierAllocationManager:
                 "vxn_current": self._last_vxn,
                 "tiers": tiers,
                 "selected_tier_num": self._last_tier_num,
-                "selected_asset": self.current_asset,
+                "selected_asset": self._last_target_asset,
                 "action": self._last_action,
             }
 

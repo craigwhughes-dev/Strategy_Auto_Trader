@@ -2312,13 +2312,6 @@ def main(argv: list[str] | None = None) -> int:
             logger.warning(f"Allocation: multiple tier assets held at startup {held_tier_assets}, using first")
         allocation_mgr.current_asset = held_tier_assets[0]
     logger.info(f"Allocation manager initialized: tier_mode={args.tier_mode}, current_asset={allocation_mgr.current_asset}")
-    # Bootstrap tier info so app_status.json always has tier breakdown, even if markets are closed
-    # Use silent logger to avoid logging misleading tier breakdown at startup
-    from datetime import date as _today_date
-    import logging as _logging
-    silent_logger = _logging.getLogger("allocation_bootstrap")
-    silent_logger.setLevel(_logging.CRITICAL)  # Suppress all logs
-    allocation_mgr.signal(_today_date.today(), None, None, logger=silent_logger, verbose=False)
 
     # Broker connection is async and can hang; skip it here and let it fail gracefully
     # when trades are attempted. Daemon can still process tickers and generate signals.
