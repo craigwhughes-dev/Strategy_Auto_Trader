@@ -26,6 +26,7 @@ covered or a page returns no further/older bars.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -139,6 +140,9 @@ class IBKRDataClient:
     it is not installed (mirrors IBKRAdapter's lazy-import convention).
     """
 
+    _maintenance_window_logged = False
+    _last_maintenance_hour = -1
+
     def __init__(
         self,
         host: str = "127.0.0.1",
@@ -169,11 +173,26 @@ class IBKRDataClient:
             return True
         except Exception:
             self._ib = None
-            logger.warning(
-                "IBKR gateway unreachable (%.0fs timeout configured, failed immediately on port-refused) "
-                "— will retry next cycle",
-                self._connect_timeout,
-            )
+            now = datetime.now()
+            hour = now.hour
+            in_maintenance_window = 2 <= hour < 4
+
+            should_log = True
+            if in_maintenance_window:
+                if IBKRDataClient._last_maintenance_hour == hour and IBKRDataClient._maintenance_window_logged:
+                    should_log = False
+                else:
+                    IBKRDataClient._last_maintenance_hour = hour
+                    IBKRDataClient._maintenance_window_logged = True
+            else:
+                IBKRDataClient._maintenance_window_logged = False
+
+            if should_log:
+                logger.warning(
+                    "IBKR gateway unreachable (%.0fs timeout configured, failed immediately on port-refused) "
+                    "— will retry next cycle",
+                    self._connect_timeout,
+                )
             return False
 
     def disconnect(self) -> None:
