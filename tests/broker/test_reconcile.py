@@ -31,10 +31,9 @@ class TestReconcilePositions:
         assert len(result) == 1
         assert "broker shows no position" in result[0]
 
-    def test_unexpected_at_broker(self):
-        result = reconcile_positions({}, {"TSLA": 5})
-        assert len(result) == 1
-        assert "no internal position" in result[0]
+    def test_unmanaged_broker_position_is_ignored(self):
+        # Manual trades in a mixed account are not daemon-managed (5ff6ef8).
+        assert reconcile_positions({}, {"TSLA": 5}) == []
 
     def test_lse_ticker_matches_directly(self):
         internal = {"HSBA.L": _pos(200)}
@@ -54,10 +53,10 @@ class TestReconcilePositions:
         broker = {"SPY": 10, "AAPL": 2, "TSLA": 5}
         result = reconcile_positions(internal, broker)
         joined = " | ".join(result)
-        assert len(result) == 3
+        assert len(result) == 2
         assert "AAPL" in joined
         assert "MSFT" in joined
-        assert "TSLA" in joined
+        assert "TSLA" not in joined  # broker-only position is unmanaged
 
     # -- Boundary values ------------------------------------------------------
 

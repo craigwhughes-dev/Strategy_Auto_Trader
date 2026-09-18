@@ -513,7 +513,10 @@ def test_main_calls_compute_global_top_k_once_not_per_market(tmp_path):
 
     with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_config", return_value=config):
         with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_execution_state", return_value={}):
-            with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.compute_global_top_k", return_value={"A"}) as mock_topk:
+            with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.compute_global_top_k", return_value={"A"}) as mock_topk, \
+                 mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope._collect_vol_kept_combined", return_value=set()):
+                # _collect_vol_kept_combined must be mocked: unpatched it runs a real
+                # vol_screen over every ticker in the repo's watchlists (~600, minutes of CPU/disk).
                 with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.screen_market",
                                  return_value={"kept": [], "excluded": [], "open_positions": []}):
                     with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.write_scope_result"):
@@ -581,7 +584,9 @@ class TestRefreshUniverseAndWatchlists:
         with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_config", return_value=config):
             with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.load_execution_state", return_value={}):
                 with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.refresh_universe_and_watchlists",
-                                 side_effect=lambda c: call_order.append("refresh")):
+                                 side_effect=lambda c: call_order.append("refresh")), \
+                     mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope._collect_vol_kept_combined",
+                                return_value=set()):
                     with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.compute_global_top_k",
                                      side_effect=lambda *a, **k: call_order.append("top_k") or None):
                         with mock.patch("Strategy_Auto_Trader.markov_cli.overnight_scope.screen_market",

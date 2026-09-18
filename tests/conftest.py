@@ -1,8 +1,57 @@
 from __future__ import annotations
 
+import socket
+
 import numpy as np
 import pandas as pd
 import pytest
+
+# TWS live/paper and IB Gateway live/paper. A second API session on one of these
+# collides with the running daemon's connection.
+IBKR_PORTS = frozenset({4001, 4002, 7496, 7497})
+
+
+class IBKRConnectBlocked(ConnectionRefusedError):
+    """Raised when a test tries to open a real socket to an IBKR API port."""
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "allow_ibkr_connect: test genuinely exercises a live IBKR connection; "
+        "disables the socket guard",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _block_ibkr_sockets(request, monkeypatch):
+    """Fail any real TCP connect to an IBKR API port instead of reaching the Gateway.
+
+    Patching IBKRDataClient.connect (below) doesn't cover IBKRAdapter, raw ib_async.IB,
+    or subprocesses' pre-ping sockets; blocking at the socket layer covers all in-process
+    paths. Tests that mock at a higher level never reach this. Opt out per-test with
+    @pytest.mark.allow_ibkr_connect.
+    """
+    if request.node.get_closest_marker("allow_ibkr_connect"):
+        return
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+
+    def _blocked(addr) -> bool:
+        return isinstance(addr, tuple) and len(addr) >= 2 and addr[1] in IBKR_PORTS
+
+    def guarded_connect(self, addr):
+        if _blocked(addr):
+            raise IBKRConnectBlocked(f"test attempted real IBKR connection to {addr}; mock it")
+        return real_connect(self, addr)
+
+    def guarded_connect_ex(self, addr):
+        if _blocked(addr):
+            raise IBKRConnectBlocked(f"test attempted real IBKR connection to {addr}; mock it")
+        return real_connect_ex(self, addr)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
 
 
 @pytest.fixture(autouse=True)

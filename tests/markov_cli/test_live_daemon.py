@@ -49,6 +49,9 @@ def config():
         },
         "overnight_run_time": "02:00",
         "overnight_timezone": "Europe/London",
+        # main() tests don't stub check_ibkr_data_reconciliation; left enabled it
+        # would spawn a real ibkr_reconcile subprocess if run during 01:00-02:00 London.
+        "ibkr_data_reconcile": {"enabled": False},
         "daytime": {
             "cycle_buffer_minutes": 5,
             "max_seconds_per_cycle": 1500,
@@ -1583,7 +1586,7 @@ def test_main_startup_reconciliation_retries_until_done(monkeypatch, config, tmp
 
     loop_count = [0]
 
-    def fake_check_overnight(*args):
+    def fake_check_overnight(*args, **kwargs):
         loop_count[0] += 1
         if loop_count[0] >= 3:  # Exit after 2-3 loop iterations
             raise KeyboardInterrupt
@@ -1625,7 +1628,7 @@ def test_main_retries_pending_tickers_after_reconciliation_clears(monkeypatch, c
 
     loop_count = [0]
 
-    def fake_check_overnight(*args):
+    def fake_check_overnight(*args, **kwargs):
         loop_count[0] += 1
         if loop_count[0] >= 2:
             raise KeyboardInterrupt
