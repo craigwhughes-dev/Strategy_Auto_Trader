@@ -456,6 +456,17 @@ def get_market_currency(market_name: str, config: dict) -> str:
     return market_currencies.get(market_name.lower(), "")
 
 
+def _exchange_market_name_for_ticker(ticker: str) -> str:
+    """Map a ticker to the market whose trading hours actually gate it.
+
+    LSE-listed tickers (.L suffix, e.g. ISF.L/CSH2.L/EQGB.L) trade on the
+    ftse market's hours regardless of which market's daemon cycle is
+    currently running them (e.g. the multi-tier allocator can be evaluated
+    from the sp500 cycle but still target an LSE ticker).
+    """
+    return "ftse" if ticker.endswith(".L") else "sp500"
+
+
 def write_app_status_snapshot(
     portfolio: object,
     daemon_state: dict,
@@ -1296,6 +1307,25 @@ def process_cycle(
                             logger.warning(
                                 f"[{market_name}] Allocation: new entries halted — skipping "
                                 f"BUY {order.quantity} {order.ticker}"
+                            )
+                            continue
+                        # Gate on the order's OWN exchange hours, not whichever
+                        # market's cycle happens to be running — an LSE ticker
+                        # (ISF.L/CSH2.L/EQGB.L) targeted from the sp500 cycle
+                        # (open 14:30-21:00 London) must still wait for LSE
+                        # hours (08:00-16:30 London), or the GTC market order
+                        # rests unrouted and gets self-cancelled by the
+                        # broker's fill-timeout below — silently dropping the
+                        # rebalance instead of deferring it to next LSE open.
+                        order_market_name = _exchange_market_name_for_ticker(order.ticker)
+                        order_market_cfg = config.get("markets", {}).get(order_market_name)
+                        if order_market_cfg and not is_trading_hours(
+                            order_market_cfg, logger, market_name=order_market_name, quiet=True
+                        ):
+                            logger.info(
+                                f"[{market_name}] Allocation: {order.ticker}'s exchange "
+                                f"({order_market_name}) closed — deferring "
+                                f"{order.action} {order.quantity} {order.ticker} to next open"
                             )
                             continue
                         fill = broker.place_order(order)

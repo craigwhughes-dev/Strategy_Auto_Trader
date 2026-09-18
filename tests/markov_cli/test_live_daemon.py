@@ -106,6 +106,20 @@ def test_is_trading_hours_weekend():
     assert result is False
 
 
+def test_exchange_market_name_for_ticker_lse_suffix():
+    """LSE-listed tickers (.L) map to the ftse market regardless of which
+    market's cycle is currently evaluating them."""
+    assert live_daemon._exchange_market_name_for_ticker("ISF.L") == "ftse"
+    assert live_daemon._exchange_market_name_for_ticker("CSH2.L") == "ftse"
+    assert live_daemon._exchange_market_name_for_ticker("EQGB.L") == "ftse"
+
+
+def test_exchange_market_name_for_ticker_us_default():
+    """Non-.L tickers (US-listed) map to the sp500 market."""
+    assert live_daemon._exchange_market_name_for_ticker("SPY") == "sp500"
+    assert live_daemon._exchange_market_name_for_ticker("QQQ") == "sp500"
+
+
 def test_next_round_robin_slice_resumes_from_actual_progress():
     """Round-robin resumes from however far the previous cycle actually got
     (not a fixed batch size), and wraps once the full list has been covered."""
