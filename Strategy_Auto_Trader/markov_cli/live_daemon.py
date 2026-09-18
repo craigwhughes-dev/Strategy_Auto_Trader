@@ -129,6 +129,7 @@ _lock_handle = None
 _last_reconnect_failure: float = 0.0  # epoch secs; suppresses repeated reconnect attempts
 _stop_failures: dict[str, int] = {}       # consecutive stop re-place failures per ticker
 _stop_retry_after: dict[str, float] = {}  # epoch secs; suppress re-place until this time
+_market_closed_logged: dict[str, float] = {}  # market_name -> last_log_time (epoch secs); rate-limit "market closed" logs
 
 _DAEMON_CMDLINE_MARKERS = ("markov_cli.live_daemon",
                            "markov_cli\\live_daemon.py",
@@ -566,7 +567,11 @@ def is_trading_hours(
     market_name: str | None = None,
     quiet: bool = False,
 ) -> bool:
-    """Check if market is currently in trading hours."""
+    """Check if market is currently in trading hours.
+
+    When quiet=False and market is closed, logs only once per hour per market
+    to avoid log noise during off-hours polls.
+    """
     label = market_name or market_cfg["timezone"]
     tz = ZoneInfo(market_cfg["timezone"])
     if now is None:
@@ -585,8 +590,14 @@ def is_trading_hours(
 
     is_open = start_time <= now.time() <= end_time
     if not is_open and not quiet:
-        logger.debug(f"  Market {label}: outside hours "
-                     f"({start_str}-{end_str}), skipping")
+        # Rate-limit "market closed" logs to once per hour per market
+        _MARKET_CLOSED_LOG_INTERVAL = 3600  # seconds
+        now_epoch = time.time()
+        last_logged = _market_closed_logged.get(label, 0.0)
+        if now_epoch - last_logged >= _MARKET_CLOSED_LOG_INTERVAL:
+            logger.debug(f"  Market {label}: outside hours "
+                         f"({start_str}-{end_str}), skipping")
+            _market_closed_logged[label] = now_epoch
     return is_open
 
 
@@ -2445,7 +2456,7 @@ def main(argv: list[str] | None = None) -> int:
                 # Check each market
                 now = datetime.now(timezone.utc)
                 for market_name, market_cfg in config.get("markets", {}).items():
-                    if not is_trading_hours(market_cfg, logger, market_name=market_name):
+                    if not is_trading_hours(market_cfg, logger, market_name=market_name, quiet=True):
                         continue
 
                     current_hour = now.hour
