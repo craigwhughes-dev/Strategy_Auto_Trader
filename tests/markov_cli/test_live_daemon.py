@@ -775,7 +775,8 @@ def test_process_cycle_passes_last_cycle_hour_through_to_snapshot(monkeypatch):
 
     captured = []
     monkeypatch.setattr(live_daemon, "_write_app_status_snapshot_safe",
-                         lambda portfolio, daemon_state, config, last_cycle_hour, logger:
+                         lambda portfolio, daemon_state, config, last_cycle_hour, logger,
+                                allocation_mgr=None, tier_mode=False:
                              captured.append(last_cycle_hour))
     monkeypatch.setattr(batch, "process_ticker",
                          lambda ticker_cfg, defaults, send_email: {
