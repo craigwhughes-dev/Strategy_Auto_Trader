@@ -1229,17 +1229,22 @@ def process_cycle(
                 tier_signal = allocation_mgr.signal(today, vxn_current, vix_current, verbose=False)
                 required_tickers = ["EQGB.L", "SPY", "ISF.L", "CSH2.L"]
 
-                # Fetch current prices from broker (4 tickers × ~2s each = ~8s latency).
-                # TODO: optimize with cached quotes or batch fetch if cycle latency becomes issue.
-                from ..broker.symbols import sizing_price
-                current_prices = {}
-                for ticker in required_tickers:
-                    try:
-                        price = sizing_price(ticker, broker.get_last_price(ticker))
-                        current_prices[ticker] = price if price > 0 else None
-                    except Exception as _price_err:
-                        logger.error(f"[{market_name}] Failed to fetch price for {ticker}: {_price_err}")
-                        current_prices[ticker] = None
+                # Skip price fetch if broker disconnected (avoids 4 ERROR lines per cycle).
+                if not broker.is_connected():
+                    logger.debug(f"[{market_name}] Allocation: broker not connected — skipping price fetch")
+                    current_prices = {t: None for t in required_tickers}
+                else:
+                    # Fetch current prices from broker (4 tickers × ~2s each = ~8s latency).
+                    # TODO: optimize with cached quotes or batch fetch if cycle latency becomes issue.
+                    from ..broker.symbols import sizing_price
+                    current_prices = {}
+                    for ticker in required_tickers:
+                        try:
+                            price = sizing_price(ticker, broker.get_last_price(ticker))
+                            current_prices[ticker] = price if price > 0 else None
+                        except Exception as _price_err:
+                            logger.error(f"[{market_name}] Failed to fetch price for {ticker}: {_price_err}")
+                            current_prices[ticker] = None
 
                 # Only require prices for active tier + current position (if switching)
                 required_prices = {tier_signal.target_asset}
