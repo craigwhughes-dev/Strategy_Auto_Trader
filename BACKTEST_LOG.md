@@ -4,6 +4,36 @@ Running log of every backtest/scan run — newest entry on top. One block per ru
 
 ---
 
+## 2026-09-18 16:45 — 4-Tier allocation: look-ahead audit + cost of LSE trading hours (VIX/VXN moves while LSE shut)
+
+Tool: allocation/multi_tier_backtest_lse_lag.py (new; reuses `MultiTierAllocator4Tier.signal()` and `_compute_summary()` unchanged)
+Scope: 2007-11-20 to 2026-09-15 (4,452 trading days; start = real hourly VXN coverage). Live config: VXN<=18 -> EQGB.L, else VIX<=15 SPY, <=17.5 ISF.L, else CSH2.L. Hourly VIX/VXN = real IBKR (`data/cache/ibkr_hourly/INDEX_{VIX,VXN}.csv`, mtimes 2026-09-18 15:01 / 08:00, start-stamped bars so a bar counts only once it has ended). Asset daily closes = existing `load_synthetic_daily` blend (EQGB QQQ-proxy pre-2017, CSH2 BoE-proxy pre-2024). LSE cutoff = 16:30 Europe/London read from `config/overnight_strategy.json`.
+Journal: N/A (allocator backtest, not live_sim)
+
+Command:
+```
+uv run python -m Strategy_Auto_Trader.allocation.multi_tier_backtest_lse_lag
+```
+
+| Run | Tier decided from | Earns return of | Sharpe (repo formula) | Sharpe (annualised) | Return % | Max DD % |
+|---|---|---|---|---|---|---|
+| A look-ahead (= existing daily backtests) | full-day VIX/VXN close on day T | day T (same day) | 42.25 | 2.66 | +4,787 | -9.35 |
+| A' ideal-executable (unattainable for LSE assets) | full-day close on T | day T+1 | 13.01 | 0.82 | +232 | -13.56 |
+| **B live-faithful** | last bar ended by 16:30 London on T | day T+1 | 10.54 | 0.66 | +162 | -16.51 |
+
+Out-of-LSE-hours effect: cutoff tier != full-close tier on 320 of 4,452 days (7.2%). On 79 of those the full-day close said defensive (CSH2.L) but the 16:30 reading did not. A' minus B summed daily return on those 320 days: +23.84 pp.
+
+**Key findings:**
+- The existing tier backtests are look-ahead: they pick the tier from day T's close and credit that tier with day T's return. Removing it (A -> A') cuts Sharpe 42 -> 13 and return +4,787% -> +232%. Earlier headline numbers in this log for the 4-tier/3-tier strategy (e.g. Sharpe 38.84, +16,464%) carry the same bias and should not be treated as expected live performance.
+- The LSE-hours constraint itself (A' -> B) costs Sharpe 13.0 -> 10.5 (0.82 -> 0.66 annualised), return 232% -> 162%, max DD -13.6% -> -16.5%. Real but an order of magnitude smaller than the look-ahead.
+- `_compute_summary` Sharpe is `mean*252/std` (no sqrt), inflated ~15.9x vs the conventional annualised Sharpe. Not changed here; annualised column added in this script only.
+
+Caveats: no transaction costs or whipsaw churn; B assumes the daemon can act at the 16:30 cutoff (real daemon polls hourly, last LSE cycle earlier, so B is slightly optimistic); asset daily closes are partly proxy/synthetic; VIX only prints in the London morning from ~2015, VXN never, so earlier-year cutoff readings are stale by construction (that is the live behaviour too). No buy-and-hold benchmark computed in this run.
+
+**Conclusion:** live paper trading should be judged against B (~0.66 annualised Sharpe, ~-16.5% DD), not the 38-42 figures. The strategy survives the LSE-hours constraint but with a materially lower edge than previously logged; a B&H benchmark and cost model are the obvious next checks.
+
+---
+
 ## 2026-09-17 13:15 — Tier-4 cash asset: XSTR.L (distributing) vs CSH2.L (accumulating), total-return comparison
 
 Tool: scripts/compare_tier4_assets.py (rewritten — old version was price-only and showed XSTR as negative; XSTR pays semi-annual dividends so price-only is wrong. Yahoo "Adj Close" is NOT dividend-adjusted for XSTR.L either)
