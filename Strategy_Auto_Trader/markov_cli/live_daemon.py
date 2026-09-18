@@ -463,6 +463,7 @@ def write_app_status_snapshot(
     last_cycle_hour: dict,
     logger: logging.Logger,
     allocation_mgr: object | None = None,
+    tier_mode: bool = False,
 ) -> None:
     """Write app_status.json snapshot atomically every poll loop (~60s).
 
@@ -515,6 +516,7 @@ def write_app_status_snapshot(
         "halt_new_entries": daemon_state.get("halt_new_entries", False),
         "halt_top_k_stale": daemon_state.get("halt_top_k_stale", False),
         "paused_by_user": daemon_state.get("paused_by_user", False),
+        "tier_mode": tier_mode,
         "reconciliation_discrepancies": daemon_state.get("reconciliation_discrepancies", []),
         "last_reconcile_date": daemon_state.get("last_reconcile_date", ""),
         "trades_today": trades_today,
@@ -547,13 +549,14 @@ def _write_app_status_snapshot_safe(
     last_cycle_hour: dict,
     logger: logging.Logger,
     allocation_mgr: object | None = None,
+    tier_mode: bool = False,
 ) -> None:
     """write_app_status_snapshot(), swallowing errors so a snapshot failure
     can't interrupt the ticker-processing loop it's interleaved into."""
     try:
         write_app_status_snapshot(
             portfolio, daemon_state, config, last_cycle_hour, logger,
-            allocation_mgr=allocation_mgr,
+            allocation_mgr=allocation_mgr, tier_mode=tier_mode,
         )
     except Exception as e:
         logger.error(f"Failed to write app_status.json: {e}", exc_info=True)
@@ -1140,7 +1143,8 @@ def process_cycle(
         # once per full market pass — a user-initiated sell shouldn't queue
         # behind an entire round-robin scan (can run ~20+ min).
         process_manual_commands_wrapper(config, portfolio, broker, logger, daemon_state)
-        _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
+        _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger,
+                                       allocation_mgr=allocation_mgr, tier_mode=tier_mode)
 
         logger.debug(f"  Processing {ticker}")
         result = _evaluate_ticker(ticker, overrides, defaults, logger, market_name, pin_open_strategy=True, tier_mode=tier_mode)
@@ -1168,7 +1172,8 @@ def process_cycle(
             from concurrent.futures import ThreadPoolExecutor, as_completed
             state_lock = threading.Lock()
             process_manual_commands_wrapper(config, portfolio, broker, logger, daemon_state)
-            _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
+            _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger,
+                                           allocation_mgr=allocation_mgr, tier_mode=tier_mode)
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = {
                     executor.submit(
@@ -1181,7 +1186,8 @@ def process_cycle(
                     processed.append(future.result())
                     n_attempted += 1
                     process_manual_commands_wrapper(config, portfolio, broker, logger, daemon_state)
-                    _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
+                    _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger,
+                                                   allocation_mgr=allocation_mgr, tier_mode=tier_mode)
                     now_remaining = max_seconds - (time.time() - cycle_start)
                     if now_remaining <= buffer_secs:
                         cancelled = [ticker for f, ticker in futures.items() if f.cancel()]
@@ -1193,7 +1199,8 @@ def process_cycle(
                             )
                         break
             process_manual_commands_wrapper(config, portfolio, broker, logger, daemon_state)
-            _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
+            _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger,
+                                           allocation_mgr=allocation_mgr, tier_mode=tier_mode)
         else:
             for ticker in candidates:
                 now_remaining = max_seconds - (time.time() - cycle_start)
@@ -1203,7 +1210,8 @@ def process_cycle(
                     break
 
                 process_manual_commands_wrapper(config, portfolio, broker, logger, daemon_state)
-                _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger)
+                _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger,
+                                               allocation_mgr=allocation_mgr, tier_mode=tier_mode)
 
                 logger.debug(f"  Processing {ticker}")
                 result = _evaluate_ticker(ticker, overrides, defaults, logger, market_name, pin_open_strategy=False, tier_mode=tier_mode)
@@ -2304,6 +2312,9 @@ def main(argv: list[str] | None = None) -> int:
             logger.warning(f"Allocation: multiple tier assets held at startup {held_tier_assets}, using first")
         allocation_mgr.current_asset = held_tier_assets[0]
     logger.info(f"Allocation manager initialized: tier_mode={args.tier_mode}, current_asset={allocation_mgr.current_asset}")
+    # Bootstrap tier info so app_status.json always has tier breakdown, even if markets are closed
+    from datetime import date as _today_date
+    allocation_mgr.signal(_today_date.today(), None, None, logger=logger, verbose=False)
 
     # Broker connection is async and can hang; skip it here and let it fail gracefully
     # when trades are attempted. Daemon can still process tickers and generate signals.
@@ -2502,7 +2513,7 @@ def main(argv: list[str] | None = None) -> int:
                 # Write app_status.json snapshot ALWAYS, even on error — app needs fresh heartbeat
                 _write_app_status_snapshot_safe(
                     portfolio, daemon_state, config, last_cycle_hour, logger,
-                    allocation_mgr=allocation_mgr,
+                    allocation_mgr=allocation_mgr, tier_mode=args.tier_mode,
                 )
 
                 # Sleep before next iteration (5s on error, normal interval on

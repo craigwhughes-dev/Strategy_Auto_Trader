@@ -88,6 +88,12 @@ class MultiTierAllocationManager:
         self._vxn_cache = None
         self._vxn_cache_date = None
 
+        # Last tier allocation info for app_status.json
+        self._last_vix = None
+        self._last_vxn = None
+        self._last_tier_num = None
+        self._last_action = None  # "HOLD" | "BUY" | "SELL"
+
     def signal(
         self, today: date, vxn: float | None, vix: float | None, logger=None, verbose: bool = True
     ) -> AllocationSignal:
@@ -112,24 +118,27 @@ class MultiTierAllocationManager:
         # Evaluate every tier independently (each computes its own pass/fail + reason),
         # log the result, then pick the best (lowest-numbered) tier that passed.
         tiers = [
-            (1, "EQGB.L", "Nasdaq",
+            (1, "EQGB.L", "Nasdaq", "VXN",
+             vxn, self.vxn_threshold,
              vxn is not None and vxn <= self.vxn_threshold,
              f"VXN={vxn:.2f} vs gate={self.vxn_threshold}" if vxn is not None else "VXN unavailable"),
-            (2, "SPY", "Balanced",
+            (2, "SPY", "Balanced", "VIX",
+             vix, self.vix_tier1,
              vix is not None and vix <= self.vix_tier1,
              f"VIX={vix:.2f} vs gate={self.vix_tier1}" if vix is not None else "VIX unavailable"),
-            (3, "ISF.L", "Defensive",
+            (3, "ISF.L", "Defensive", "VIX",
+             vix, self.vix_tier2,
              vix is not None and self.vix_tier1 < vix <= self.vix_tier2,
              f"VIX={vix:.2f} vs gate={self.vix_tier2}" if vix is not None else "VIX unavailable"),
-            (4, "CSH2.L", "Money-Market", True, "always available fallback"),
+            (4, "CSH2.L", "Money-Market", "none", None, None, True, "always available fallback"),
         ]
 
-        for tier_num, asset, label, passed, detail in tiers:
+        for tier_num, asset, label, index, curr_val, gate_val, passed, detail in tiers:
             log_level(f"[{today}]   Tier {tier_num} ({asset}/{label}): {detail} [{'PASS' if passed else 'FAIL'}]")
 
         tier, target_asset, reason = next(
             (t, asset, f"Tier {t} ({asset}/{label}): {detail}")
-            for t, asset, label, passed, detail in tiers
+            for t, asset, label, index, curr_val, gate_val, passed, detail in tiers
             if passed
         )
 
@@ -138,8 +147,16 @@ class MultiTierAllocationManager:
         needs_rebalance = target_asset != self.current_asset
         if needs_rebalance:
             log_level(f"[{today}]   ACTION: {self.current_asset} → {target_asset} (REBALANCE)")
+            action = "BUY"
         else:
             log.debug(f"[{today}]   ACTION: HOLD {target_asset} (no change)")
+            action = "HOLD"
+
+        # Store tier info for app_status_dict
+        self._last_vix = vix
+        self._last_vxn = vxn
+        self._last_tier_num = tier
+        self._last_action = action
 
         return AllocationSignal(
             date=today,
@@ -259,6 +276,13 @@ class MultiTierAllocationManager:
             self.last_rebalance_date = today
             action_type = "bootstrap" if not has_any_position else "rebalance"
             log.info(f"[{today}] Allocation {action_type}: {signal.reason}")
+            # Update action for app_status_dict
+            if len(orders) > 1:  # SELL + BUY
+                self._last_action = "REBALANCE"
+            elif orders[0].action == "SELL":
+                self._last_action = "SELL"
+            elif orders[0].action == "BUY":
+                self._last_action = "BUY"
 
         return orders
 
@@ -370,8 +394,60 @@ class MultiTierAllocationManager:
 
     def app_status_dict(self) -> dict:
         """Return current state for app_status.json."""
+        tier_allocation = None
+        if self._last_tier_num is not None:
+            # Build tier breakdown for display
+            tiers = [
+                {
+                    "tier_num": 1,
+                    "asset": "EQGB.L",
+                    "label": "Nasdaq",
+                    "index": "VXN",
+                    "gate_value": self.vxn_threshold,
+                    "current_value": self._last_vxn,
+                    "passes": self._last_vxn is not None and self._last_vxn <= self.vxn_threshold,
+                },
+                {
+                    "tier_num": 2,
+                    "asset": "SPY",
+                    "label": "Balanced",
+                    "index": "VIX",
+                    "gate_value": self.vix_tier1,
+                    "current_value": self._last_vix,
+                    "passes": self._last_vix is not None and self._last_vix <= self.vix_tier1,
+                },
+                {
+                    "tier_num": 3,
+                    "asset": "ISF.L",
+                    "label": "Defensive",
+                    "index": "VIX",
+                    "gate_value": self.vix_tier2,
+                    "current_value": self._last_vix,
+                    "passes": self._last_vix is not None and self.vix_tier1 < self._last_vix <= self.vix_tier2,
+                },
+                {
+                    "tier_num": 4,
+                    "asset": "CSH2.L",
+                    "label": "Money-Market",
+                    "index": "none",
+                    "gate_value": None,
+                    "current_value": None,
+                    "passes": True,
+                },
+            ]
+
+            tier_allocation = {
+                "vix_current": self._last_vix,
+                "vxn_current": self._last_vxn,
+                "tiers": tiers,
+                "selected_tier_num": self._last_tier_num,
+                "selected_asset": self.current_asset,
+                "action": self._last_action,
+            }
+
         return {
             "current_asset": self.current_asset,
             "current_price": self.current_price,
             "last_rebalance_date": self.last_rebalance_date.isoformat() if self.last_rebalance_date else None,
+            "tier_allocation": tier_allocation,
         }
