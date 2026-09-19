@@ -4,7 +4,960 @@ Running log of every backtest/scan run — newest entry on top. One block per ru
 
 ---
 
-## 2026-09-18 16:45 — 4-Tier allocation: look-ahead audit + cost of LSE trading hours (VIX/VXN moves while LSE shut)
+> **NOTICE (2026-09-19): entries from 2026-09-18 16:45 through 2026-09-19 (later) are marked `[SUSPECT]`. Do not rely on their figures.**
+> They came from one session and were built on models that do not match how the live daemon actually behaves, or on data that could not support the conclusions:
+> 1. **Timing model.** The daily-close and "run B" models (tier from the daily close, or from the last bar before 16:30 London, earning the next day) were never the live behaviour. The daemon cached VIX/VXN once per calendar day, so the tier was fixed at the first cycle (~08:00 London) and never reacted intraday (found 2026-09-19; fixed in code, not yet deployed). The intended intraday-reactive design was never modelled.
+> 2. **Data.** The "synthetic hourly" VXN / EQGB / ISF.L series are one repeated value per day (no intraday information); the pre-2017 Nasdaq leg is QQQ (USD) daily rescaled; IBKR fund histories contain unit errors and bad prints (ISF.L daily is ~100x larger before 2004-04-16; IUSA/ISF.L hourly spikes); EQGB hourly prices are stale and lag the liquid Nasdaq fund in the early years; the live Nasdaq fund (EQGB) is GBP-hedged but the proxies were not.
+> 3. **Thresholds.** VXN 18 / VIX 15 / 17.5 and every comparison built on them inherit problem 1.
+> 4. **Metric.** Sharpe with no risk-free rate flatters strategies that sit in cash.
+>
+> Not every problem applies to every entry, but none of them has been re-verified. Entries before 2026-09-18 16:45 were already flagged invalid for look-ahead. The only entry that models the live design with a documented method is **2026-09-19 (evening)** below, and it carries its own caveats.
+
+---
+
+## 2026-09-19 (late evening) — Deployed config (VXN 23/24 deadband) over three windows; is FTSE a useful middle tier; panic tier
+
+Tool: scratch scripts on `allocation/intraday_engine.py` (`three_windows.py`, `ftse_role.py`, `panic_tier.py`; not in the repo, numbers recorded here). Same dataset, same-bar fill, 13 bps per switch, Nasdaq leg EQQQ unless noted. Follows the 2026-09-19 (evening) entry below; same caveats apply (bridged 1999-2007 intraday shape assumed, USD proxies pre-2004/2005, thresholds chosen on 2007-2019).
+Config tested = `config/overnight_strategy.json` `tier_allocation`: VXN enter <=23, hold until >24, VIX 15 / 17.5 for the S&P and FTSE tiers.
+
+**Commands run**
+```
+uv run python <scratchpad>/three_windows.py   # deployed rule + comparators over 3 windows, EQGB-leg check, annual table
+uv run python <scratchpad>/ftse_role.py       # asset returns by VXN bucket; FTSE in place of cash
+uv run python <scratchpad>/panic_tier.py      # panic tier grid (asset x g x width) + episode list
+```
+**Data range:** 1999-03-11 to 2026-09-18. Windows: 26 yr = all (27.6 yrs, 6,952 days); since VXN data = 2007-11-20 to 2026-09-18 (18.9 yrs, 4,756 days); recent real = 2024-03-25 to 2026-09-18 (2.5 yrs, 629 days). Train 2007-11-20..2019-12-31, test 2020-01-01..now.
+
+### 1. Deployed rule across three windows
+| Window | Rule | Return | Per year | xSharpe | Max DD | Switches/yr | Next-bar xSharpe |
+|---|---|---|---|---|---|---|---|
+| 26 yr | **Deployed** | +2,136% | +11.9% | +0.74 | -21.2% | 11.0 | +0.69 |
+| | Two-state (no S&P/FTSE) | +2,242% | +12.1% | +0.76 | -21.5% | 7.4 | +0.71 |
+| | Plain VXN<=24 | +2,402% | +12.4% | +0.76 | -21.8% | 14.5 | +0.68 |
+| | Old VXN<=18 / VIX 15/17.5 | +24% | +0.8% | -0.15 | -34.8% | 51.5 | -0.25 |
+| | Nasdaq buy and hold | +1,785% | +11.2% | +0.44 | -83.0% | - | - |
+| Since VXN 2007-11 | **Deployed** | +899% | +13.0% | +0.92 | -15.9% | 12.1 | +0.85 |
+| | Two-state | +1,001% | +13.6% | +0.96 | -14.9% | 9.3 | +0.89 |
+| | Plain VXN<=24 | +1,006% | +13.6% | +0.94 | -18.9% | 18.0 | +0.81 |
+| | Old thresholds | +18% | +0.9% | -0.04 | -34.8% | 62.2 | -0.20 |
+| | Nasdaq buy and hold | +2,086% | +17.8% | +0.83 | -33.9% | - | - |
+| Recent real 2024-03 | **Deployed** | +15% | +5.7% | +0.13 | -13.6% | 34.5 | +0.05 |
+| | Two-state | +24% | +9.0% | +0.37 | -13.6% | 18.4 | +0.26 |
+| | Plain VXN<=24 | +17% | +6.3% | +0.18 | -14.9% | 32.9 | +0.11 |
+| | Old thresholds | -14% | -6.0% | -1.25 | -20.4% | 107.8 | -1.25 |
+| | Nasdaq buy and hold | +52% | +18.1% | +0.75 | -24.1% | - | - |
+
+- Long windows: risk-adjusted better than Nasdaq buy and hold, return similar (26 yr) or lower (since 2007: 13.0% vs 17.8% a year at half the drawdown). Time in tier (all bars): Nasdaq 58.0%, S&P 0.0%, FTSE 1.9%, cash 40.1%.
+- Recent 2.5 yrs: clearly worse than buy and hold (xSharpe +0.13 vs +0.75). Switching runs at 34.5/yr, about 3x its long-run rate, as VXN hovers at 20-25. With the live fund EQGB (real hourly): deployed +19%, xSharpe +0.24, DD -12.1% (next-bar +16%, +0.17); EQGB buy and hold +61%, xSharpe +0.83.
+- The S&P/FTSE tiers make it worse in every window (recent: +0.13 with them vs +0.37 without) — brief FTSE visits add switches.
+- Annual returns, deployed vs Nasdaq buy and hold (%, selected): 2000 +8.7/-36.2; 2001 +5.1/-33.4; 2002 +4.0/-37.4; 2008 +6.1/-22.9; 2019 +14.7/+32.6; 2020 +7.7/+42.6; 2021 +12.3/+29.3; 2022 -2.7/-25.9; 2023 +25.5/+47.1; 2024 +18.2/+27.9; 2025 +5.6/+11.3; 2026 YTD +0.8/+16.6.
+
+### 2. Is FTSE a useful middle tier? (no)
+Annualised return by prior-bar VXN bucket, train / test (%): 
+| VXN | Time in bucket | Nasdaq | FTSE | Cash |
+|---|---|---|---|---|
+| <=20 | 57% / 26% | +20.1 / +24.4 | -3.3 / +3.6 | +0.5 / +3.4 |
+| 20-24 | 16% / 26% | +26.9 / +14.3 | +8.4 / +6.5 | +1.0 / +3.1 |
+| 24-28 | 11% / 18% | -13.7 / -15.3 | **-7.9 / -5.2** | +0.8 / +2.0 |
+| 28-35 | 7% / 20% | -0.3 / +17.8 | +1.3 / +2.3 | +1.8 / +1.0 |
+| >35 | 9% / 9% | +15.8 / +72.1 | **+34.8 / +22.6** | +1.3 / +0.7 |
+
+FTSE buy and hold: train xSharpe +0.13, +21%, DD -46.6% (Nasdaq -33.9%); test +0.21, +39%, DD -34.8%. It falls with equities in the stress zone just above the exit (VXN 24-28) and only pays after extreme panic (>35, few crisis episodes). Daily hit rate vs cash ~50% everywhere.
+FTSE in place of cash (Nasdaq 23/24 unchanged; train x / test x; DD train / test): cash +1.06 / +0.76, -14.9% / -13.6%; FTSE while VXN<=30 else cash +0.73 / +0.53, -26.4% / -23.2%; VXN<=40 +0.85 / +0.56, -27.4% / -24.1%; FTSE always +0.81 / +0.61, -40.4% / -34.2% (return +552% vs +444% on train). Worse risk-adjusted in all forms; switching 11 -> 15-38/yr for the partial versions.
+
+### 3. Panic tier (hold an equity fund once VXN > g, back to cash at VXN <= g-width; 36 cells: asset {Nasdaq, S&P, FTSE} x g {30, 35, 40, 45} x width {0, 3, 6})
+Baseline (Nasdaq 23/24 else cash): train xSharpe +1.06, DD -14.9%; test +0.76, DD -13.6%; bridged +0.36; 2007+ +0.96 (+1,001%, DD -14.9%).
+- Share of the 12 cells per asset that beat the baseline xSharpe: **train 0% / 0% / 0%** (Nasdaq / S&P / FTSE); **test 100% / 75% / 0%**; **bridged 0% / 0% / 0%**.
+- Typical Nasdaq cell (g=40, width 6): train +1.02, DD -23.3%; test +0.95, DD -14.2%; bridged -0.06; 2007+ +0.99 (+1,802%, DD -23.3%). Drawdown deepens from -15% to -20..-25% in every cell; FTSE is the worst asset.
+- Episodes (Nasdaq, g=35, width 3; 40 episodes): the test gain comes from V-shaped recoveries (2020-02..05 +11.9% with a -15.0% dip inside, 2022 episodes +0.3..+6.7%, 2025-04 +4.0%). Prolonged bears lose: **2001-02..2003-04 -55.3% (worst dip -67.5%)**, 2000-03..04 -16.4%, 2008-09-23..2009-08-12 +7.1% but a -21.3% dip inside. Many single-digit-day episodes (2010, 2011, 2018) are noise.
+- Read: a regime bet that pays in V-shaped recoveries and hurts in long bears; not supported in-sample or in the bridged dot-com era, helpful only in the 2020+ test. Not recommended as a default.
+
+### Caveats
+- Panic-tier bridged-era result rests on estimated pre-2007 VXN and bridged intraday shape; the dot-com loss is directionally consistent with history but the size is an estimate.
+- Panic and FTSE tests were exploratory grids on the same data; no walk-forward run.
+- `lower_tiers_enabled` (config `tier_allocation`) is implemented and set to **false** in `config/overnight_strategy.json`: the S&P and FTSE tiers never pass, so the daemon allocates Nasdaq or cash only (their VIX 15/17.5 cuts stay in config for switching on later; the daemon still fetches all four tier prices as before). A panic tier is NOT implemented (test only).
+
+Conclusion: the deployed 23/24 rule is a drawdown-control trade (26 yr and since-2007 better risk-adjusted than buy and hold) that has lagged badly in the last 2.5 years. The S&P/FTSE tiers add churn without adding return, FTSE is not safer than cash in stress, and a panic-buy tier is a V-recovery bet that fails in long bears.
+
+---
+
+## 2026-09-19 (evening) — Intraday-faithful tier backtest on a spliced real+bridged hourly dataset; daemon VIX-cache finding; deadband; EQGB vs EQQQ liquidity
+
+Tool: `allocation/multi_tier_intraday_grid.py` (engine: `allocation/intraday_engine.py`); dataset builder `synthetic_backtest_data/build_intraday_dataset.py`
+Scope: 4-tier Nasdaq / S&P / FTSE / cash rotation, three signal variants (`vxn_vix`, `vix_only`, `vxn_deadband`), 13 bps per switch, decisions on the LSE hourly grid
+Supersedes: every entry marked `[SUSPECT]` above. Not a `live_sim.py` run (no journal, no chart).
+
+**Commands run**
+```
+uv run python -m Strategy_Auto_Trader.synthetic_backtest_data.build_intraday_dataset          # seed 20260919 -> data_synthetic/hourly_spliced/
+uv run python -m Strategy_Auto_Trader.allocation.multi_tier_intraday_grid                     # vxn_vix + vix_only (+ old reference row) -> data/intraday_backtest/20260919_155058/
+uv run python -m Strategy_Auto_Trader.allocation.multi_tier_intraday_grid --variants vxn_deadband   # -> data/intraday_backtest/20260919_163049/
+```
+IBKR read-only history fetches (client ids 17-24, port 4002) into `data/cache/ibkr_hourly_deep/`. Annual table, tier-occupancy check, EQGB-vs-EQQQ, staleness and spread analyses were one-off scratch scripts (not in the repo); their numbers are recorded here.
+
+**Data range:** 1999-03-11 to 2026-09-18 (6,952 London trading days, 62,377 LSE bars). Windows: **train 2007-11-20..2019-12-31** (choose thresholds here only), **test 2020-01-01..2026-09-18** (scored once), **bridged 1999-03-11..2007-11-19** (intraday shape is assumed, never used to choose). Real hourly starts: EQQQ 2005-08-17, IUSA 2004-04-16, ISF.L 2004-04-16, VIX 2005-10-03 (London-morning bars from 2016), VXN 2007-11-20 (US hours only), CSH2.L 2015-09-02 (BoE-derived accrual before).
+
+### 1. Live-daemon finding (fixed in code, NOT yet deployed)
+`MultiTierAllocationManager._get_vix_current/_get_vxn_current` cached VIX/VXN for the whole calendar day: the tier was set by the first cycle (~08:00 London, before the 08:15 London VIX print) and never reacted intraday. Replaced by `allocation/index_feed.py` (`IndexFeed`: latest COMPLETED hourly bar, re-fetch every 300 s, last good value kept up to 3 h of outage). 467 `tests/markov_cli` + 269 allocation/core/synthetic tests pass. The running daemon keeps the old behaviour until restarted. **Do not restart on the old thresholds** (section 3).
+
+### 2. Dataset (`data_synthetic/hourly_spliced/`)
+Real IBKR hourly from each series' own start; before it, a **correlated Brownian bridge** (one shock per shared bar-end, correlation and intraday/daily vol scale measured from real 2010+ hourly data, then calibrated because pinning to daily closes attenuated correlation), pinned to real or chain-linked daily closes. Bar-end timestamps are stored explicitly; a print counts only once its bar has ended.
+- Fund data cleaned: 13 bad-print bars dropped (IUSA 10, ISF.L 3; e.g. 20 hourly moves >20% in IUSA 2005-2007); IBKR daily ISF.L back-adjusted for a ~100x unit change on 2004-04-16 (splice jump went from -4.6 to 0).
+- Splice continuity OK (jumps in line with normal moves) except **VXN -6% at 2007-11-20 (~7x a typical hourly move, cause not checked)**.
+- Bridge fidelity, bridged-era estimate vs real-era target: vol scale matches closely (VIX 0.784 vs 0.785); correlation mostly close but **VIX-VXN 0.61 vs 0.81** and **VIX-S&P -0.75 vs -0.62**.
+- Known gaps: pre-2004/2005 S&P and Nasdaq proxies are USD (QQQ/SPY), no GBP/USD; early EQQQ real bars are illiquid (25% zero-return); bridged bars have no stale runs.
+
+### 3. Results (same-bar fill, 13 bps; xSharpe = Sharpe of returns over cash, the selection metric)
+Buy and hold, for context (xSharpe / return / max drawdown):
+
+| Asset | Train | Test | Bridged |
+|---|---|---|---|
+| Nasdaq (EQQQ) | +0.83 / +556% / -33.9% | +0.83 / +233% / -28.2% | -0.01 / -14% / -83.0% |
+| S&P (IUSA) | +0.61 / +245% / -36.1% | +0.68 / +133% / -25.9% | -0.17 / -1% / -49.1% |
+| FTSE (ISF.L) | +0.13 / +21% / -46.6% | +0.21 / +39% / -34.8% | -0.19 / -4% / -52.6% |
+
+| Rule (VXN enter / VIX cuts) | Train x | Test x | Test return | Test max DD | Test switches/yr | Bridged x |
+|---|---|---|---|---|---|---|
+| Old thresholds VXN 18 / VIX 15 / 17.5 (reference only) | +0.34 | -1.00 | -27% | -31.2% | 74.0 | -0.40 |
+| Same, next-bar fill | +0.10 | -0.97 | -26% | -30.7% | 74.0 | -0.35 |
+| `vxn_vix` robust pick VXN<=24 (VIX 13/15 unused) | +1.09 | +0.63 | +87% | -14.9% | 20.8 | +0.41 |
+| Same, next-bar fill | +0.94 | +0.54 | +75% | n/a | n/a | n/a |
+| `vix_only` robust pick 28/29/30 | +0.90 | +0.15 | +31% | -49.5% | 48.7 | -0.47 |
+
+- **Old thresholds are the problem, not the intraday model:** the VXN 18 cut flips ~74 times a year. (Raw Sharpe was +0.44 train / -0.61 test.)
+- **The ladder collapses to two states.** At the robust pick the time in tier is Nasdaq 60%, S&P 0%, FTSE 0%, cash 40%; the VIX cuts do nothing. Per VXN cut, the two-state rule matches or beats the ladder's median at every cut from 16 to 30 (e.g. cut 24: two-state train/test +1.09/+0.63 vs ladder median +0.88/+0.22).
+- **VIX-only is poor:** test xSharpe positive in 2% of 969 cells (best anywhere +0.18); its best cells are ~buy-and-hold Nasdaq with drawdown -49.5%.
+- **vxn_vix grid (2,907 cells):** Spearman(train, test) +0.81; test xSharpe grid median -0.03, top-decile-by-train median +0.25, 46% positive, best anywhere +0.63.
+- **Cost sensitivity of the VXN<=24 pick (test xSharpe / return):** 0 bps +0.88/+125%; 6.5 bps +0.76/+105%; 13 bps +0.63/+87%; 26 bps +0.38/+56%.
+- **Against buy and hold the rule is a drawdown trade, not a return win:** test return +87% vs Nasdaq +233%, max DD -14.9% vs -28.2%, xSharpe +0.63 vs +0.83.
+- **Annual returns, VXN<=24 pick vs Nasdaq buy and hold (selected years, %):** 2000 +6.0 / -36.2; 2001 +5.1 / -33.4; 2002 +4.0 / -37.4 (bridged years); 2008 +11.4 / -22.9; 2020 +7.7 / +42.6; 2021 +10.5 / +29.3; 2022 -3.9 / -25.9; 2023 +28.4 / +47.1; 2024 +14.7 / +27.9. It avoids the bear years and lags the bull years.
+
+### 4. Deadband on VXN (Nasdaq|cash; enter when VXN<=lo, exit only when VXN>hi; width 0 = plain rule; 187 cells)
+| Width | Train x (median) | Test x | Test return | Test max DD | Test switches/yr |
+|---|---|---|---|---|---|
+| 0 | +0.85 | +0.25 | +35% | -16.0% | 22.6 |
+| 2 | +0.80 | +0.49 | +71% | -15.7% | 7.7 |
+| 4 | +0.77 | +0.53 | +75% | -19.3% | 4.5 |
+| 6 | +0.77 | +0.56 | +70% | -21.0% | 3.0 |
+| 10 | +0.77 | +0.44 | +79% | -22.7% | 1.6 |
+
+Specific settings (train x / test x / test max DD / test switches per yr): 24/24 +1.09 / +0.63 / -14.9% / 20.8; **23/24 +1.06 / +0.76 / -13.6% / 10.7**; 22/24 +1.07 / +0.72 / -17.2% / 7.4; 23/25 +1.05 / +0.70 / -15.7% / 7.7; 25/25 +1.17 / +0.51 / -20.3% / 22.0.
+Read: switching falls by two thirds at width 2. On **train** the band costs a little (0.85 to 0.80), so train alone would not select one; the gain shows on **test** (0.25 to 0.49), a choppy stretch with VXN around 20-25, so it is not independent evidence. It is a cost/robustness argument. Spearman(train, test) is only +0.36. Best band by train at enter <=16/18/20/22 improved test; at enter >=24 the best-by-train band is the plain rule. Implemented in the daemon 2026-09-19 (not yet running): enter VXN<=23, hold until VXN>24, read from `config/overnight_strategy.json` `tier_allocation`; a parity test asserts the live `signal()` reproduces `intraday_engine.tiers_vxn_deadband` bar for bar.
+
+### 5. EQGB (live Nasdaq fund, GBP-hedged) vs EQQQ (backtest leg, unhedged), real hourly 2017-11 to 2026-09
+- Daily returns: correlation 0.80, tracking error 13.1%/yr; annualised 18.5% (EQGB) vs 18.9% (EQQQ); cumulative +352% vs +368%. Buy-and-hold max DD -37.2% vs -28.2%.
+- EQGB hourly data (full history): 32% zero-volume bars, 34% zero-return bars; hourly return correlation with EQQQ +0.39 same bar, +0.18 when EQGB lags by one bar; 39% of bars where EQQQ moved >0.3% show no EQGB move. Same-bar fills on the EQGB leg are therefore optimistic for the older years.
+- Rules on each leg, window 2017-11 to now (xSharpe / return): old VXN<=18: EQQQ +0.55/+61%, EQGB +1.05/+108%; plain 24: +0.65/+135% vs +0.93/+221%; band 23/24: +0.72/+148% vs +0.97/+222%; band 22/24: +0.72/+144% vs +0.95/+209%.
+- Delay test (same-bar / 1 bar late / 2 bars late, xSharpe): EQGB leg plain 24 +0.93/+0.77/+0.68, band 23/24 +0.97/+0.85/+0.78, band 22/24 +0.95/+0.86/+0.84; EQQQ leg plain 24 +0.65/+0.51/+0.48, band 23/24 +0.72/+0.61/+0.59, band 22/24 +0.72/+0.72/+0.69. EQGB falls faster with delay, consistent with stale-price flattery. Treat EQQQ as the conservative leg and EQGB as an upper bound. Conclusions (bands beat plain; VXN 22-24 zone) hold on both legs.
+- **Quoted spread, last ~6 months (BID/ASK hourly bars, bps of mid):** by London bar-start hour, EQGB / EQQQ median: 08:00 7.2 / 2.7; 09:00 6.9 / 2.6; 10:00 5.4 / 2.0; 11:00 5.5 / 2.1; 12:00 5.5 / 2.0; 13:00 5.4 / 2.1; 14:00 (US open) 12.5 / 12.5; 15:00 6.5 / 2.6; 16:00 (closing auction, quotes meaningless) 432 / 142. Excluding 14:00 and 16:00: EQGB median 5.7, p90 10.9, p99 42.5; EQQQ 2.3 / 4.9 / 28.6. London morning (08-14) EQGB median 5.5, p90 11.1. A switch costs roughly 4-8 bps in spread plus commission, so the flat 13 bps looks adequate. Morning spreads are no worse than midday.
+- Recent staleness is mostly gone: last 6 months EQGB trade bars correlate +0.74 with EQQQ same-bar (+0.12 one bar late; 18% zero-move); midpoint bars +0.71 / -0.06 with 2% zero-move.
+
+### Caveats / not done
+- Bridged-era (1999-2007) results assume the intraday shape; VXN 1999-2001 is chart estimates; USD proxies without FX; treat as a stress test, not evidence.
+- xSharpe uses the cash asset (CSH2 accrual pre-2015-09) as the risk-free leg. Raw Sharpe flatters cash-heavy rules (e.g. a VXN<=16 rule showed raw test Sharpe 2.11 on +23% return).
+- Tier 2 is modelled on IUSA (a UK-listed S&P fund stand-in); the live config still names SPY, which this account cannot trade (PRIIPs). Tiers 2/3 were unused at the selected settings.
+- Same-bar fill assumes an order at the bar-end price; live prices used for sizing are 15-min delayed ticks and orders are market orders. Next-bar fill is the conservative bound.
+- Thresholds chosen on train only; the deadband widths and enter/exit levels were still eyeballed from a coarse grid. No walk-forward run yet.
+- Daemon code now has the `IndexFeed` fix and the config-driven deadband (VXN 23/24; 775 tests pass) but the RUNNING daemon keeps the old once-a-day cache and VXN 18 until restarted. At VXN ~20 a restart on the new config would rotate the held ISF.L into EQGB.L on the first LSE cycle.
+
+Conclusion: the live design's old thresholds (VXN 18 / VIX 15 / 17.5) lose money once decisions are intraday; a VXN-only Nasdaq-or-cash rule near 23-25, ideally with a 1-2 point deadband, trades about 8-11 times a year, halves the drawdown of buy-and-hold Nasdaq and gives up much of its return. Tiers 2/3 add nothing at those settings.
+
+---
+
+
+## 2026-09-19 (later) — 26-year stress test (2001-2026, includes dot-com bust) [SUSPECT]
+
+> **SUSPECT (marked 2026-09-19).** See the notice at the top of this log. Superseded by the 2026-09-19 (evening) entry; do not rely on the figures below.
+
+**Data:** VIX daily from IBKR cache (`ibkr_daily/INDEX_VIX.csv`, 1990+). VXN: IBKR from 2007-11-20 (`ibkr_daily/INDEX_VXN.csv`); yfinance ^VXN fills 2001-2007 gap (IBKR has no VXN history before 2007). Deployed uses daily-close approximation (tier from T-1 close, earn T return; `lag=0` compensates for the already-1-day-old daily signal — consistent with run-B's 1-day signal-to-earn lag). Comparators unaffected (no VIX/VXN dependency). Script: `allocation/multi_tier_26yr_backtest.py`.
+
+### Full-period summary (2001-01-23..2026-09-15, 25.6 years)
+
+| Strategy | Sharpe | Sortino | Return% | MaxDD% | sh 01-07 | sh 07-19 | sh 19+ |
+|---|---|---|---|---|---|---|---|
+| Deployed asym10d (13bps) | 0.675 | 0.506 | +172 | -17.9 | 0.63 | 0.49 | 1.15 |
+| Vol-target 5% | 1.006 | 1.403 | +279 | -10.0 | 0.72 | 0.96 | 1.33 |
+| **SMA200+VT 5%** | **1.123** | **1.290** | **+263** | **-7.2** | **1.26** | **0.83** | **1.48** |
+| Vol-target 10% | 0.794 | 1.111 | +599 | -25.2 | 0.31 | 0.87 | 1.12 |
+| Static 30/70 | 0.739 | 0.988 | +247 | -23.6 | 0.35 | 0.69 | 1.29 |
+
+**SMA200+VT5% wins all three sub-periods** (1.26 / 0.83 / 1.48 Sharpe). The dot-com period (2001-2007) is the decisive difference: SMA200 kept strategy in CSH2 during the crash (2001-2002 returns +3.6%/+2.8% vs VT5% -4.8%/-2.5%). VT5% was unable to reach 0% EQGB because realized vol, while high, never forced weight fully to zero.
+
+### Annual returns — 2001 to 2026 (selected key years shown)
+
+| Year | Deployed | VT5% | SMA200+VT5% |
+|---|---|---|---|
+| 2001 | +4.7% | -4.8% | **+3.6%** |
+| 2002 | +4.0% | -2.5% | **+2.8%** |
+| 2003 | +4.1% | **+11.6%** | +10.2% |
+| 2008 | +4.7% | -4.0% | -0.2% |
+| 2015 | -5.8% | **+0.9%** | -0.5% |
+| 2016 | -4.8% | **+0.6%** | -2.7% |
+| 2020 | +3.7% | **+8.5%** | +8.2% |
+| 2022 | +1.5% | -7.2% | **-0.6%** |
+| 2023 | +5.6% | **+18.6%** | +13.6% |
+
+Full 26-year annual table: `uv run python -m Strategy_Auto_Trader.allocation.multi_tier_26yr_backtest`.
+
+**Note on 2008 SMA200+VT5%:** −0.2% (not the +4.7% of the 18-yr analysis). The difference: over 18yr the SMA200 warmup period (first 200 trading days from 2007-11-20) coincides with the 2008 crash, forcing 100% CSH2 automatically. Over 26yr, 200 days of warmup are already spent by 2003, so the strategy holds a small EQGB position throughout 2008 (vol is high but SMA crossover may not fully trigger in time). The 18-yr SMA200+VT 2008 result (+4.7%) was therefore partly an artefact of the warmup boundary, not fully representative.
+
+**Key takeaway vs 18-yr results:**
+- Deployed: Sharpe 0.690 over 26yr vs 0.786 over 18yr — dot-com bust and 2015/2016 drag it down
+- VT5%: Sharpe 1.006 over 26yr vs 1.111 over 18yr — 2001/2002 dot-com hurt even with vol-target
+- SMA200+VT5%: Sharpe 1.123 over 26yr vs 1.150 over 18yr — **most stable across both windows**; gap vs VT5% widens from 0.039 (18yr) to 0.117 (26yr). The longer the window, the more the SMA200 filter earns its keep.
+
+---
+
+## 2026-09-19 — Statistical validation, hybrid tests, alpha decomposition [SUSPECT]
+
+> **SUSPECT (marked 2026-09-19).** See the notice at the top of this log. Superseded by the 2026-09-19 (evening) entry; do not rely on the figures below.
+
+### Probabilistic Sharpe Ratio (multiple-testing correction for vol-target grid)
+
+**Context:** 8 vol-target levels tested (5-20%); is the 5% "win" on Sharpe an in-sample artefact?
+
+- PSR(SR* = 0) = 1.0000 — trivially certain the true SR > 0
+- SR* deflated (Bailey 2014, N=8 trials) = **0.031** — far below observed SR=1.111
+- PSR vs deflated benchmark = 1.0000 — still overwhelming
+- JK test vol-target vs deployed: z = **1.32**, one-sided p = **0.093** (Memmel-corrected, rho=0.46) — see 2026-09-18 22:45
+
+**No selection bias in the vol-target grid.** The deflated benchmark (0.031) is negligible relative to SR=1.11. Even with the full multiple-testing penalty for 8 trials, the result is certain — the strategy is not a grid-search artefact. Separately, the JK test (correct Memmel formula with inter-strategy correlation 0.46) gives marginal significance vs deployed at 10%; the 0.32 Sharpe edge is real but T=18 years has only ~6 independent vol cycles.
+
+### Block bootstrap (21d blocks, 2000 iter)
+
+| Strategy | Full SR | p5 | p25 | p50 | p95 |
+|---|---|---|---|---|---|
+| **Vol-target 5%** | **1.111** | **0.741** | 0.973 | 1.122 | 1.488 |
+| Vol-target 10% | 0.979 | 0.614 | 0.841 | 0.989 | 1.358 |
+| Static 30/70 | 0.943 | 0.578 | 0.799 | 0.956 | 1.335 |
+| [REF] Deployed asym10d | 0.790 | **0.430** | — | — | — |
+
+Vol-target 5% p5 (0.741) is **72% above deployed p5 (0.43)**. In 75% of block-bootstrap scenarios (p25=0.973), vol-target 5% beats the deployed strategy's full-period Sharpe of 0.79. Static 30/70 p5 (0.578) also clears deployed p5 by 34%.
+
+Excess kurtosis at 5% target = 15.26 (strategy mostly in CSH2 with occasional EQGB spikes). PSR denominator inflates by sqrt(5.3) but numerator (1.11 * sqrt(4452)) = 74. Still PSR = 1.000.
+
+### Safe-asset sensitivity (vol-target hybrid)
+
+**Do ISF.L or SPY improve on CSH2 as the safe/cash leg?**
+
+| Strategy (5% EQGB vol-target) | Sharpe | MaxDD% | Return% |
+|---|---|---|---|
+| EQGB / CSH2.L (baseline) | **1.111** | **-8.75** | +196 |
+| EQGB / ISF.L | 0.528 | -45.5 | +292 |
+| EQGB / SPY | 0.727 | -53.4 | +680 |
+| EQGB / 50-50 ISF+CSH2 | 0.717 | -27.3 | +257 |
+
+ISF.L and SPY as "safe" buckets completely destroy Sharpe. The remainder bucket draws down with EQGB during equity crises — ISF.L has -47% DD on its own. The entire vol-target edge depends on CSH2 being truly defensive. No hybrid alternative is competitive.
+
+### Zero-yield decomposition: alpha vs carry
+
+**Question:** Is the 3%>5%>10% Sharpe ranking real EQGB alpha, or just CSH2 carry contamination?
+
+CSH2 Sharpe (standalone): **10.89** (tiny vol, positive carry — Sharpe approaches infinity at zero vol).
+
+| Target | Sharpe (real yield) | Sharpe (zero yield) | Avg EQGB weight |
+|---|---|---|---|
+| 1% | 2.246 | ~1.8 | 6.2% |
+| 3% | 1.303 | 0.904 | 18.7% |
+| 5% | 1.111 | **0.903** | 31.1% |
+| 7% | 1.036 | **0.908** | 43.3% |
+| 10% | 0.979 | 0.911 | 59.9% |
+| 20% | 0.880 | ~0.91 | ~80% |
+
+**Conclusion: EQGB alpha is constant at ~0.91 Sharpe across ALL vol targets** (zero-yield basis). The 3%>5%>10%>20% Sharpe ranking entirely reflects CSH2 carry pulling the Sharpe toward the cash baseline (10.89), weighted by CSH2 allocation fraction. **There is no basis to prefer 3% over 5% on alpha grounds — both deliver identical underlying equity timing alpha.** The choice of vol target is purely a return/drawdown/return preference, not an alpha choice.
+
+Implication: if SONIA falls from current ~5% back to 0%, vol-target 5% Sharpe drops from ~1.11 toward ~0.90 (from zero-yield table). Still beats deployed at any rate environment.
+
+### Rebalancing frequency and deadband sensitivity (vol-target 5%)
+
+| Config | Sharpe | MaxDD% | Rebal/yr |
+|---|---|---|---|
+| Daily, no deadband | 1.111 | -8.75 | 252 |
+| Daily, 2% deadband | 1.104 | -8.80 | 58 |
+| Daily, 5% deadband | 1.120 | -8.45 | 25 |
+| **Weekly (5d), 2% deadband** | **1.134** | **-8.22** | **30** |
+| Weekly (5d), no deadband | 1.118 | -8.51 | 50 |
+| 10d, 2% deadband | 1.102 | -8.74 | 19 |
+| Monthly (21d) | 1.043 | -8.42 | 12 |
+
+**Best configuration: weekly (every 5 business days) with 2% weight deadband — Sharpe 1.134, 30 rebal/yr.** Deadband filters noise in rolling vol estimate, suppressing consecutive-day whipsaw. At 30 rebal/yr with avg trade ~£769 and £1 IBKR minimum: £30/yr total cost (0.15% of £20k). Net-of-cost Sharpe ~1.10. Better than daily AND cheaper. Monthly (12 rebal/yr) still delivers 1.04 — extremely robust to infrequent rebalancing.
+
+**Contrast with deployed tier strategy:** Friday-only restriction HURTS deployed asym10d (0.786 → 0.674, DD -14.2% → -17.6%). The asym10d filter already controls switch frequency optimally. Calendar-based restrictions are not the right lever for the tier strategy. The vol-target deadband is a different mechanism (filtering rolling-vol noise), not applicable to threshold-based switching.
+
+### Extended vol-target grid (including lower targets)
+
+| Target | Sharpe | MaxDD% | Return% | Ann ret%/yr |
+|---|---|---|---|---|
+| 3% | 1.303 | -5.0 | +117 | +4.5 |
+| 4% | 1.184 | -6.9 | +154 | +5.4 |
+| **5%** | **1.111** | **-8.8** | **+196** | **+6.3** |
+| 7% | 1.036 | -12.4 | +297 | +8.1 |
+| 10% | 0.979 | -17.7 | +486 | +10.5 |
+
+3% and 4% have HIGHER Sharpe but deliver lower absolute return (4.5%/yr, 5.4%/yr). For a £20k pot, 3% = +£900/yr avg; 5% = +£1,260/yr avg. Max loss at 3% = £1,000 (5% of £20k). Practical choice depends on withdrawal needs vs drawdown tolerance.
+
+### EQGB proxy era validation
+
+| Period | Sharpe | DD% | Return% |
+|---|---|---|---|
+| Pre-2017-10-26 (QQQ price proxy) | 0.956 | -7.1 | +65.0 |
+| Post-2017-10-26 (real IBKR EQGB) | **1.293** | -8.8 | +79.3 |
+
+The QQQ proxy UNDERSTATES vol-target performance. Real EQGB (accumulating total-return) outperforms QQQ price-only by ~0.3-0.8%/yr in the post-2017 era. Pre-proxy Sharpe of 0.956 is conservative — the full-period Sharpe of 1.111 is likely understated. Proxy concern from reviewer is a non-issue.
+
+### Weight evolution during crises
+
+**COVID 2020 (monthly avg EQGB weight):**
+- Jan 2020: 45.2% (low pre-crash vol)
+- Feb 2020: 27.1% (vol beginning to spike)
+- **Mar 2020: 10.9%** (vol spike → auto-reduced to ~11%)
+- Apr 2020: 10.4% (still low)
+- May-Aug 2020: 18-25% (gradual vol-based rebuild)
+- Dec 2020: 31.7%, Jan 2021: 38.2%
+
+VT gained +8.5% for 2020 by holding 10-25% EQGB through the recovery. Deployed held 0% Nasdaq all year.
+
+**GFC 2008 (monthly avg EQGB weight):**
+- Jan-Sep 2008: 19-24% (holding equity through the drift-down)
+- **Oct 2008: 7.9%** (Lehman spike → dropped to 8%)
+- Nov-Dec 2008: 7-9%
+- 2009 recovery: 14-22% by Jun 2009
+
+GFC: -4.0% annual loss inevitable (strategy never goes to 0%, always has some equity). Deployed's +4.7% in 2008 came from being fully in cash — impossible for vol-target at 5% because EQGB realized vol was only ~16%/yr, not high enough to force weight to 0.
+
+### Annual returns (all years, vol-target 5% vs deployed asym10d)
+
+| Year | VT5% | Deployed | Delta |
+|---|---|---|---|
+| 2008 | -4.0% | **+4.7%** | -8.6% |
+| 2009 | **+9.1%** | +0.6% | +8.4% |
+| 2010 | **+7.3%** | +0.5% | +6.8% |
+| 2011 | **+1.6%** | +0.5% | +1.1% |
+| 2012 | **+7.1%** | -3.5% | +10.6% |
+| 2013 | **+11.4%** | +13.0% | -1.6% |
+| 2014 | +5.1% | **+8.4%** | -3.2% |
+| 2015 | **+0.9%** | -4.6% | +5.5% |
+| 2016 | **+0.6%** | -1.8% | +2.4% |
+| 2017 | **+18.4%** | +25.0% | -6.6% |
+| 2018 | **+0.3%** | -1.0% | +1.3% |
+| 2019 | **+7.7%** | +3.4% | +4.3% |
+| 2020 | **+8.5%** | 0.0% | +8.4% |
+| 2021 | **+7.3%** | -2.0% | +9.3% |
+| 2022 | -7.2% | **+1.5%** | -8.6% |
+| 2023 | **+18.6%** | +14.5% | +4.1% |
+| 2024 | +9.7% | **+18.4%** | -8.7% |
+| 2025 | +7.1% | **+8.4%** | -1.3% |
+
+**Deployed wins in:** crisis years (2008, 2022 — goes to 0% equity) and strong Nasdaq bull years where VXN < 18 long enough to stay invested (2013, 2017, 2024). VT wins in: recovery years, range-bound years, years where the VXN threshold mis-fires (2012, 2015, 2016, 2018, 2021 — deployed in cash while markets drift up). VT wins in 11 of 18 years.
+
+### Consecutive losses and drawdown duration
+
+| Strategy | Losing years | Max consecutive losing years | Months underwater |
+|---|---|---|---|
+| Vol-target 5% | 2008, 2022 | 1 | 28 |
+| Deployed asym10d | 2012, 2015, 2016, 2018, 2021 | 2 | 73 |
+
+Deployed was underwater for 73 consecutive months (over 6 years) across five separate losing years. Vol-target 5% loses only in the two worst equity crises (GFC, 2022 rate shock) and spent 28 months underwater total. Sortino ratio captures this difference more sharply than Sharpe:
+
+| Strategy | Sharpe | Sortino | Calmar |
+|---|---|---|---|
+| **Vol-target 5%** | **1.111** | **1.504** | **0.724** |
+| Deployed asym10d | 0.790 | 0.536 | 0.344 |
+| Static 30/70 | 0.943 | ~0.85 | ~0.50 |
+
+**Sortino gap (2.8×) is larger than the Sharpe gap (1.4×)** because vol-target 5% has very few large downside observations (only 2008 and 2022 make meaningful negative contributions), while deployed has five losing years scattered across the full period. Calmar (Sharpe / max_DD) similarly: 0.724 vs 0.344 (2.1×). Any risk measure that penalises downside more heavily than standard deviation will show a larger advantage for vol-target.
+
+### SMA200 + vol-target hybrid + block bootstrap
+
+**Question:** Can a trend filter further improve the vol-target by avoiding EQGB during structural bear markets?
+
+**Rule:** If EQGB price is above its 200-day SMA (prior day), apply vol-target 5% normally. If EQGB is below 200d SMA, set EQGB weight to 0 (100% CSH2). Both SMA status and vol weight are lagged 1 day (no look-ahead). Code: `allocation/multi_tier_bootstrap_lse_lag.py`.
+
+**Block bootstrap (21d blocks, 2000 iter, seed=42) — all strategies:**
+
+| Strategy | Full SR | p5 | p25 | p50 | p95 | P(SR>0) |
+|---|---|---|---|---|---|---|
+| Deployed asym10d (13bps) | 0.786 | 0.427 | 0.651 | 0.790 | 1.159 | 1.000 |
+| Vol-target 5% | 1.111 | 0.741 | 0.973 | 1.122 | 1.488 | 1.000 |
+| Vol-target 10% | 0.979 | 0.614 | 0.841 | 0.989 | 1.358 | 1.000 |
+| Static 30/70 | 0.943 | 0.578 | 0.799 | 0.956 | 1.335 | 1.000 |
+| **SMA200 + Vol-target 5%** | **1.150** | **0.798** | **1.009** | **1.159** | **1.519** | **1.000** |
+| SMA200 + Vol-target 7% | 1.068 | 0.711 | 0.929 | 1.076 | 1.437 | 1.000 |
+
+**SMA200+VT5% p5 = 0.798 — 1.87× deployed worst case (p5=0.427).** In 75% of bootstrap scenarios (p25=1.009) the hybrid beats deployed's full-period Sharpe of 0.79. Every single bootstrap scenario returns SR > 0 for all strategies.
+
+Note: an earlier estimate of SMA200+VT Sharpe = 1.613 in session notes was wrong — that figure lacked the 1-day lag on the SMA signal (same-day SMA status → same-day return = look-ahead). The correct verified figure is **1.150**. The improvement over standalone VT5% (0.039 Sharpe) is real but modest — the main advantage is crisis protection (2008, 2022).
+
+**Annual returns SMA200+VT5% vs VT5% vs deployed:**
+
+| Year | Deployed | VT5% | SMA200+VT5% |
+|---|---|---|---|
+| 2008 | +4.7% | -4.0% | **+4.7%** |
+| 2009 | +0.6% | +9.1% | **+6.9%** |
+| 2011 | +0.5% | **+1.6%** | -0.6% |
+| 2016 | -1.8% | **+0.6%** | -2.7% |
+| 2020 | 0.0% | **+8.5%** | +8.2% |
+| 2022 | +1.5% | -7.2% | **-0.6%** |
+| 2023 | +14.5% | **+18.6%** | +13.6% |
+
+SMA200+VT wins the two biggest crisis years (2008: +9% vs VT5%; 2022: +6.6% vs VT5%) but gives back slightly in trend-reversal years (2011, 2016) when EQGB dips below its SMA briefly then recovers. Full annual table: `uv run python -m Strategy_Auto_Trader.allocation.multi_tier_bootstrap_lse_lag`.
+
+### D4: P&L distortion in £ terms
+
+Quantified from live fill: ISF.L entry_cost = **£110.97** (logged) vs actual IBKR cost = **£10.00** (IBKR commission only).
+
+| Component | Logged | Actual | Error |
+|---|---|---|---|
+| IBKR commission | £10.00 | £10.00 | £0 |
+| Phantom stamp duty (0.5%) | ~£100.97 | £0 | **+£100.97** |
+| PTM levy | ~£1.00 | £0 | **+£1.00** |
+| **Total per buy** | **£110.97** | **£10.00** | **+£100.97** |
+
+At deployed 5.7 switches/yr, each switch = sell current asset + buy new asset = 5.7 separate buy transactions. Phantom stamp duty + PTM only applies on buys: **5.7 × £100.97 = £575/yr** P&L understatement from the ledger. Additionally, commission_pct=0.1 (2× actual 0.05%) overstates commission by ~£10 per transaction on both buys AND sells: 5.7 × 2 × £10 = **£114/yr** extra commission drag. Total local-ledger distortion: **~£689/yr** at current switch rate and ~£20k NAV. For a rough £20k pot that's ~3.4% annual P&L error in the ledger.
+
+**Actual cash impact is zero** — IBKR executes orders correctly; only the local `portfolio.py` ledger is wrong. The live paper trading P&L shown in app_status is understated by ~£317/yr, not actual money lost.
+
+---
+
+## 2026-09-18 23:15 — VXN threshold sweep, vol-target costs, spreads, correlations [SUSPECT]
+
+> **SUSPECT (marked 2026-09-19).** See the notice at the top of this log. Superseded by the 2026-09-19 (evening) entry; do not rely on the figures below.
+
+### VXN threshold sweep (2-tier Nasdaq/CSH2, asym10d, 13bps/sw)
+
+| VXN≤ | Sharpe | Ret% | DD% | sh<2019 | sh≥2019 | 2020-rec |
+|---|---|---|---|---|---|---|
+| 18 (deployed) | 0.81 | +110 | -9.2 | 0.72 | 1.18 | 0.1% |
+| 20 | 0.47 | +78 | -18.0 | 0.39 | 0.70 | 0.1% |
+| 22 | 0.67 | +167 | -18.1 | 0.53 | 0.93 | 0.1% |
+| **24** | **0.98** | **+515** | **-19.5** | **0.91** | **1.10** | 0.1% |
+| 25 | 0.81 | +363 | -21.0 | 0.74 | 0.90 | 0.1% |
+| 28 | 0.66 | +306 | -27.2 | 0.49 | 0.91 | 2.1% |
+| 35 | 0.77 | +676 | -37.0 | 0.66 | 0.91 | 28.1% |
+
+**Key finding:** No VXN threshold avoids the COVID recovery trap while maintaining competitive Sharpe. You need VXN≤35 to participate in 2020 recovery (28.1%), but that gives 0.77 Sharpe and -37% DD — worse than static 30/70 (0.94/-16.3%). VXN=24 is the in-sample optimum (0.98) but still 0% COVID recovery. VXN=20 is worst (0.47) because 18-20 is a whipsaw zone where VXN oscillates frequently. The threshold approach structurally cannot solve the COVID trap at reasonable Sharpe.
+
+### Vol-target window sensitivity (5% target)
+
+| Window | Sharpe | Ret% | DD% | sh<2019 | sh≥2019 |
+|---|---|---|---|---|---|
+| 5d | 0.84 | +177 | -11.2 | 0.74 | 0.97 |
+| 10d | 0.98 | +177 | -9.1 | 0.88 | 1.12 |
+| 15d | 1.03 | +183 | -9.5 | 0.91 | 1.20 |
+| **20d** | **1.11** | **+196** | **-8.7** | **0.96** | **1.33** |
+| 30d | 1.08 | +178 | -8.5 | 0.91 | 1.31 |
+| 45d | 1.05 | +167 | -8.5 | 0.88 | 1.31 |
+| 60d | 1.06 | +166 | -8.3 | 0.89 | 1.30 |
+
+20d is optimal but 15-60d all give 1.03-1.11 Sharpe. Not sensitive to window. No overfitting concern — similar performance across 4× window range.
+
+### Vol-target weekly rebalancing: gross vs net (pot=£20k, IBKR min £1)
+
+| Vol% | Gross SR | Net SR | Gross Ret% | Net Ret% | £/yr cost | trades/yr |
+|---|---|---|---|---|---|---|
+| **5%** | 1.12 | **1.03** | +210 | +182 | £107 | 50 |
+| 7% | 1.04 | 0.97 | +316 | +277 | £113 | 50 |
+| 10% | 0.98 | 0.93 | +504 | +448 | £110 | 47 |
+| 15% | 0.93 | 0.90 | +855 | +789 | £81 | 35 |
+
+Deployed: Sharpe 0.79, £148/yr (5.7 sw × 13bps × £20k). **Vol-target 5% weekly net = 1.03 Sharpe at £107/yr** — cheaper than deployed AND 0.24 Sharpe higher after realistic costs.
+
+### Return correlations (daily)
+
+| | VT5% | Static30/70 | SMA200 | Deployed | Nasdaq |
+|---|---|---|---|---|---|
+| VT5% | 1.00 | **0.87** | 0.82 | 0.46 | 0.87 |
+| Static30/70 | 0.87 | 1.00 | 0.70 | **0.25** | 1.00 |
+| SMA200 | 0.82 | 0.70 | 1.00 | 0.36 | 0.70 |
+| Deployed | 0.46 | 0.25 | 0.36 | 1.00 | 0.25 |
+
+Vol-target 5% and static 30/70 are 87% correlated (same avg Nasdaq weight ~30%). Static30/70 vs Nasdaq is 1.00 (it IS a scaled Nasdaq + CSH2). Deployed is a genuinely different strategy (0.25-0.46 with all alternatives) — mostly-cash vs mostly-equity structure.
+
+### Half-spread estimates from IBKR hourly OHLC (intrabar HL / 2)
+
+| Ticker | Median half-HL | Traded hrs only | True spread |
+|---|---|---|---|
+| CSH2.L | 0.9 bps | 1.2 bps | ~1 bps |
+| EQGB.L | 2.6 bps | 5.7 bps | ~3-4 bps |
+| ISF.L | 9.6 bps | 9.6 bps | ~3-5 bps |
+
+Half-HL is upper bound (includes intrabar price drift). True spread is less. Live ISF.L fill: 9.5 bps total slippage (includes timing + spread). **`costs.py _UK_SPREAD=0.0015` = 150 bps is 30-75× too high.** Correction: ~3 bps for EQGB.L/ISF.L, ~1 bps for CSH2.L. This only affects `ibkr_tiered_spread` cost model — tier allocation backtest uses flat 13 bps, unaffected.
+
+---
+
+## 2026-09-18 22:45 — Regime analysis: annual returns, COVID drill-down, VXN constraint [SUSPECT]
+
+> **SUSPECT (marked 2026-09-19).** See the notice at the top of this log. Superseded by the 2026-09-19 (evening) entry; do not rely on the figures below.
+
+Tool: one-liner imports.
+
+### Annual returns
+
+| Year | Nasdaq | Static 30/70 | VT 5% | Deployed |
+|---|---|---|---|---|
+| 2008 | -41.9% | -10.8% | **-4.0%** | **+4.7%** |
+| 2009 | +53.8% | +15.1% | +9.1% | +0.6% |
+| 2012 | +16.7% | +5.4% | +7.1% | **-3.5%** |
+| 2013 | +35.1% | +10.0% | +11.4% | +13.0% |
+| 2015 | +8.3% | +3.1% | +0.9% | **-4.6%** |
+| 2016 | +5.9% | +2.3% | +0.6% | **-1.8%** |
+| 2017 | +32.4% | +9.2% | +18.4% | +25.0% |
+| 2018 | -6.5% | -1.1% | **+0.3%** | -1.0% |
+| 2019 | +40.1% | +11.6% | +7.7% | +3.4% |
+| 2020 | +45.5% | +13.1% | +8.5% | **0.0%** |
+| 2021 | +27.7% | +8.0% | +7.3% | -2.0% |
+| 2022 | -35.0% | -10.4% | **-7.2%** | **+1.5%** |
+| 2023 | +53.8% | +17.9% | +18.6% | +14.5% |
+| 2024 | +26.1% | +11.4% | +9.7% | +18.4% |
+
+### COVID drill-down (VXN constraint confirmed)
+
+**Why deployed was 0% Nasdaq for entire Apr-Dec 2020 recovery:**
+VXN in Apr-Dec 2020: min 25.4, max 54.1, mean 32.9. **VXN NEVER reached ≤18 threshold.** Both B raw and B asym10d were 100% cash/CSH2 for the entire 9-month recovery — this is a threshold problem, not an asym filter problem. Even without the asym filter, VXN > 18 every day meant no Nasdaq entry.
+
+| Period | Nasdaq | Vol-target 5% | Deployed | Deployed equity |
+|---|---|---|---|---|
+| Feb-Mar 2020 (crash) | -13.0% | -1.9% | +0.1% | ~0% |
+| Apr-Dec 2020 (recovery) | +60.5% | +9.1% | +0.1% | **0%** |
+| Full year 2020 | +45.5% | +8.5% | 0.0% | ~0% |
+| 2020-2021 combined | — | +16.4% | -2.0% | ~1% (mostly cash) |
+
+Vol-target reduced Nasdaq weight when realized 20d vol spiked (Feb 2020), then automatically rebuilt as rolling vol subsided (Apr-Jun 2020). No threshold crossing needed. The VXN threshold approach cannot distinguish "vol high but subsiding" from "still dangerous" — vol-target can.
+
+### Tier distribution (deployed asym10d, backtest window)
+
+| Tier | Asset | Days | % |
+|---|---|---|---|
+| 1 | Nasdaq/EQGB | 805/4452 | 18.1% |
+| 2 | SPY | 113/4452 | 2.5% |
+| 3 | ISF.L | 284/4452 | 6.4% |
+| **4** | **CSH2 (cash)** | **3250/4452** | **72.9%** |
+
+Asym filter reduces Nasdaq days from raw 30.7% to only 18.1%. Strategy holds cash 73% of the time. Mean equity exposure ~23.6% vs vol-target 5% mean Nasdaq exposure of 31.1%.
+
+### Vol-target 5% weight distribution
+
+| Nasdaq weight | Frequency |
+|---|---|
+| 0-10% | 1.6% |
+| 10-20% | 19.5% |
+| 20-30% | 32.5% (mode) |
+| 30-40% | 24.5% |
+| 40-50% | 12.0% |
+| 50%+ | 9.8% |
+
+Mean 31.1%, median 28.9%, never 100% (always has some in CSH2). Low-vol regimes raise weight toward 40-50%. High-vol regimes drop to 10-20%. Continuous and smooth vs the VXN hard threshold.
+
+### JK test, rolling Sharpe, CSH2 yield
+
+**Jobson-Korkie test** (one-sided H_a: beats deployed):
+- Vol-target 5% vs deployed: Z=1.32, **p=0.093** (marginally significant at 10%)
+- Static 30/70 vs deployed: Z=0.55, p=0.29 (not significant)
+
+Note: T=4453 but returns not i.i.d. (serial correlation); block bootstrap p5 is more honest (vol-target p5=0.74, deployed p5=0.43).
+
+**Rolling 2yr Sharpe (fraction of windows)**
+
+| Strategy | >0 | >0.5 | Min | Max |
+|---|---|---|---|---|
+| Vol-target 5% | 99.9% | 88.5% | -0.02 | 2.55 |
+| Static 30/70 | 98.6% | 85.0% | -0.19 | 2.59 |
+| Deployed asym10d | 82.8% | 60.0% | **-0.92** | 24.81 |
+
+Deployed's worst 2yr window: Jan 2020 to Jan 2022 (Sharpe -0.92, cumret -4.6%). Vol-target: +10.5% same period.
+
+**CSH2 yield sensitivity:** CSH2 yields 1.65%/yr (SONIA proxy). Vol-target 5% at zero yield: Sharpe drops from 1.11 to 0.90, still beats deployed at 13 bps (0.79).
+
+### Operational checks
+
+- `--protective-stops` in tier mode: `stop_level=0.0, stop_managed=False` on live ISF.L position. Flag effectively no-op in tier mode (HMM strategy evaluation skipped; tier allocation manager handles exits via rebalancing).
+- `current_asset` re-seeding: handled at daemon startup (lines 2336-2343 in live_daemon.py — reads from portfolio.positions). The `null` in app_status.json is `_last_target_asset` (no cycle completed this session), not `current_asset`. Bug is already fixed in code.
+
+---
+
+## 2026-09-18 22:15 — Statistical validation: OOS, block bootstrap, proxy correction [SUSPECT]
+
+> **SUSPECT (marked 2026-09-19).** See the notice at the top of this log. Superseded by the 2026-09-19 (evening) entry; do not rely on the figures below.
+
+Tool: one-liner imports, no new files.
+
+### Out-of-sample (2019+) validation — are full-sample Sharpes regime-specific?
+
+| Strategy | Full Sharpe | pre-2019 | 2019+ | 2019+ DD | 2019+ Ret% |
+|---|---|---|---|---|---|
+| B&H Nasdaq | 0.77 | 0.59 | 1.02 | -37.2% | +345% |
+| Static 30% Nasdaq / 70% CSH2 | 0.94 | 0.69 | 1.29 | -11.8% | +86% |
+| **Vol-target 5% (no cost)** | **1.11** | **0.96** | **1.33** | **-8.7%** | **+70%** |
+| Vol-target 10% (no cost) | 0.98 | 0.87 | 1.12 | -17.7% | +137% |
+| SMA200 (13bps/sw) | 0.89 | 0.67 | 1.15 | -20.6% | +281% |
+| VXN<=18 2-tier asym10d (13bps/sw) | 0.81 | 0.72 | 1.18 | -6.8% | +34% |
+| [DEPLOYED] Run B asym10d (13bps/sw) | 0.79 | 0.55 | **1.36** | -6.8% | +58% |
+
+**Interpretation:** Deployed strategy has the highest OOS (2019+) Sharpe (1.36) but lowest pre-2019 Sharpe (0.55). This gap is the hallmark of regime-fitted parameters (VXN=18, VIX=15/17.5 tuned on the full history, including 2019+ COVID and rate cycle where VIX spikes match the tier structure well). Vol-target 5% is most consistent: 0.96/1.33 pre/post, no jump, no sign of in-sample fit. 2019+ period has 4 major vol events (COVID, 2022 inflation/rate, 2023 banking, SVB) all of which are VIX-tier friendly — this inflates the deployed OOS Sharpe. OOS Sharpe tie on BOTH drawdown (-8.7% vs -6.8%) — deployed has a small DD edge even OOS; vol-target more return (+70% vs +58%) OOS.
+
+### Block bootstrap confidence intervals (block=21d, N=2000)
+
+| Strategy | Point | p5 | p50 | p95 | P(Sharpe>0.5) |
+|---|---|---|---|---|---|
+| Vol-target 5% (no cost) | 1.11 | 0.74 | 1.12 | 1.49 | 99.9% |
+| Static 30/70 (no cost) | 0.94 | 0.58 | 0.96 | 1.33 | 97.7% |
+| [DEPLOYED] Run B asym10d net | 0.79 | 0.43 | 0.79 | 1.16 | 90.7% |
+
+Vol-target 5% p5 (0.74) > deployed p5 (0.43) — lower tail clearly better. Deployed p5 is below 0.5 (meaningful chance of being a low-Sharpe strategy). Jobson-Korkie SE = 0.019 for vol-target (tight from T=4453 but doesn't capture serial correlation; block bootstrap is the right measure).
+
+### EQGB proxy understatement impact (immaterial)
+
+QQQ price-only pre-2017-10 misses ~0.3-0.8%/yr dividends. Correction adds only +0.010 to +0.026 Sharpe units to vol-target 5% (true Sharpe ~1.12-1.14). Conclusions unchanged.
+
+### Operational checks
+
+- Task Scheduler command: `--tier-mode` CONFIRMED present.
+- D5 spec complete: `CommissionReport.commission` available via `trade.fills[-1].commissionReport` (poll ~2s after fill for async arrival). Add `commission: float | None` to `FillResult`, store in portfolio.py.
+- CSPX.L: not in `data/cache/ibkr_hourly/`. Would need new IBKR fetch. ISIN: IE00B5BMR087 (iShares Core S&P 500 UCITS ETF, USD, LSE, accumulating). Confirmed UCITS, exempt from stamp duty. Not yet wired in codebase.
+- Live state: ISF.L 1902 shares still held (fill 2026-09-17). Tier switch to CSH2.L was skipped 2026-09-18 (gateway-down/NaN prices). Switch still pending.
+
+---
+
+## 2026-09-18 21:30 — C2 asym10d, full timing band, vol-target grid, cost sensitivity [SUSPECT]
+
+> **SUSPECT (marked 2026-09-19).** See the notice at the top of this log. Superseded by the 2026-09-19 (evening) entry; do not rely on the figures below.
+
+Tool: one-liner imports of existing modules — no new files. All using same data/cost as prior entries.
+
+### C2 asym10d (completes timing band)
+
+```
+uv run python -c "... apply_asymmetric_hysteresis(close_tiers, 10), lag=2 ..."
+```
+
+| Timing | Filter | Sharpe | Ret% | MaxDD% | sw/yr | sh<2019 | sh≥2019 |
+|---|---|---|---|---|---|---|---|
+| B (16:30 cutoff) | raw | 0.19 | +26.0 | -27.8 | 31.8 | 0.17 | 0.24 |
+| B (16:30 cutoff) | asym10d | 0.79 | +131.7 | -14.2 | 5.7 | 0.55 | 1.36 |
+| C2 (lag=2 close) | raw | 0.21 | +30.5 | -29.7 | 30.9 | 0.23 | 0.20 |
+| C2 (lag=2 close) | **asym10d** | **0.63** | **+98.8** | **-20.3** | 6.2 | 0.47 | 0.98 |
+
+Reviewer said C2 asym10d = 0.58; we get 0.63 (within 0.05 tolerance, same direction). Timing band conclusion confirmed: **asym filter rescues both B and C2; filtering choice dominates timing model uncertainty.** C2 is genuinely worse than B with asym (0.63 vs 0.79) because it misses some entries by 1 day.
+
+### Cost sensitivity (are comparators robust?)
+
+| Strategy | sw/yr | Sharpe@7bps | Sharpe@10bps | Sharpe@13bps |
+|---|---|---|---|---|
+| Static 30% Nasdaq / 70% CSH2 | n/a | 0.94 | 0.94 | 0.94 |
+| Vol-target 10% 20d | n/a | 0.98 | 0.98 | 0.98 |
+| SMA200 Nasdaq else CSH2 | 5.1 | 0.91 | 0.90 | 0.89 |
+| VXN<=18 2-tier asym10d | 3.6 | 0.86 | 0.83 | 0.81 |
+| [REF] Run B raw | 31.8 | 0.41 | 0.30 | 0.19 |
+| [REF] Run B asym10d | 5.7 | 0.84 | 0.81 | 0.79 |
+
+**Cost sensitivity conclusion:** Even at 7 bps (optimistic), Static 30/70 (0.94) and vol-target (0.98) still beat deployed asym10d (0.84). D1 evidence is robust to cost assumption.
+
+### Vol-target grid (5-25% annualised target)
+
+| Vol target | Sharpe | Return% | MaxDD% | sh<2019 | sh≥2019 |
+|---|---|---|---|---|---|
+| 5% | **1.11** | +196 | **-8.7** | 0.96 | 1.33 |
+| 7% | 1.04 | +297 | -12.4 | 0.92 | 1.20 |
+| 8% | 1.01 | +355 | -14.2 | 0.91 | 1.16 |
+| 10% | 0.98 | +486 | -17.7 | 0.87 | 1.12 |
+| 12% | 0.96 | +634 | -21.0 | 0.84 | 1.11 |
+| 15% | 0.93 | +840 | -26.4 | 0.82 | 1.07 |
+| 20% | 0.88 | +1,055 | -34.8 | 0.79 | 0.99 |
+| 25% | 0.85 | +1,210 | -38.9 | 0.75 | 0.99 |
+
+**Reviewer only tested 10% and 15%.** Vol-target 5% hits Sharpe 1.11, DD -8.7% — only strategy in the comparator set to better the deployed asym10d on BOTH Sharpe AND drawdown simultaneously. Pre/post-2019 halves are consistent (0.96/1.33), not a regime fluke. Caveat: in-sample optimisation on one 19-year path.
+
+### Vol-target 5% rebalancing sensitivity (practical implementability)
+
+| Freq | Sharpe | Ret% | DD% | trades/yr | Realistic drag (£20k) |
+|---|---|---|---|---|---|
+| Daily | 1.11 | +196 | -8.7 | 251 | ~1.3%/yr (min £1 commission bites) |
+| Weekly (5d) | 1.12 | +210 | -8.5 | 50 | ~0.5%/yr |
+| 10d | 1.10 | +210 | -8.8 | 25 | **~0.25%/yr** |
+| Monthly (21d) | 1.04 | +189 | -8.4 | 12 | ~0.12%/yr |
+| Quarterly (63d) | 0.91 | +161 | -13.1 | 4 | ~0.04%/yr |
+
+**Practical conclusion:** Weekly or 10-day rebalancing retains essentially full Sharpe advantage (1.10-1.12) with ~0.25-0.5%/yr realistic cost drag from the £1 minimum commission on ~£270-£400 rebalancing trades. Daily rebalancing is expensive due to minimum commission; quarterly loses meaningful Sharpe. **Weekly or 10-day is the target implementation frequency.**
+
+Realistic drag estimate: N_trades × 2 sides × £1 / £20,000 pot (0.05% commission floor exceeds 5 bps for trades < £2k).
+
+### D4 bug scope (no code changes, read-only)
+
+Stamp duty + PTM bug lives in `broker/portfolio.py:148,185` — `IbkrTieredCost(ticker).cost()` called there for P&L accounting. Actual IBKR orders are correct (IBKR knows UCITS ETFs are exempt); only the local cash ledger is wrong. ISF.L entry: £10 real + £100 phantom stamp duty + £1 phantom PTM = £110.97 recorded. `allocation_manager.py:65 commission_pct=0.1` (2× too high) affects sell proceeds and buy sizing — leaves ~£100 of a £20k pot uninvested per round-trip.
+
+---
+
+## 2026-09-18 18:30 — Reviewer's comparators reproduced + data/tradability audit [SUSPECT]
+
+> **SUSPECT (marked 2026-09-19).** See the notice at the top of this log. Superseded by the 2026-09-19 (evening) entry; do not rely on the figures below.
+
+Tool: allocation/multi_tier_comparators_lse_lag.py (new; 7 tests). Same data and cost as prior entries.
+Journal: N/A
+
+Command:
+```
+uv run python -m Strategy_Auto_Trader.allocation.multi_tier_comparators_lse_lag
+```
+
+Window: 2007-11-20 .. 2026-09-15 (4,453 days). Costs: 13 bps per switch (discrete strategies only). Sub-period split: 2019-01-01.
+
+| Strategy | sw/yr | Sharpe | Ret % | MaxDD % | sh<2019 | sh≥2019 |
+|---|---|---|---|---|---|---|
+| [B&H] Nasdaq (EQGB proxy) | 0 | 0.77 | +1,208 | -51.4 | 0.59 | 1.02 |
+| [B&H] SPY | 0 | 0.57 | +433 | -54.7 | 0.37 | 0.88 |
+| [B&H] ISF.L | 0 | 0.26 | +71 | -46.5 | 0.13 | 0.48 |
+| [B&H] CSH2.L | 0 | (artifact)* | +34 | 0.00 | — | — |
+| Static 30% Nasdaq / 70% CSH2 (no cost) | 0 | **0.94** | +190 | -16.3 | 0.69 | 1.29 |
+| Vol-target 10% 20d (no tx cost) | 0 | **0.98** | +486 | -17.7 | 0.87 | 1.12 |
+| Vol-target 15% 20d (no tx cost) | 0 | **0.93** | +840 | -26.4 | 0.82 | 1.07 |
+| Nasdaq SMA200 else CSH2 (13bps/sw) | 5.2 | **0.89** | +814 | -23.8 | 0.67 | 1.15 |
+| VXN<=18 2-tier Nasdaq/CSH2 asym10d (13bps/sw) | 3.6 | 0.81 | +110 | -9.2 | 0.72 | 1.18 |
+| C2: T-1 close signal lag=2 (13bps/sw) | 30.9 | 0.21 | +31 | -29.7 | 0.23 | 0.20 |
+| [REF] Run B raw (13bps/sw) | 31.8 | 0.19 | +26 | -27.8 | 0.17 | 0.24 |
+| [REF] Run B asym10d (13bps/sw) | 5.7 | 0.79 | +132 | -14.2 | 0.55 | 1.36 |
+
+*CSH2.L synthetic has near-zero vol floor so Sharpe is not meaningful (10.89 printed, n/m).
+
+**Reviewer's numbers reproduced:** differences of ≤0.04 Sharpe and ≤55pp return on all rows vs TIER_STRATEGY_REVIEW.md §8. Vol-target returns differ by ~40-53pp (reviewer may have applied a rebalancing threshold; direction unchanged).
+
+**C2 timing (lag=2):** Sharpe 0.21 net, vs reviewer's 0.14. Small discrepancy may reflect switch-timing offset (switch cost attributed 1 day early in lag=2 implementation). Both are consistent with "timing uncertainty is dominated by the filter choice, not the lag."
+
+**Key findings for D1:**
+- Every parameter-free comparator beats the deployed strategy on Sharpe (0.94-0.98 vs 0.79).
+- Static 30/70 blend: 0.94 Sharpe, +190% return, -16.3% DD — no cost, no code, no switching. More stable across halves (0.69/1.29) than deployed asym10d (0.55/1.36).
+- Vol-target 10%: best overall (0.98 Sharpe, +486% return, best half-stability 0.87/1.12). Has no discrete switch cost, but requires daily position sizing vs CSH2.
+- VXN 2-tier asym10d: Sharpe 0.81, DD -9.2% — marginally better than deployed on both axes; confirms FTSE + SPY tiers add noise not alpha.
+- The tier strategy's edge is drawdown control only. The static blend matches it on drawdown (-16% vs -14%) while delivering 44% more return. Only the VXN 2-tier gives lower drawdown (-9.2%) than the static blend, but at lower Sharpe (0.81) and far less return (+110%).
+
+**Data/tradability audit (no IBKR access needed; code-verified):**
+- CSH2.L share class: `symbols.py` routes to `Stock("CSH2","LSE","GBP")` — GBP share class confirmed. BoE proxy tracks SONIA (correct for GBP class). Reviewer's EUR-class concern is unfounded.
+- EQGB proxy total-return: QQQ price-only 1999-03 to 2017-10, EQGB (accumulating = total-return by construction) 2017-10 to 2026-09. QQQ portion slightly understates total return by ~0.3-0.8%/yr (missed quarterly distributions). Not enough to change comparative conclusions.
+- SPY tradability: memory records IBKR Error 201 PRIIPs/KID on DUR166977 (UK retail, paper). SPY is only ~3-4% of days under deployed thresholds so conclusions barely move. D6 (SPY-heavy banded splits) remains dependent on SPY availability.
+- costs.py bugs confirmed from live fill: ISF.L entry shows £110.97 (expected ~£10 commission only). Breakdown: commission £9.97 + phantom stamp duty £99.97 + PTM levy £1.00 = £110.97. UCITS ETFs exempt from both. Also: `allocation_manager.py:65` has `commission_pct=0.1` (0.1%/side = 20 bps round-trip) vs IBKR actual 0.05% (10 bps round-trip). `_UK_SPREAD=0.0015` (15 bps half-spread) vs measured 1-4 bps.
+- tier_mode: True confirmed in app_status.json; current_asset=None (daemon restart reset in-memory state).
+
+Caveats: vol-target cost not modelled (continuous weight), C2 switch timing off by 1 day, one 19-year path.
+
+---
+
+## 2026-09-18 19:10 — 4-Tier run B: clean Nasdaq / SPY / FTSE split (SPY given its own VXN band) + FTSE-tier ablation [SUSPECT]
+
+> **SUSPECT (marked 2026-09-19).** See the notice at the top of this log. Superseded by the 2026-09-19 (evening) entry; do not rely on the figures below.
+
+Tool: allocation/multi_tier_split_sweep_lse_lag.py (new; 4 tests). Timing, cost and filter as in the 18:45 entry.
+Journal: N/A (allocator backtest, not live_sim)
+
+Command:
+```
+uv run python -m Strategy_Auto_Trader.allocation.multi_tier_split_sweep_lse_lag
+```
+
+Question: raising vxn_threshold "gives more room for S&P" — does it? **No, it does the opposite** in the deployed logic: Nasdaq is tested first (VXN <= threshold), SPY only gets VXN-above-threshold days with VIX <= vix_tier1 (15). With VXN 25 / 15 / 17.5 the tier shares are Nasdaq 58%, SPY 0%, FTSE 0%, cash 42% (asym10d). SPY is starved by the VIX <= 15 requirement plus the Nasdaq-first order, not by VXN.
+
+Tested structure (not the deployed allocator; `vxn2=inf` reproduces the deployed logic exactly, unit-tested):
+- Nasdaq (EQGB.L): VXN <= vxn1
+- SPY: vxn1 < VXN <= vxn2 and VIX <= vix1 (VXN missing counts as in-band)
+- FTSE (ISF.L): otherwise VIX <= vix2
+- cash (CSH2.L): otherwise
+
+290 configs (vxn1 16-25, vxn2 20-inf, vix1 15-25, vix2 17.5-35) x raw / asym10d, run B, 2007-11-20 .. 2026-09-15, net 13 bps per switch. "Balanced" = Nasdaq, SPY and FTSE each >= 15% of days (79 raw, 27 asym10d configs qualify). Shares are of days; Sharpe annualised.
+
+| Config (vxn1/vxn2/vix1/vix2), asym10d | Nasdaq/SPY/FTSE/cash | Sw/yr | Net Sharpe | Net ret % | Net DD % | Pre-2019 | 2019+ |
+|---|---|---|---|---|---|---|---|
+| deployed 18/inf/15/17.5 | 18/3/6/73 | 5.7 | 0.79 | +132 | -14.2 | 0.55 | 1.36 |
+| 25/inf/15/17.5 (raise VXN only) | 58/0/0/42 | 3.6 | 0.81 | +363 | -21.0 | 0.74 | 0.90 |
+| **18/25/25/35 (best balanced)** | 18/39/33/10 | 7.9 | 0.74 | +446 | -33.1 | 0.79 | 0.68 |
+| 22/28/25/35 | 41/19/29/11 | 8.7 | 0.67 | +383 | -32.3 | 0.65 | 0.71 |
+| 20/25/25/35 | 30/25/36/10 | 8.2 | 0.64 | +335 | -33.1 | 0.71 | 0.53 |
+| B&H Nasdaq (EQGB proxy) | 100/0/0/0 | 0 | 0.77 | +1,224 | -51.4 | 0.59 | 1.02 |
+
+Raw (no filter) balanced configs are worse: best 22/28/25/35 = Sharpe 0.62, DD -36.8%, ~28 switches/yr.
+
+**FTSE-tier ablation (asym10d, top balanced configs; FTSE days re-mapped):**
+
+| Config | as is | FTSE->SPY | FTSE->cash | FTSE->Nasdaq |
+|---|---|---|---|---|
+| 18/25/25/35 Sharpe / ret % / DD % | 0.74 / +446 / -33.1 | **0.75 / +510 / -28.8** | 0.78 / +256 / -15.9 | 0.60 / +336 / -39.6 |
+| 22/28/25/35 | 0.67 / +383 / -32.3 | **0.71 / +480 / -28.8** | 0.51 / +144 / -25.8 | 0.71 / +482 / -29.5 |
+
+**Key findings:**
+- A clean three-way split is reachable, but only by pushing SPY's VIX gate to 25 and the cash trigger to 35 (cash ~10% of days, crisis only). That gives up the drawdown protection: DD -31..-38% vs -14% for the deployed cash-heavy setup, at similar Sharpe (0.6-0.74 vs 0.79 and pure Nasdaq 0.77). It buys return (+335..+446% vs +132%), not risk-adjusted performance.
+- The FTSE tier does not earn its slot: re-mapping its days to SPY gives equal or better Sharpe, higher return and shallower drawdown in both configs (consistent with ISF.L B&H Sharpe 0.27 vs SPY 0.57). Re-mapping to cash lowers DD but throws away return. A 3-way split with FTSE is therefore an aesthetic choice, not one the data supports; Nasdaq + SPY + cash is at least as good.
+- Same selection-bias caveat as before: 580 config-filter rows on one 19-year path; differences of ~0.05 Sharpe are noise. Sub-period halves disagree (e.g. 0.79 vs 0.68).
+- Note: SPY trades in US hours and is USD; assumed cost includes ~2 bps FX only on average via the flat 13 bps; SPY-heavy configs may cost slightly more.
+
+**Conclusion (no decision taken):** if a balanced allocation is wanted, the evidence supports Nasdaq/SPY/cash (drop or de-emphasise FTSE ISF.L), not raising VXN alone. See HANDOFF decisions D3/D6.
+
+---
+
+## 2026-09-18 18:45 — 4-Tier run B: VXN / VIX threshold sweep incl. higher cash trigger (net 13 bps/switch) [SUSPECT]
+
+> **SUSPECT (marked 2026-09-19).** See the notice at the top of this log. Superseded by the 2026-09-19 (evening) entry; do not rely on the figures below.
+
+Tool: allocation/multi_tier_threshold_sweep_lse_lag.py (new; 4 tests). Sharpe now annualised in the allocation package itself (see note below).
+Journal: N/A (allocator backtest, not live_sim)
+
+Command:
+```
+uv run python -m Strategy_Auto_Trader.allocation.multi_tier_threshold_sweep_lse_lag
+```
+
+Run B, 2007-11-20 .. 2026-09-15, net 13 bps round trip per switch, 150 threshold sets (vxn_threshold x vix_tier1 x vix_tier2) x 2 filters (raw, asym hysteresis 10d). Deployed = 18 / 15 / 17.5. "vix2" = VIX level above which the strategy goes to cash (CSH2.L). vxn=1e9 means pure Nasdaq (= buy-and-hold EQGB proxy). Pre/post columns are net Sharpe on pre-2019 / 2019+ halves.
+
+| Thresholds (vxn/vix1/vix2) | Filter | Sw/yr | Net Sharpe | Net return % | Net max DD % | Pre-2019 | 2019+ |
+|---|---|---|---|---|---|---|---|
+| 18 / 15 / 17.5 (deployed) | raw | 31.8 | 0.19 | +26 | -27.8 | 0.17 | 0.24 |
+| 18 / 15 / 17.5 (deployed) | asym10d | 5.7 | 0.79 | +132 | -14.2 | 0.55 | 1.36 |
+| 25 / 15 / 17.5 | raw | 10.5 | 0.79 | +440 | -29.0 | 0.73 | 0.87 |
+| 25 / 15 / 17.5 | asym10d | 3.6 | 0.81 | +363 | -21.0 | 0.74 | 0.90 |
+| 25 / 20 / 35 (best full-period asym10d) | asym10d | 4.8 | 0.83 | +693 | -30.4 | 0.87 | 0.76 |
+| 22 / 15 / 17.5 | raw | 15.7 | 0.73 | +269 | -15.2 | 0.71 | 0.78 |
+| 1e9 (pure Nasdaq = B&H EQGB proxy) | either | 0 | 0.77 | +1,224 | -51.4 | 0.59 | 1.02 |
+| B&H SPY (reference) | - | - | 0.57 | +434 | -54.7 | - | - |
+
+**Cash trigger (vix2) at deployed vxn=18, asym10d:** 17.5 -> Sharpe 0.79 / DD -14.2; 20 -> 0.38 / -20.2; 22.5 -> 0.51 / -25.6; 25 -> 0.39 / -34.3; 30 -> 0.50 / -31.5; 35 -> 0.56 / -30.8; never-cash -> 0.57 / -46.5 (+371%). Raw filter improves monotonically with a higher cash trigger only because it switches less (31.8 -> 17.9/yr).
+
+**VXN threshold at deployed vix (asym10d):** 0 (no Nasdaq tier) 0.38; 16 0.49; 18 0.79; 20 0.52; 22 0.64; 25 0.81; 28 0.66; 30 0.69; 35 0.77; pure Nasdaq 0.77.
+
+**Key findings:**
+- Pushing the cash trigger above 17.5 does not help Sharpe at the deployed VXN threshold; it holds through drawdowns (DD -14% -> -25..-46%). The 17.5 value is not proven optimal (non-monotonic, noisy) but there is no evidence for a higher one. A high trigger only makes sense together with a high VXN threshold and then it buys return, not Sharpe: 25/20/35 = +693% at DD -30%.
+- vix_tier1 (SPY tier) is nearly irrelevant: SPY is only chosen when VXN > threshold and VIX <= vix1, which is rare. Changing 12/15/17.5/20 barely moves results.
+- Whole surface sits at Sharpe ~0.5-0.8 with the pure-Nasdaq point (0.77) in the middle. The best of 300 rows (0.83) is within noise of buy-and-hold EQGB. Thresholds trade drawdown against return; none gives a clearly better risk-adjusted result than holding Nasdaq.
+- The VXN>=25 variants look the most stable across halves (0.74 / 0.90) whereas the deployed 18 is lopsided (0.55 / 1.36), i.e. the deployed setting looks more like a lucky 2019+ fit.
+- Walk-forward pick (best pre-2019 Sharpe): asym10d -> 25/12/35, 0.87 pre -> 0.72 post; raw -> 25/15/17.5, 0.73 pre -> 0.87 post.
+
+Caveats: 150 sets on one 19-year path; Nasdaq tier history is proxy (EQGB_COMPLETE.csv) and CSH2 partly synthetic; flat 13 bps cost; SHV/CSH2 comparison NOT re-run (SHV tested and discarded earlier for underperforming in high-VIX periods).
+
+**Conclusion (no decision taken):** thresholds are not the lever; churn and the choice to hold Nasdaq at all are. See HANDOFF "Decisions pending".
+
+**Note on Sharpe scale:** the `_compute_summary` copies in `allocation/` (hmm_gated, multi_tier_allocator{,_4tier,_cadence,_hysteresis}, rotator) used `mean*252/std` (no sqrt) and are corrected to `mean/std*sqrt(252)` as of this entry (`live_sim.py` and the engine were already correct). Every earlier allocation-package Sharpe/Sortino in this log is on the OLD scale (~15.9x too high) and, being look-ahead, is invalid regardless; entries from 2026-09-18 16:45 onward quote the annualised figure.
+
+---
+
+## 2026-09-18 18:15 — 4-Tier run B: hysteresis / cadence filter sweep at 13 bps per switch (plan item 3) [SUSPECT]
+
+> **SUSPECT (marked 2026-09-19).** See the notice at the top of this log. Superseded by the 2026-09-19 (evening) entry; do not rely on the figures below.
+
+Tool: allocation/multi_tier_filter_sweep_lse_lag.py (new) + allocation/tier_filters.py (new, pure filters over the tier series; 9 tests)
+Journal: N/A (allocator backtest, not live_sim)
+
+Command:
+```
+uv run python -m Strategy_Auto_Trader.allocation.multi_tier_filter_sweep_lse_lag
+```
+
+Same run B as the 17:30/17:50 entries (tier from last VIX/VXN bar ended by 16:30 London, earns next day), 2007-11-20 .. 2026-09-15, net cost 13 bps round trip per switch. Re-tests the 2026-09-16 hysteresis/cadence rejection, which was made on the look-ahead model. Semantics differ from the old 3-tier hysteresis/cadence files: a switch needs the SAME target to persist. Higher tier number = more defensive. Sharpe annualised (÷√252).
+
+| Filter | Switches/yr | Gross Sharpe | Net Sharpe | Net return % | Net max DD % | Net Sharpe pre-2019 | Net Sharpe 2019+ |
+|---|---|---|---|---|---|---|---|
+| raw (no filter) | 31.8 | 0.66 | 0.19 | +26 | -27.8 | 0.17 | 0.24 |
+| hysteresis 2d | 14.7 | 0.55 | 0.34 | +61 | -27.2 | 0.26 | 0.48 |
+| hysteresis 5d | 5.3 | 0.69 | 0.61 | +160 | -20.7 | 0.63 | 0.60 |
+| hysteresis 10d | 1.5 | 0.70 | 0.68 | +225 | -19.3 | 0.80 | 0.51 |
+| hysteresis 20d | 0.5 | 0.79 | 0.78 | +302 | -28.5 | 0.76 | 0.81 |
+| hysteresis 60d | 0.11 | 0.67 | 0.67 | +229 | -29.3 | 0.57 | 0.83 |
+| asym hysteresis 2d (defensive immediate) | 21.6 | 0.76 | 0.41 | +71 | -24.8 | 0.33 | 0.56 |
+| asym hysteresis 5d | 12.2 | 0.66 | 0.44 | +69 | -21.2 | 0.34 | 0.64 |
+| **asym hysteresis 10d** | 5.7 | 0.90 | **0.79** | +132 | **-14.2** | 0.55 | 1.36 |
+| asym hysteresis 20d | 3.1 | 0.79 | 0.71 | +92 | -13.3 | 0.49 | 1.30 |
+| asym hysteresis 60d | 0.8 | 0.77 | 0.73 | +47 | -7.0 | 0.50 | n/m (14.3, near-cash) |
+| buy cadence 3d | 25.8 | 0.70 | 0.30 | +46 | -22.6 | 0.25 | 0.39 |
+| buy cadence 10d | 16.0 | 0.84 | 0.56 | +101 | -20.8 | 0.45 | 0.77 |
+| buy cadence 40d | 7.3 | 0.75 | 0.58 | +77 | -15.6 | 0.46 | 0.86 |
+| B&H EQGB proxy (reference) | - | - | 0.77 | +1,224 | -51.4 | - | - |
+| B&H SPY (reference) | - | - | 0.57 | +434 | -54.7 | - | - |
+
+(Full grid of 27 filters in the script output; rows above are a selection incl. every best-in-family.)
+
+**Key findings:**
+- The 2026-09-16 rejection of hysteresis/cadence is reversed: it was made on the look-ahead model. Under run B at realistic cost every filter beats the raw signal net (raw 0.19 net Sharpe; hysteresis >=2d 0.34+). Cost, not signal quality, is what churn destroys.
+- Best defensible row: asym hysteresis 10d (leave risk immediately, re-enter after 10 consecutive days): net Sharpe 0.79, +132%, DD -14.2%, 5.7 switches/yr. Matches B&H EQGB Sharpe (0.77) at ~1/4 of its drawdown but only ~1/9 of its return (+132% vs +1,224%).
+- Symmetric hysteresis >=20d is not a strategy: 0.1-0.5 switches/yr means it is effectively buy-and-hold of one tier (its 0.67-0.78 Sharpe ~= B&H EQGB 0.77). Asym 60d is mostly cash (2019+ Sharpe 14.3 is near-zero-vol artefact). Ignore those rows.
+- Nothing beats B&H EQGB on Sharpe by a meaningful margin. The tier signal's value is drawdown control, not return.
+
+Caveats: 27 filter configs tested on ONE 19-year path with only a few regime events (2008, 2020, 2022), so the "best" row is selection-biased and the surface is noisy (asym 5d 0.44 -> 10d 0.79 -> 15d 0.71). Pre-2019 vs 2019+ halves disagree on ordering (asym 10d 0.55 vs 1.36). Treat "filtering helps a lot" as robust and "10d is optimal" as not. EQGB/CSH2 history partly synthetic. Cost 13 bps assumed flat per switch.
+
+**Conclusion:** if the tier strategy stays live, add an asymmetric re-entry delay (~10 trading days, defensive moves immediate) — expect roughly equal Sharpe to holding Nasdaq with a quarter of the drawdown, not extra return. Whether to keep the strategy at all depends on wanting that drawdown profile versus simple B&H EQGB/SPY. Not implemented in the daemon.
+
+---
+
+## 2026-09-18 17:50 — 4-Tier per-switch cost: measured from IBKR quotes + cost model audit (plan item 4) [SUSPECT]
+
+> **SUSPECT (marked 2026-09-19).** See the notice at the top of this log. Superseded by the 2026-09-19 (evening) entry; do not rely on the figures below.
+
+Tool: ad-hoc IBKR `reqHistoricalTicks(BID_ASK)` probe (scratchpad, read-only, clientId 98) + `plugins/costs.py` / `state/execution_state.json` review; `multi_tier_backtest_lse_lag.py` cost grid now includes 13 bps.
+Journal: N/A
+
+**What real data exists:** exactly one tier fill (BUY ISF.L 1,902 @ 10.512, 2026-09-17). IBKR executions/commission reports are wiped by the nightly Gateway restart (reqExecutions returned 0), the daemon adapter never stores commission, and no 09-17 daemon log survives. So commission is not observed, only modelled. The one fill shows 9.5 bps vs `signal_price`, but the signal price is a delayed (type 3) quote, so that is not usable as slippage.
+
+**Measured quoted full spread (median, last 1,000 ticks ending ~16:30 London cutoff, 09-17 and 09-18):**
+
+| Asset | Full spread bps | Half-spread bps |
+|---|---|---|
+| ISF.L (tier 3) | 1.9 - 3.9 | 1.0 - 1.9 |
+| CSH2.L (tier 4) | 0.8 - 1.6 | 0.4 - 0.8 |
+| EQGB.L (tier 1) | 5.4 - 7.2 | 2.7 - 3.6 |
+| SPY (tier 2) | 0.3 | 0.15 |
+
+**Per-switch round trip (sell A + buy B) ≈ 13 bps of NAV:** commission 0.05%/side = 10 bps (model, IBKR UK tiered, 0.05% >> £1 min at £20k) + half-spreads on both legs 1-4 bps. SPY legs add an unmeasured GBP/USD conversion cost. Excludes market impact/limit-order behaviour.
+
+**Model bug found (not changed):** `IbkrTieredCost` adds 0.5% stamp duty on every `.L` buy. ISF/EQGB/CSH2 are Irish/Lux UCITS ETFs, which should be exempt from SDRT (verify ISINs). The ISF.L entry_cost of £110.97 = 0.5% + 0.055% is therefore ~£100 phantom stamp duty; any backtest using `ibkr_tiered` on these ETFs is overcharged ~50 bps per buy, and live pnl reporting subtracts it.
+
+| Run B (2007-11-20 .. 2026-09-15) | Sharpe (annualised) | Return % | Max DD % |
+|---|---|---|---|
+| 0 bps | 0.66 | +162 | -16.5 |
+| 10 bps | 0.30 | +49 | -25.0 |
+| **13 bps (measured estimate)** | **0.19** | **+26** | **-27.8** |
+| 20 bps | -0.06 | -15 | -33.9 |
+| B&H EQGB proxy / SPY | 0.77 / 0.57 | +1,224 / +434 | -51 / -55 |
+
+**Conclusion:** at realistic cost B earns ~+26% over 19 years (~1.3%/yr) against CSH2.L B&H +34%, with a worse drawdown than cash. At 31.8 switches/yr the strategy as configured does not pay its costs. Caveats: spread sampled over ~2 days near the cutoff only; backtest applies cost as one NAV haircut; history (EQGB/CSH2 proxy) is partly synthetic.
+
+---
+
+## 2026-09-18 17:30 — 4-Tier allocation run B: buy-and-hold benchmarks + per-switch cost [SUSPECT]
+
+> **SUSPECT (marked 2026-09-19).** See the notice at the top of this log. Superseded by the 2026-09-19 (evening) entry; do not rely on the figures below.
+
+Tool: allocation/multi_tier_backtest_lse_lag.py (extended: `_BENCHMARK_NAMES`, `switch_flags`, `net_of_switch_cost`; 11 tests)
+Journal: N/A (allocator backtest, not live_sim)
+
+Command:
+```
+uv run python -m Strategy_Auto_Trader.allocation.multi_tier_backtest_lse_lag
+```
+
+Window 2007-11-20 .. 2026-09-15, 4,452 days. Switch cost = assumed round-trip (sell+buy) bps deducted from the whole NAV on each day the held tier changes; not measured.
+
+| Run | Sharpe (annualised) | Return % | Max DD % |
+|---|---|---|---|
+| A look-ahead (biased) | 2.66 | +4,787 | -9.35 |
+| A' ideal-executable | 0.82 | +232 | -13.56 |
+| B live-faithful, 0 bps | 0.66 | +162 | -16.51 |
+| B net 10 bps/switch | 0.30 | +49 | -25.01 |
+| B net 20 bps/switch | -0.06 | -15 | -33.88 |
+| B net 50 bps/switch | -1.09 | -84 | -84.92 |
+| B&H EQGB (proxy) | 0.77 | +1,224 | -51.36 |
+| B&H SPY | 0.57 | +434 | -54.74 |
+| B&H ISF.L | 0.27 | +76 | -46.51 |
+| B&H CSH2.L (synthetic, ~zero vol) | n/m (10.88 degenerate) | +34 | 0.00 |
+
+Run B switches tier 562 times = 31.8/yr.
+
+**Key findings:**
+- Even with zero costs, B (Sharpe 0.66) does not beat B&H EQGB proxy (0.77) and has far lower return (+162% vs +1,224%). Its only edge is drawdown (-16.5% vs -51..-55%).
+- Churn dominates: at an assumed 10 bps round trip, Sharpe halves to 0.30 and return falls to +49%; at 20 bps the strategy loses money. The 4-tier rotation is not deployable at 32 switches/yr unless real round-trip cost is well under ~10 bps.
+- Previously logged 4-tier/3-tier headlines (Sharpe 38-42, +16,464%) remain invalid (look-ahead, see 2026-09-18 16:45).
+
+Caveats: cost bps are assumed (IBKR LSE min commission on a ~£10k pot is ~1 bp per side, plus ETF spread; measure real fills before trusting any cut-off). CSH2.L history is synthetic/proxy so its Sharpe is meaningless; EQGB history is a proxy (EQGB_COMPLETE.csv). Run B still assumes action at the 16:30 cutoff.
+
+**Conclusion:** Against buy-and-hold the tier strategy is a drawdown-reduction product, not an alpha source, and only survives if switching is cheap and rarer. Next: re-test hysteresis/cadence under run B (previous rejection was on the biased model), and measure real per-switch cost from paper fills.
+
+---
+
+## 2026-09-18 16:45 — 4-Tier allocation: look-ahead audit + cost of LSE trading hours (VIX/VXN moves while LSE shut) [SUSPECT]
+
+> **SUSPECT (marked 2026-09-19).** See the notice at the top of this log. Superseded by the 2026-09-19 (evening) entry; do not rely on the figures below.
 
 Tool: allocation/multi_tier_backtest_lse_lag.py (new; reuses `MultiTierAllocator4Tier.signal()` and `_compute_summary()` unchanged)
 Scope: 2007-11-20 to 2026-09-15 (4,452 trading days; start = real hourly VXN coverage). Live config: VXN<=18 -> EQGB.L, else VIX<=15 SPY, <=17.5 ISF.L, else CSH2.L. Hourly VIX/VXN = real IBKR (`data/cache/ibkr_hourly/INDEX_{VIX,VXN}.csv`, mtimes 2026-09-18 15:01 / 08:00, start-stamped bars so a bar counts only once it has ended). Asset daily closes = existing `load_synthetic_daily` blend (EQGB QQQ-proxy pre-2017, CSH2 BoE-proxy pre-2024). LSE cutoff = 16:30 Europe/London read from `config/overnight_strategy.json`.
