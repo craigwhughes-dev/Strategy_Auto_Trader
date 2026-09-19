@@ -160,41 +160,6 @@ def vol_target(
     return _run_blend(r_nasdaq, r_cash, target_w, cadence_days, deadband, cost_fn, inp)
 
 
-def vxn_scaled_blend(
-    inp: Inputs,
-    enter_at: float = 23.0,
-    full_weight_at: float = 15.0,
-    cadence_days: int = _CADENCE_DAYS,
-    deadband: float = _DEADBAND,
-    pot_gbp: float = POT_GBP,
-    include_spread: bool = False,
-) -> Run:
-    """Nasdaq weight scales linearly from 0 at VXN=enter_at to 1 at VXN=full_weight_at.
-
-    Weight formula: clamp((enter_at - VXN) / (enter_at - full_weight_at), 0, 1).
-    Uses last intraday VXN reading per day, lagged by 1 day to avoid look-ahead.
-    Rebalanced weekly when drift exceeds deadband; cost = partial_rebalance_cost_bps.
-    """
-    dr = _daily_simple_ret(inp)
-    r_nasdaq = dr[:, _NASDAQ]
-    r_cash = dr[:, _CASH]
-
-    n_days = len(inp.days)
-    daily_vxn = np.full(n_days, np.nan)
-    for d in range(n_days):
-        mask = inp.day_codes == d
-        valid = inp.vxn[mask]
-        valid = valid[~np.isnan(valid)]
-        if len(valid) > 0:
-            daily_vxn[d] = valid[-1]
-
-    raw_w = (enter_at - daily_vxn) / (enter_at - full_weight_at)
-    target_w = pd.Series(raw_w).clip(0.0, 1.0).shift(1).fillna(0.0).to_numpy()
-
-    cost_fn = lambda dw: partial_rebalance_cost_bps(dw, pot_gbp, include_spread=include_spread)
-    return _run_blend(r_nasdaq, r_cash, target_w, cadence_days, deadband, cost_fn, inp)
-
-
 def sma_vol_target(
     inp: Inputs,
     target_vol: float = 0.05,
