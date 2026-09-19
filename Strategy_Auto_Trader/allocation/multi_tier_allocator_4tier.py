@@ -245,11 +245,11 @@ class MultiTierAllocator4Tier:
         total_ret = (final_nav - initial_cash) / initial_cash * 100
         mean_ret = np.mean(returns)
         std_ret = np.std(returns, ddof=1)
-        sharpe = (mean_ret * 252 / std_ret) if std_ret > 0 else 0.0
+        sharpe = (mean_ret / std_ret * np.sqrt(252)) if std_ret > 0 else 0.0
 
         down_rets = returns[returns < 0]
         downside_std = np.std(down_rets, ddof=1) if len(down_rets) > 1 else 0.0
-        sortino = (mean_ret * 252 / downside_std) if downside_std > 0 else 0.0
+        sortino = (mean_ret / downside_std * np.sqrt(252)) if downside_std > 0 else 0.0
 
         navs = np.cumprod(1 + returns)
         running_max = np.maximum.accumulate(navs)

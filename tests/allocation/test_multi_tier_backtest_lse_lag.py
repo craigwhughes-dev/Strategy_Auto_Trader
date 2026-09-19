@@ -10,7 +10,9 @@ from Strategy_Auto_Trader.allocation.multi_tier_backtest_lse_lag import (
     bars_by_end_time,
     compare,
     load_lse_cutoff,
+    net_of_switch_cost,
     strategy_returns,
+    switch_flags,
     tier_series,
     value_asof,
 )
@@ -99,3 +101,43 @@ def test_lookahead_run_matches_existing_allocator_backtest():
     mine = strategy_returns(result["close_tiers"], rets, lag=0) * 100
     theirs = ref["daily_nav"].set_index("date")["daily_return_pct"].loc[mine.index]
     np.testing.assert_allclose(mine.values, theirs.values, atol=1e-9)
+
+
+def test_switch_flags_count_changes_in_held_tier_only():
+    dates = pd.date_range("2024-01-01", periods=6)
+    tiers = pd.Series([2, 2, 4, 4, 2, 2], index=dates)
+    flags = switch_flags(tiers, dates)
+    # held (lag 1) = [nan,2,2,4,4,2]; changes on day 3 (2->4) and day 5 (4->2); day 1 has no prior
+    assert list(flags) == [False, False, False, True, False, True]
+
+
+def test_net_of_switch_cost_only_hits_switch_days():
+    dates = pd.date_range("2024-01-01", periods=3)
+    r = pd.Series([0.01, 0.01, 0.01], index=dates)
+    sw = pd.Series([False, True, False], index=dates)
+    net = net_of_switch_cost(r, sw, round_trip_bps=100)
+    np.testing.assert_allclose(net.iloc[[0, 2]], 0.01)
+    np.testing.assert_allclose(net.iloc[1], 1.01 * 0.99 - 1)
+
+
+def test_compare_reports_benchmarks_and_costs_monotonic():
+    dates = pd.bdate_range("2024-01-02", periods=40)
+    rng = np.random.default_rng(1)
+    rets = pd.DataFrame(rng.normal(0.0003, 0.01, (len(dates), 4)), index=dates, columns=[1, 2, 3, 4])
+    vix_vals = np.tile([12.0, 22.0], len(dates) // 2)
+    vxn_vals = np.tile([25.0, 15.0], len(dates) // 2)
+
+    def hourly(vals):
+        rows = []
+        for d, v in zip(dates, vals):
+            rows += [(f"{d.date()} 15:00", v), (f"{d.date()} 19:00", v)]
+        return _bars(rows)
+
+    res = compare(rets, hourly(vxn_vals), hourly(vix_vals), TZ, CUTOFF)
+    common = res["summaries"]["B_live"]["n_days"]
+    assert {"B&H SPY", "B&H CSH2.L"} <= set(res["benchmarks"])
+    assert res["benchmarks"]["B&H SPY"]["n_days"] == common
+    assert res["n_switches_b"] > 0
+    rets_by_cost = [s["total_return_pct"] for s in res["net_summaries"].values()]
+    assert rets_by_cost == sorted(rets_by_cost, reverse=True)
+    assert rets_by_cost[0] == res["summaries"]["B_live"]["total_return_pct"]

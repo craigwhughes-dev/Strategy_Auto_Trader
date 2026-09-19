@@ -15,7 +15,8 @@ A -> A' = pure look-ahead in the existing backtests. A' -> B = cost of the LSE-h
 
 Hourly IBKR bars are start-stamped, so a bar's Close only counts once the bar has ended.
 Daily asset closes come from load_synthetic_daily (real + Brownian-bridge blend); only
-VIX/VXN hourly timing is real wall-clock. No transaction costs modelled in any run.
+VIX/VXN hourly timing is real wall-clock. Runs A/A'/B carry no transaction costs; B is also
+reported net of an assumed round-trip cost per tier switch, next to buy-and-hold of each tier asset.
 """
 
 from __future__ import annotations
@@ -38,6 +39,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CONFIG_PATH = _REPO_ROOT / "config" / "overnight_strategy.json"
 _TIERS = (1, 2, 3, 4)
 _DEFENSIVE_TIER = 4
+# Tier 1 is the EQGB proxy (EQGB_COMPLETE.csv), so its buy-and-hold row is only as good as that proxy.
+_BENCHMARK_NAMES = {1: "B&H EQGB(proxy)", 2: "B&H SPY", 3: "B&H ISF.L", 4: "B&H CSH2.L"}
+# Round-trip (sell + buy) cost per tier switch, in bps of NAV. 13 = IBKR tiered commission 0.05%/side (10 bps)
+# + measured quoted half-spreads on both legs (~2-4 bps), 2026-09-18 BID_ASK ticks at the 16:30 cutoff; no stamp
+# duty (UCITS ETFs). The other points bracket it.
+_COST_BPS = (0.0, 10.0, 13.0, 20.0, 50.0)
 
 
 def load_lse_cutoff(config_path: Path = _CONFIG_PATH) -> tuple[str, time]:
@@ -100,6 +107,19 @@ def summarise(returns: pd.Series, initial_cash: float) -> dict:
     return MultiTierAllocator4Tier._compute_summary(returns.values, initial_cash, final)
 
 
+def switch_flags(tiers: pd.Series, index: pd.DatetimeIndex, lag: int = 1) -> pd.Series:
+    """True on each date where the tier held (chosen `lag` days earlier) differs from the previous date's."""
+    held = tiers.shift(lag).reindex(index)
+    prev = held.shift(1)
+    return (held != prev) & prev.notna()
+
+
+def net_of_switch_cost(returns: pd.Series, switches: pd.Series, round_trip_bps: float) -> pd.Series:
+    """Deduct a round-trip (sell + buy) cost from the return of every day a switch happens."""
+    cost = switches.reindex(returns.index).fillna(False).astype(float) * round_trip_bps / 1e4
+    return (1 + returns) * (1 - cost) - 1
+
+
 def compare(
     tier_returns: pd.DataFrame,
     vxn_hourly: pd.DataFrame,
@@ -107,6 +127,7 @@ def compare(
     tz: str,
     cutoff: time,
     initial_cash: float = 100_000.0,
+    cost_bps: tuple[float, ...] = _COST_BPS,
 ) -> dict:
     dates = tier_returns.index
     vxn_end, vix_end = bars_by_end_time(vxn_hourly), bars_by_end_time(vix_hourly)
@@ -124,8 +145,18 @@ def compare(
     differ = (close_tiers != cutoff_tiers).reindex(dates)
     # tier chosen on T earns T+1: attribute the P&L gap to the deciding day T
     gap = (runs["A'_ideal"] - runs["B_live"]).shift(-1).reindex(dates)
+    b_switches = switch_flags(cutoff_tiers, common)
+    years = len(common) / 252
+    benchmarks = {name: tier_returns[t].loc[common] for t, name in _BENCHMARK_NAMES.items()}
+    net = {
+        f"B_live net {bps:g}bps/switch": net_of_switch_cost(runs["B_live"], b_switches, bps) for bps in cost_bps
+    }
     return {
         "summaries": {k: summarise(v, initial_cash) for k, v in runs.items()},
+        "benchmarks": {k: summarise(v, initial_cash) for k, v in benchmarks.items()},
+        "net_summaries": {k: summarise(v, initial_cash) for k, v in net.items()},
+        "n_switches_b": int(b_switches.sum()),
+        "switches_per_year_b": float(b_switches.sum() / years),
         "n_days": len(common),
         "n_differ": int(differ.sum()),
         "n_missed_riskoff": int(((close_tiers == _DEFENSIVE_TIER) & (cutoff_tiers != _DEFENSIVE_TIER)).sum()),
@@ -154,17 +185,29 @@ def build_tier_returns(data_dir: Path, start: str, end: str) -> pd.DataFrame:
 
 def _print_report(result: dict, start: str, end: str) -> None:
     print(f"\n4-TIER LSE-HOURS LAG  {start} .. {end}  ({result['n_days']} days)")
-    # _compute_summary's sharpe is mean*252/std (no sqrt): divide by sqrt(252) for the conventional figure
-    print("| Run | Sharpe (repo) | Sharpe (annualised) | Sortino (repo) | Return % | Max DD % |")
-    print("|---|---|---|---|---|---|")
-    for name, s in result["summaries"].items():
-        print(
-            f"| {name} | {s['sharpe']:.2f} | {s['sharpe'] / np.sqrt(252):.2f} | {s['sortino']:.2f} "
-            f"| {s['total_return_pct']:.1f} | {s['max_drawdown_pct']:.2f} |"
-        )
+    print("| Run | Sharpe (annualised) | Sortino (annualised) | Return % | Max DD % |")
+    print("|---|---|---|---|---|")
+    for group in ("summaries", "net_summaries", "benchmarks"):
+        for name, s in result[group].items():
+            print(
+                f"| {name} | {s['sharpe']:.2f} | {s['sortino']:.2f} "
+                f"| {s['total_return_pct']:.1f} | {s['max_drawdown_pct']:.2f} |"
+            )
+    print(f"\nRun B tier switches: {result['n_switches_b']} ({result['switches_per_year_b']:.1f}/yr)")
     print(f"\nDays cutoff-tier != full-close-tier: {result['n_differ']} of {result['n_days']}")
     print(f"  of which full-close says defensive (CSH2.L) but cutoff did not: {result['n_missed_riskoff']}")
     print(f"  A' minus B summed daily return on those days: {result['gap_on_differ_days_pct']:+.2f}%")
+
+
+def load_inputs(data_dir: str, hourly_cache: str, start: str, end: str):
+    """(tz, cutoff, vix_hourly, vxn_hourly, tier_returns) shared by every run-B style script."""
+    tz, cutoff = load_lse_cutoff()
+    cache = Path(hourly_cache)
+    vix = load_hourly_index(cache / "INDEX_VIX.csv")
+    vxn = load_hourly_index(cache / "INDEX_VXN.csv")
+    tier_returns = build_tier_returns(Path(data_dir), start, end)
+    _log.info(f"LSE cutoff {cutoff} {tz}; VIX bars {len(vix)}, VXN bars {len(vxn)}, days {len(tier_returns)}")
+    return tz, cutoff, vix, vxn, tier_returns
 
 
 def main() -> None:
@@ -176,12 +219,7 @@ def main() -> None:
     args = p.parse_args()
     logging.basicConfig(level=logging.INFO)
 
-    tz, cutoff = load_lse_cutoff()
-    cache = Path(args.hourly_cache)
-    vix = load_hourly_index(cache / "INDEX_VIX.csv")
-    vxn = load_hourly_index(cache / "INDEX_VXN.csv")
-    tier_returns = build_tier_returns(Path(args.data_dir), args.start_date, args.end_date)
-    _log.info(f"LSE cutoff {cutoff} {tz}; VIX bars {len(vix)}, VXN bars {len(vxn)}, days {len(tier_returns)}")
+    tz, cutoff, vix, vxn, tier_returns = load_inputs(args.data_dir, args.hourly_cache, args.start_date, args.end_date)
     _print_report(compare(tier_returns, vxn, vix, tz, cutoff), args.start_date, args.end_date)
 
 
