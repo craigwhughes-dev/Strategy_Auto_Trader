@@ -445,28 +445,33 @@ class IBKRDataClient:
         return merged
 
     def fetch_index_hourly(self, symbol: str, exchange: str, currency: str = "USD",
-                            historical_only: bool = False) -> pd.DataFrame | None:
+                            historical_only: bool = False, aligned: bool = True) -> pd.DataFrame | None:
         """Fetch hourly OHLCV for a market index (e.g. VIX on CBOE).
 
         Same incremental-cache shape as fetch_index_daily but with hourly bars.
         Cache key is INDEX_{symbol} in ibkr_hourly/ to keep index hourly separate from stocks.
         historical_only: skip the live gap-fill when a cache exists — set True
-        for pure backtests so live_sim doesn't compete with the daemon for pacing."""
+        for pure backtests so live_sim doesn't compete with the daemon for pacing.
+        aligned: True (default) returns bars re-labelled onto the :30 grid by _resample_30min_aligned
+        (yfinance convention, for the HMM). False returns the RAW IBKR bars stamped by bar START,
+        which is what the tier allocator needs: after re-labelling, the bar stamped 13:30 holds the raw
+        bar that ends at 15:00, so a "has this bar ended" test on the label is an hour early."""
+        shape = _resample_30min_aligned if aligned else (lambda df: df)
         cache_key = f"INDEX_{symbol}"
         cached = _load_cache(cache_key, CACHE_DIR)
 
         if historical_only and cached is not None:
-            return _resample_30min_aligned(cached)
+            return shape(cached)
 
         owns_connection = self._ib is None
         if owns_connection and not self.connect():
-            return _resample_30min_aligned(cached) if cached is not None else None
+            return shape(cached) if cached is not None else None
 
         try:
             from ib_async import Index
             contract = Index(symbol, exchange, currency)
             if not self._qualify(symbol, contract):
-                return _resample_30min_aligned(cached) if cached is not None else None
+                return shape(cached) if cached is not None else None
             if cached is not None:
                 new_df = self._fetch_pages(contract, stop_at=cached.index[-1],
                                            bar_size="1 hour", page_duration="6 M")
@@ -475,7 +480,7 @@ class IBKRDataClient:
                                            bar_size="1 hour", page_duration="6 M")
         except Exception:
             logger.warning("fetch_index_hourly(%s/%s) failed", symbol, exchange, exc_info=True)
-            return _resample_30min_aligned(cached) if cached is not None else None
+            return shape(cached) if cached is not None else None
         finally:
             if owns_connection:
                 self.disconnect()
@@ -487,10 +492,10 @@ class IBKRDataClient:
             merged = new_df
 
         if merged.empty:
-            return _resample_30min_aligned(cached) if cached is not None else None
+            return shape(cached) if cached is not None else None
         if not new_df.empty:
             _save_cache(cache_key, merged, CACHE_DIR)
-        return _resample_30min_aligned(merged)
+        return shape(merged)
 
     def fetch_recent_raw(self, ticker: str, lookback_days: int,
                           what_to_show: str = "TRADES") -> pd.DataFrame | None:

@@ -175,36 +175,38 @@ def vix_regime() -> dict:
 # VIX as HMM observable (for 2D HMM)
 # ---------------------------------------------------------------------------
 
-def fetch_vix_hourly(period: str = "730d") -> pd.DataFrame | None:
-    """Fetch hourly VIX from IBKR cache (incremental tail-fetch).
-
-    Returns full OHLCV DataFrame, not just Close series.
-    Uses IBKRDataClient's fetch_index_hourly with cache.
-    """
+def _fetch_index_hourly(symbol: str, aligned: bool) -> pd.DataFrame | None:
     try:
         from ..broker.ibkr_data import IBKRDataClient
-        vix_df = IBKRDataClient(client_id=2).fetch_index_hourly("VIX", "CBOE", "USD", historical_only=False)
-        if vix_df is None or vix_df.empty:
+        df = IBKRDataClient(client_id=2).fetch_index_hourly(symbol, "CBOE", "USD", historical_only=False, aligned=aligned)
+        if df is None or df.empty:
             return None
-        return vix_df
+        return df
     except Exception:
         return None
+
+
+def fetch_vix_hourly(period: str = "730d") -> pd.DataFrame | None:
+    """Fetch hourly VIX from IBKR cache (incremental tail-fetch), re-labelled onto the :30 grid.
+
+    Returns full OHLCV DataFrame, not just Close series.
+    """
+    return _fetch_index_hourly("VIX", aligned=True)
 
 
 def fetch_vxn_hourly(period: str = "730d") -> pd.DataFrame | None:
-    """Fetch hourly VXN (Nasdaq volatility) from IBKR cache.
+    """Fetch hourly VXN (Nasdaq volatility) from IBKR cache, re-labelled onto the :30 grid."""
+    return _fetch_index_hourly("VXN", aligned=True)
 
-    Returns full OHLCV DataFrame, not just Close series.
-    Uses IBKRDataClient's fetch_index_hourly with cache.
-    """
-    try:
-        from ..broker.ibkr_data import IBKRDataClient
-        vxn_df = IBKRDataClient(client_id=2).fetch_index_hourly("VXN", "CBOE", "USD", historical_only=False)
-        if vxn_df is None or vxn_df.empty:
-            return None
-        return vxn_df
-    except Exception:
-        return None
+
+def fetch_vix_hourly_raw() -> pd.DataFrame | None:
+    """Hourly VIX with RAW IBKR bar-start stamps — for the tier allocator's completed-bar reading."""
+    return _fetch_index_hourly("VIX", aligned=False)
+
+
+def fetch_vxn_hourly_raw() -> pd.DataFrame | None:
+    """Hourly VXN with RAW IBKR bar-start stamps — for the tier allocator's completed-bar reading."""
+    return _fetch_index_hourly("VXN", aligned=False)
 
 
 # ---------------------------------------------------------------------------

@@ -580,3 +580,41 @@ class TestCacheRoundTrip:
     def test_missing_cache_returns_none(self, tmp_path, monkeypatch):
         monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
         assert ibkr_data._load_cache("NOPE") is None
+
+
+class TestFetchIndexHourlyAlignment:
+    """The tier allocator decides whether an hourly VIX/VXN bar has ENDED from its start stamp, so it needs
+    the raw IBKR stamps. The default (HMM) return re-labels bars onto the :30 grid, where the bar stamped
+    13:30 holds the raw bar that ends at 15:00 — an hour later than the label implies."""
+
+    RAW_STAMPS = ["2026-09-16 13:30", "2026-09-16 14:00", "2026-09-16 15:00", "2026-09-16 16:00"]
+
+    def _cached(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
+        idx = pd.DatetimeIndex(self.RAW_STAMPS, tz="UTC")
+        df = pd.DataFrame({"Open": [17.0, 17.1, 17.2, 17.3], "High": [17.5] * 4, "Low": [16.5] * 4,
+                           "Close": [17.05, 17.15, 17.25, 17.35], "Volume": [0.0] * 4}, index=idx)
+        ibkr_data._save_cache("INDEX_VIX", df, tmp_path)
+        return df
+
+    def test_default_return_is_relabelled_onto_the_30_minute_grid(self, tmp_path, monkeypatch):
+        raw = self._cached(tmp_path, monkeypatch)
+        out = IBKRDataClient().fetch_index_hourly("VIX", "CBOE", historical_only=True)
+        assert list(out.index.strftime("%H:%M")) == ["13:30", "14:30", "15:30"]
+        assert out["Close"].iloc[0] == raw["Close"].iloc[1]  # label 13:30 carries the bar that starts 14:00
+
+    def test_aligned_false_returns_the_raw_bar_start_stamps(self, tmp_path, monkeypatch):
+        raw = self._cached(tmp_path, monkeypatch)
+        out = IBKRDataClient().fetch_index_hourly("VIX", "CBOE", historical_only=True, aligned=False)
+        assert list(out.index) == list(raw.index)
+        assert out["Close"].tolist() == raw["Close"].tolist()
+
+    def test_feed_ignores_the_forming_bar_on_raw_stamps_but_not_on_relabelled_ones(self, tmp_path, monkeypatch):
+        from Strategy_Auto_Trader.allocation.index_feed import latest_completed_close
+        self._cached(tmp_path, monkeypatch)
+        client = IBKRDataClient()
+        now = pd.Timestamp("2026-09-16 14:30", tz="UTC")  # the 14:00 raw bar (ends 15:00) is still forming
+        raw = client.fetch_index_hourly("VIX", "CBOE", historical_only=True, aligned=False)
+        relabelled = client.fetch_index_hourly("VIX", "CBOE", historical_only=True)
+        assert latest_completed_close(raw, now)[0] == 17.05          # the 13:30 bar, ended 14:00
+        assert latest_completed_close(relabelled, now)[0] == 17.15   # would wrongly return the forming bar

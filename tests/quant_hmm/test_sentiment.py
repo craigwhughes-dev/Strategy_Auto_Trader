@@ -231,3 +231,41 @@ class TestSentiment:
         assert result["sentiment_label"] == "neutral"
         assert result["sentiment_score"] == 0.0
         assert result["confidence"] == 0
+
+
+class TestRawIndexHourly:
+    """fetch_*_hourly keep the :30-relabelled frames the HMM expects; the *_raw variants hand the tier
+    allocator the untouched IBKR bar-start stamps."""
+
+    @pytest.mark.parametrize("func,symbol,aligned", [
+        ("fetch_vix_hourly", "VIX", True), ("fetch_vxn_hourly", "VXN", True),
+        ("fetch_vix_hourly_raw", "VIX", False), ("fetch_vxn_hourly_raw", "VXN", False),
+    ])
+    def test_alignment_flag_and_symbol(self, monkeypatch, func, symbol, aligned):
+        from Strategy_Auto_Trader.broker import ibkr_data
+        from Strategy_Auto_Trader.quant_hmm import sentiment
+        frame = pd.DataFrame({"Close": [16.0]}, index=pd.DatetimeIndex(["2026-09-16 14:00"], tz="UTC"))
+        client = mock.Mock()
+        client.fetch_index_hourly.return_value = frame
+        monkeypatch.setattr(ibkr_data, "IBKRDataClient", lambda client_id: client)
+        assert getattr(sentiment, func)() is frame
+        client.fetch_index_hourly.assert_called_once_with(symbol, "CBOE", "USD", historical_only=False, aligned=aligned)
+
+    def test_returns_none_when_nothing_comes_back_or_it_fails(self, monkeypatch):
+        from Strategy_Auto_Trader.broker import ibkr_data
+        from Strategy_Auto_Trader.quant_hmm import sentiment
+        client = mock.Mock()
+        client.fetch_index_hourly.return_value = None
+        monkeypatch.setattr(ibkr_data, "IBKRDataClient", lambda client_id: client)
+        assert sentiment.fetch_vix_hourly_raw() is None
+        client.fetch_index_hourly.side_effect = ConnectionError("gateway down")
+        assert sentiment.fetch_vxn_hourly_raw() is None
+
+
+def test_daemon_tier_block_feeds_the_allocator_raw_bars():
+    """Guard: if the tier block went back to the :30-relabelled frames, completed-bar logic would be an hour early."""
+    import inspect
+
+    from Strategy_Auto_Trader.markov_cli import live_daemon
+    src = inspect.getsource(live_daemon.process_cycle)
+    assert "fetch_vix_hourly_raw" in src and "fetch_vxn_hourly_raw" in src

@@ -1251,7 +1251,8 @@ def process_cycle(
     # Multi-tier allocation rebalance — runs once per cycle, after main signal execution.
     # 4-tier rebalance: Nasdaq/EQGB.L (VXN), SPY (VIX≤15), ISF.L (15<VIX≤17.5), CSH2.L (VIX>17.5).
     if allocation_mgr is not None:
-        from ..quant_hmm.sentiment import fetch_vix_hourly as _fetch_vix_hourly, fetch_vxn_hourly as _fetch_vxn_hourly
+        # RAW bar-start stamps, not the :30-relabelled frames: IndexFeed decides whether a bar has ended from its stamp.
+        from ..quant_hmm.sentiment import fetch_vix_hourly_raw as _fetch_vix_hourly, fetch_vxn_hourly_raw as _fetch_vxn_hourly
         logger.debug(f"[{market_name}] Allocation: getting VIX/VXN latest completed hourly bars")
 
         vix_current = allocation_mgr._get_vix_current(_fetch_vix_hourly)
