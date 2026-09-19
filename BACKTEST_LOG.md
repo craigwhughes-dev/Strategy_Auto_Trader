@@ -15,6 +15,101 @@ Running log of every backtest/scan run — newest entry on top. One block per ru
 
 ---
 
+## 2026-09-19 (late night, addendum) — D2 asymmetric re-entry (8d) annual breakdown: REJECTED
+
+**Command:** inline script on `allocation/intraday_engine.py` — not committed. D2 = daily state machine: exit immediately when VXN > 24, re-enter only after ≥8 consecutive days with VXN ≤ 23. Same data, same-bar fill, 13 bps/switch.
+
+| | 26yr xSh | 26yr sw/yr | 26yr ret% | since-2007 xSh | recent xSh | recent sw/yr |
+|---|---|---|---|---|---|---|
+| Current rule (no D2) | +0.76 | 7.4 | +2,242% | +0.96 | +0.37 | 18.4 |
+| D2 asym-8d | +0.70 | 3.2 | +1,556% | +0.88 | **-0.01** | 8.0 |
+| B&H Nasdaq | +0.44 | — | +1,785% | +0.83 | +0.75 | — |
+
+Selected years showing why D2 fails:
+
+| Year | Current | D2 8d | Note |
+|---|---|---|---|
+| 2009 | +7.2 | +4.0 | VXN stayed high → missed Nasdaq +43% recovery |
+| 2010 | +33.7 | +20.0 | Slow re-entry through bull year |
+| 2019 | +14.7 | +19.1 | D2 wins — fewer whipsaws |
+| 2021 | +12.7 | +22.1 | D2 wins |
+| 2022 | -2.7 | +1.5 | D2 wins — faster exit |
+| 2024 | +18.2 | +9.9 | D2 loses badly — delayed through the bull run |
+
+**Finding:** D2 helps in whipsaw years (2019, 2021, 2022) but costs too much in recovery years (2009, 2010, 2024) where speed of re-entry matters. xSharpe drops on all windows including recent (0.37 → -0.01). Recent underperformance vs comparators is not a churn problem — VXN has been range-bound near the threshold during an exceptional Nasdaq bull run. That's the expected behaviour of a vol-gated strategy, not a flaw.
+
+**Decision: D2 rejected.** No code written. Current rule kept as-is.
+
+---
+
+## 2026-09-19 (late night) — Cost sensitivity + comparators on intraday engine (D1 / D4)
+
+**Commands:**
+```
+uv run python -m Strategy_Auto_Trader.allocation.tier_cost_helper
+uv run python -m Strategy_Auto_Trader.allocation.intraday_comparators
+uv run python scripts/tier_analysis/annual_tier_current.py   # sanity check
+```
+**New code:** `allocation/tier_cost_helper.py`, `allocation/intraday_comparators.py`, `tests/allocation/test_tier_cost_helper.py` (11 tests), `tests/allocation/test_intraday_comparators.py` (12 tests). All 23 pass.
+**Dataset:** `data_synthetic/hourly_spliced/`, same as the 2026-09-19 (evening) entry. Same caveats apply (bridged 1999-2007, estimated pre-2007 VXN, USD proxies before 2004/2005). Same-bar fill, intraday engine.
+
+### A. Stamp-duty fix does NOT affect tier backtests
+
+`grep -ln "IbkrTieredCost|make_cost_model" Strategy_Auto_Trader/allocation/*.py` → no output. All allocation scripts use flat bps (`intraday_engine.DEFAULT_COST_BPS`), not `IbkrTieredCost`. Commit `aa32dca` (D4 fix) changes the portfolio ledger and per-share cost simulation, not the tier backtest engine. Re-running the 26yr backtest unchanged produces identical numbers.
+
+Sanity check reproduced: strategy +2,242%, xSharpe +0.76, maxDD -21.5%, 7.4 sw/yr. ✓
+
+### B. Cost sensitivity (per-switch bps and sweep)
+
+At £20,000 pot (EQGB.L ↔ CSH2.L, UCITS ETF — no stamp duty, no PTM levy):
+- Commission only (0.05%/side, min £1): **10.0 bps** (£10 sell + £10 buy)
+- With ETF spread (~3 bps/side, measured median): **16.0 bps**
+- Flat DEFAULT_COST_BPS = **13.0 bps** — bracketed by the two, reasonable
+
+Partial rebalance at £20k (for vol-target sizing): for |Δw| ≤ 10%, the IBKR min (£1/side) dominates — cost is flat at 1 bps of NAV per rebalance (£2 total / £20k). At 30 rebalances/yr: ~30 bps/yr drag = ~£6/yr at £20k. Negligible vs xSharpe differences.
+
+**Sensitivity sweep (two-state VXN 23/24 deadband, same-bar fill):**
+
+| Window | B&H Nasdaq | | 10 bps | 13 bps (default) | 16 bps | 26 bps |
+|---|---|---|---|---|---|---|
+| 26yr | xSh +0.44 | two-state | +0.78 | +0.76 | +0.74 | +0.68 |
+| 26yr | | plain VXN≤24 | +0.80 | +0.76 | +0.73 | +0.61 |
+| since-2007 | xSh +0.83 | two-state | +0.99 | +0.96 | +0.94 | +0.86 |
+| since-2007 | | plain VXN≤24 | +0.98 | +0.94 | +0.90 | +0.75 |
+| recent 2024 | xSh +0.75 | two-state | +0.42 | +0.37 | +0.33 | +0.18 |
+| recent 2024 | | plain VXN≤24 | +0.25 | +0.18 | +0.10 | -0.14 |
+
+Conclusions:
+- Two-state deadband beats plain VXN≤24 at every cost level (fewer switches, more stable)
+- 10→16 bps range shifts xSharpe by ~0.04 on the 26yr window — cost assumption is not load-bearing
+- At 26 bps (worst case), two-state still outperforms B&H Nasdaq (0.68 vs 0.44) on the 26yr window
+- Plain VXN≤24 at 26 bps recent window: xSh -0.14 — the high switch rate (33/yr recently) makes it cost-sensitive
+
+### C. Comparators on the intraday engine (D1 decision)
+
+All comparators on `allocation/intraday_engine.py` with `data_synthetic/hourly_spliced/`. Same-bar fill. xSharpe = excess-over-cash annualised Sharpe. Cost: tier rules at 13 bps/switch; vol-target at `partial_rebalance_cost_bps(|Δw|, £20k)` (≈1 bps/rebalance at £20k). Nasdaq leg = EQQQ. SMA200 window = 200 days. Vol-target cadence = weekly (5d), 2% deadband.
+
+| Strategy | 26yr ret% | 26yr xSh | 26yr maxDD% | vxn-era xSh | recent xSh | reb/yr |
+|---|---|---|---|---|---|---|
+| Deployed (VXN 23/24 + VIX ladder) 13bps | +2,136 | +0.74 | -21.2 | +0.92 | +0.13 | 11.0 |
+| Two-state VXN 23/24 (current rule) 13bps | +2,242 | **+0.76** | -21.5 | **+0.96** | +0.37 | 7.4 |
+| Static 30% Nasdaq / 70% cash (no cost) | +381 | +0.44 | -31.0 | +0.83 | +0.75 | 0.0 |
+| Vol-target 5% wkly 2% deadband | +387 | +0.60 | **-10.0** | +0.88 | +0.76 | 25.8 |
+| Vol-target 10% wkly 2% deadband | +997 | +0.61 | -27.1 | +0.88 | +0.78 | 33.8 |
+| SMA200 + vol-target 5% | +281 | +0.50 | **-8.0** | +0.75 | +0.69 | 22.9 |
+| B&H Nasdaq | +1,785 | +0.44 | -83.0 | +0.83 | +0.75 | — |
+
+Key findings:
+1. **Current rule beats all comparators on xSharpe in the 26yr and vxn-era windows.** The [SUSPECT] figures (VT5% raw Sharpe 1.11, SMA200+VT5% 1.15, deployed 0.79) reversed this ranking because they used raw Sharpe (which rewards cash carry) on the old daily-lag model, not xSharpe on the intraday engine.
+2. **Static blend xSharpe = B&H Nasdaq xSharpe (both 0.44, 26yr).** This is exact by construction: static 30/70 earns 30% × (Nasdaq excess), so its excess mean and std both scale by 0.30, leaving xSharpe unchanged. The comparator adds no alpha.
+3. **Vol-target comparators add drawdown protection, not alpha.** VT5% maxDD -10.0% vs current rule -21.5% (26yr). SMA200+VT5% maxDD -8.0%. xSharpe 0.60-0.61 vs current 0.76. Not a Sharpe improvement; a risk-profile tradeoff.
+4. **Recent window (2024+) reverses: deployed 0.13, all comparators ~0.69-0.78.** Cause: VXN has been in the low 20s, triggering 34.5 sw/yr for deployed vs 18.4 for two-state. High switch rate in a range-bound-VXN environment erodes the edge. This is a real signal but covers only 2.5 years.
+5. **D1 verdict: do not switch based on these comparators alone.** The [SUSPECT] case for VT5%/SMA200+VT5% was an artefact of raw Sharpe vs xSharpe. On xSharpe, current rule dominates. If max drawdown is the priority, VT5% (-10% vs -21.5%) has merit, but at 0.60 vs 0.76 xSharpe — a meaningful sacrifice. Decision reserved for the user.
+
+**Caveats:** vol-target and SMA200 are modelled without slippage on partial rebalances (only £1 min commission per leg at £20k, well-measured). All three windows are in-sample for the VXN 23/24 threshold (chosen on 2007-2019 train data). The recent 2024+ window is the only fully out-of-sample period and favours the comparators.
+
+---
+
 ## 2026-09-19 (night) — Current strategy year by year (26 yr); comparison with VWRL / VWRP world funds; £10,000 growth
 
 Tool: scratch scripts on `allocation/intraday_engine.py` (`annual_current.py`, `annual_vwrl.py`, `growth_vwrl.py`, `vwrp_fixed.py`; not in the repo, numbers recorded here) plus read-only IBKR daily-history fetches (`fetch_vwrl.py`, `fetch_vwrp.py`, client ids 25-27, port 4002) saved only to the scratchpad.
