@@ -1125,8 +1125,15 @@ def process_cycle(
     # in_scope, which can lag behind execution_state.json if a ticker was
     # dropped from its watchlist since the last overnight_scope run (see
     # get_open_positions()'s docstring).
-    open_positions = get_open_positions(market_name, logger)
-    must_run = list(open_positions)
+    # In tier_mode, positions are managed exclusively by the tier allocator;
+    # running HMM on tier assets (ISF.L, EQGB.L, etc.) would waste CPU and
+    # could fire conflicting SELL orders that diverge allocation_mgr.current_asset.
+    if tier_mode:
+        open_positions = []
+        must_run = []
+    else:
+        open_positions = get_open_positions(market_name, logger)
+        must_run = list(open_positions)
 
     # Remaining budget for candidates
     max_seconds = config.get("daytime", {}).get("max_seconds_per_cycle", 1500)
@@ -1233,17 +1240,19 @@ def process_cycle(
             market_name, round_robin_universe_len, cursor_start, n_attempted, daemon_state, logger
         )
 
-    # Execute signals once for all processed tickers this cycle
-    _execute_processed_tickers(
-        market_name, processed, config, daemon_state, portfolio, broker, logger,
-        protective_stops=protective_stops, stop_buffer_pct=stop_buffer_pct,
-    )
+    # Execute signals once for all processed tickers this cycle.
+    # Skipped in tier_mode: no HMM-managed positions; tier allocator handles all orders below.
+    if not tier_mode:
+        _execute_processed_tickers(
+            market_name, processed, config, daemon_state, portfolio, broker, logger,
+            protective_stops=protective_stops, stop_buffer_pct=stop_buffer_pct,
+        )
 
     # Multi-tier allocation rebalance — runs once per cycle, after main signal execution.
     # 4-tier rebalance: Nasdaq/EQGB.L (VXN), SPY (VIX≤15), ISF.L (15<VIX≤17.5), CSH2.L (VIX>17.5).
     if allocation_mgr is not None:
         from ..quant_hmm.sentiment import fetch_vix_hourly as _fetch_vix_hourly, fetch_vxn_hourly as _fetch_vxn_hourly
-        logger.debug(f"[{market_name}] Allocation: getting VIX/VXN current values (with daily cache)")
+        logger.debug(f"[{market_name}] Allocation: getting VIX/VXN latest completed hourly bars")
 
         vix_current = allocation_mgr._get_vix_current(_fetch_vix_hourly)
         vxn_current = allocation_mgr._get_vxn_current(_fetch_vxn_hourly)
@@ -2332,7 +2341,7 @@ def main(argv: list[str] | None = None) -> int:
     portfolio = PortfolioManager(capital_pot, state_path, currency=currency)
 
     from ..allocation.allocation_manager import ASSET_TIERS, MultiTierAllocationManager
-    allocation_mgr = MultiTierAllocationManager(vxn_threshold=18.0, vix_tier1=15.0, vix_tier2=17.5)
+    allocation_mgr = MultiTierAllocationManager.from_config(config.get("tier_allocation"))
     # current_asset is in-memory only — reseed it from the ledger so a restart
     # doesn't forget which tier asset is actually held and attempt a spurious
     # sell-phantom/rebuy-real rebalance against the wrong "current" asset.
@@ -2341,7 +2350,8 @@ def main(argv: list[str] | None = None) -> int:
         if len(held_tier_assets) > 1:
             logger.warning(f"Allocation: multiple tier assets held at startup {held_tier_assets}, using first")
         allocation_mgr.current_asset = held_tier_assets[0]
-    logger.info(f"Allocation manager initialized: tier_mode={args.tier_mode}, current_asset={allocation_mgr.current_asset}")
+    logger.info(f"Allocation manager initialized: tier_mode={args.tier_mode}, current_asset={allocation_mgr.current_asset}, "
+                f"thresholds: {allocation_mgr.thresholds_summary()}")
 
     # Broker connection is async and can hang; skip it here and let it fail gracefully
     # when trades are attempted. Daemon can still process tickers and generate signals.

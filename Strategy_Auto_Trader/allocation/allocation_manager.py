@@ -1,13 +1,18 @@
 """Multi-tier allocation manager for live daemon.
 
-Manages daily rebalancing between Nasdaq/SPY/ISF.L/CSH2.L based on VXN + VIX tiers.
+Manages rebalancing between Nasdaq/SPY/ISF.L/CSH2.L based on VXN + VIX tiers. The signal is
+re-read every cycle from the latest COMPLETED hourly VIX/VXN bar (see index_feed.py), so a tier
+change can happen at any hourly boundary while the LSE is open.
 
-Tier 1 (VXN ≤ 18): Nasdaq/EQGB.L (growth)
-Tier 2 (VIX ≤ 15): SPY (balanced)
-Tier 3 (15 < VIX ≤ 17.5): ISF.L (defensive)
-Tier 4 (VIX > 17.5): CSH2.L (money-market)
+Tier 1 (VXN ≤ vxn_threshold to enter, held until VXN > vxn_exit_threshold): Nasdaq/EQGB.L (growth)
+Tier 2 (VIX ≤ vix_tier1): SPY (balanced)
+Tier 3 (vix_tier1 < VIX ≤ vix_tier2): ISF.L (defensive)
+Tier 4 (otherwise): CSH2.L (money-market)
 
-Daily rebalance: if target asset differs from current, generate sell (current) + buy (target) orders.
+All thresholds and the VIX/VXN refresh timing come from the `tier_allocation` section of
+config/overnight_strategy.json (see `from_config`); nothing is hard-coded in the daemon.
+
+Rebalance: if target asset differs from current, generate sell (current) + buy (target) orders.
 """
 
 from __future__ import annotations
@@ -19,7 +24,18 @@ import time
 
 import pandas as pd
 
+from .index_feed import MAX_OUTAGE_SECONDS, REFRESH_SECONDS, IndexFeed
+
 _log = logging.getLogger(__name__)
+
+# Keys accepted in the `tier_allocation` section of config/overnight_strategy.json. Anything else
+# is rejected so a typo cannot silently leave a threshold at its built-in default.
+_NUMBER_KEYS = frozenset({
+    "vxn_threshold", "vxn_exit_threshold", "vix_tier1", "vix_tier2",
+    "index_refresh_seconds", "index_max_outage_seconds",
+})
+_BOOL_KEYS = frozenset({"lower_tiers_enabled"})
+_CONFIG_KEYS = _NUMBER_KEYS | _BOOL_KEYS
 
 TIER_ASSETS = {1: "EQGB.L", 2: "SPY", 3: "ISF.L", 4: "CSH2.L"}
 ASSET_TIERS = {"EQGB.L": 1, "SPY": 2, "ISF.L": 3, "CSH2.L": 4}
@@ -63,18 +79,36 @@ class MultiTierAllocationManager:
         vix_tier1: float = 15.0,
         vix_tier2: float = 17.5,
         commission_pct: float = 0.1,
+        vxn_exit_threshold: float | None = None,
+        index_refresh_seconds: float = REFRESH_SECONDS,
+        index_max_outage_seconds: float = MAX_OUTAGE_SECONDS,
+        lower_tiers_enabled: bool = True,
     ):
         """Initialize allocation manager.
 
         Args:
-            vxn_threshold: VXN threshold for tier 1 (Nasdaq). VXN ≤ this → Nasdaq
+            vxn_threshold: VXN level to ENTER tier 1 (Nasdaq). VXN ≤ this → Nasdaq
             vix_tier1: VIX threshold for tier 2 (SPY). VIX ≤ this → SPY
             vix_tier2: VIX threshold for tier 3 (ISF.L). VIX ≤ this → ISF.L
             commission_pct: Commission as % of order value (e.g., 0.1 for 0.1%)
+            vxn_exit_threshold: deadband upper edge. While Nasdaq is HELD it stays tier 1 until
+                VXN > this. None (default) means no deadband: exit at vxn_threshold.
+            index_refresh_seconds: how often VIX/VXN hourly data is re-fetched
+            index_max_outage_seconds: how long a failed fetch keeps the last good reading
+            lower_tiers_enabled: when False the S&P (tier 2) and FTSE (tier 3) tiers never pass, so the
+                allocation is Nasdaq or cash only. Their VIX cuts stay configured for when it is switched on.
         """
+        if vxn_exit_threshold is None:
+            vxn_exit_threshold = vxn_threshold
+        if vxn_exit_threshold < vxn_threshold:
+            raise ValueError(f"vxn_exit_threshold ({vxn_exit_threshold}) must be >= vxn_threshold ({vxn_threshold})")
+        if vix_tier1 >= vix_tier2:
+            raise ValueError(f"vix_tier1 ({vix_tier1}) must be < vix_tier2 ({vix_tier2})")
         self.vxn_threshold = vxn_threshold
+        self.vxn_exit_threshold = vxn_exit_threshold
         self.vix_tier1 = vix_tier1
         self.vix_tier2 = vix_tier2
+        self.lower_tiers_enabled = lower_tiers_enabled
         self.commission_pct = commission_pct
         self.current_asset = "SPY"  # Default starting position
         self.current_price = None  # Snapshot of entry price for tracking
@@ -82,11 +116,9 @@ class MultiTierAllocationManager:
         self._last_known_cash = None  # Track cash for detecting user deposits
         self._last_cash_check_time = None  # Timestamp of last cash baseline
 
-        # Daily cache for VIX/VXN to avoid reloading 80k rows every cycle
-        self._vix_cache = None
-        self._vix_cache_date = None
-        self._vxn_cache = None
-        self._vxn_cache_date = None
+        # Timer-refreshed readers (not a once-a-day cache): latest completed hourly bar
+        self._vix_feed = IndexFeed("VIX", index_refresh_seconds, index_max_outage_seconds)
+        self._vxn_feed = IndexFeed("VXN", index_refresh_seconds, index_max_outage_seconds)
 
         # Last tier allocation info for app_status.json
         self._last_vix = None
@@ -94,6 +126,44 @@ class MultiTierAllocationManager:
         self._last_tier_num = None
         self._last_target_asset = None  # Target asset selected by last signal
         self._last_action = None  # "HOLD" | "BUY" | "SELL"
+
+    @classmethod
+    def from_config(cls, section: dict | None) -> "MultiTierAllocationManager":
+        """Build from the `tier_allocation` section of overnight_strategy.json.
+
+        A missing section falls back to the built-in defaults (with a warning) so an older config
+        still starts; an unknown key or non-numeric value raises, since a silently ignored typo
+        would trade on the wrong threshold.
+        """
+        if not section:
+            _log.warning("config has no `tier_allocation` section — using built-in thresholds")
+            return cls()
+        unknown = set(section) - _CONFIG_KEYS
+        if unknown:
+            raise ValueError(f"unknown tier_allocation keys {sorted(unknown)}; allowed: {sorted(_CONFIG_KEYS)}")
+        for key, value in section.items():
+            if key in _BOOL_KEYS:
+                if not isinstance(value, bool):
+                    raise ValueError(f"tier_allocation.{key} must be true or false, got {value!r}")
+            elif isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"tier_allocation.{key} must be a number, got {value!r}")
+        return cls(**{key: (value if key in _BOOL_KEYS else float(value)) for key, value in section.items()})
+
+    def thresholds_summary(self) -> str:
+        lower = (f"S&P VIX<={self.vix_tier1:g}; FTSE VIX<={self.vix_tier2:g}" if self.lower_tiers_enabled
+                 else "S&P/FTSE tiers OFF")
+        return (f"Nasdaq enter VXN<={self.vxn_threshold:g}, hold until VXN>{self.vxn_exit_threshold:g}; "
+                f"{lower}; else cash")
+
+    def _lower_tier_detail(self, vix: float | None, gate: float) -> str:
+        if not self.lower_tiers_enabled:
+            return "disabled by config (lower_tiers_enabled=false)"
+        return f"VIX={vix:.2f} vs gate={gate}" if vix is not None else "VIX unavailable"
+
+    def _nasdaq_gate(self) -> float:
+        """VXN level tier 1 must satisfy right now: the wider exit edge while Nasdaq is already held
+        (deadband, so small wobbles around the entry level do not trade), else the entry level."""
+        return self.vxn_exit_threshold if self.current_asset == "EQGB.L" else self.vxn_threshold
 
     def signal(
         self, today: date, vxn: float | None, vix: float | None, logger=None, verbose: bool = True
@@ -118,19 +188,21 @@ class MultiTierAllocationManager:
 
         # Evaluate every tier independently (each computes its own pass/fail + reason),
         # log the result, then pick the best (lowest-numbered) tier that passed.
+        nasdaq_gate = self._nasdaq_gate()
         tiers = [
             (1, "EQGB.L", "Nasdaq", "VXN",
-             vxn, self.vxn_threshold,
-             vxn is not None and vxn <= self.vxn_threshold,
-             f"VXN={vxn:.2f} vs gate={self.vxn_threshold}" if vxn is not None else "VXN unavailable"),
+             vxn, nasdaq_gate,
+             vxn is not None and vxn <= nasdaq_gate,
+             f"VXN={vxn:.2f} vs gate={nasdaq_gate:g} ({'hold' if self.current_asset == 'EQGB.L' else 'enter'})"
+             if vxn is not None else "VXN unavailable"),
             (2, "SPY", "Balanced", "VIX",
              vix, self.vix_tier1,
-             vix is not None and vix <= self.vix_tier1,
-             f"VIX={vix:.2f} vs gate={self.vix_tier1}" if vix is not None else "VIX unavailable"),
+             self.lower_tiers_enabled and vix is not None and vix <= self.vix_tier1,
+             self._lower_tier_detail(vix, self.vix_tier1)),
             (3, "ISF.L", "Defensive", "VIX",
              vix, self.vix_tier2,
-             vix is not None and self.vix_tier1 < vix <= self.vix_tier2,
-             f"VIX={vix:.2f} vs gate={self.vix_tier2}" if vix is not None else "VIX unavailable"),
+             self.lower_tiers_enabled and vix is not None and self.vix_tier1 < vix <= self.vix_tier2,
+             self._lower_tier_detail(vix, self.vix_tier2)),
             (4, "CSH2.L", "Money-Market", "none", None, None, True, "always available fallback"),
         ]
 
@@ -331,68 +403,20 @@ class MultiTierAllocationManager:
             return current_cash
 
     def _get_vix_current(self, fetcher) -> float | None:
-        """Get current VIX value with daily cache (fetches incremental on stale).
+        """Close of the latest completed hourly VIX bar (re-fetched at most every few minutes).
 
         Args:
-            fetcher: callable that fetches VIX DataFrame from IBKR
+            fetcher: callable that fetches the VIX hourly DataFrame from IBKR
 
         Returns:
-            Current VIX close value, or None if unavailable
+            VIX close, or None if unavailable
         """
-        from datetime import date as _date
-        today = _date.today()
-
-        # If cache exists and is from today, use it
-        if self._vix_cache is not None and self._vix_cache_date == today:
-            try:
-                return float(self._vix_cache["Close"].iloc[-1])
-            except Exception as e:
-                _log.warning(f"Failed to extract VIX from cache: {e}")
-                return None
-
-        # Cache is stale or missing; fetch fresh (incremental append to disk)
-        try:
-            df = fetcher()
-            if df is not None and not df.empty:
-                self._vix_cache = df
-                self._vix_cache_date = today
-                _log.debug(f"VIX cache refreshed: {len(df)} rows, date={today}")
-                return float(df["Close"].iloc[-1])
-        except Exception as e:
-            _log.error(f"Failed to fetch VIX: {e}")
-        return None
+        return self._vix_feed.current(fetcher)
 
     def _get_vxn_current(self, fetcher) -> float | None:
-        """Get current VXN value with daily cache (fetches incremental on stale).
-
-        Args:
-            fetcher: callable that fetches VXN DataFrame from IBKR
-
-        Returns:
-            Current VXN close value, or None if unavailable
-        """
-        from datetime import date as _date
-        today = _date.today()
-
-        # If cache exists and is from today, use it
-        if self._vxn_cache is not None and self._vxn_cache_date == today:
-            try:
-                return float(self._vxn_cache["Close"].iloc[-1])
-            except Exception as e:
-                _log.warning(f"Failed to extract VXN from cache: {e}")
-                return None
-
-        # Cache is stale or missing; fetch fresh (incremental append to disk)
-        try:
-            df = fetcher()
-            if df is not None and not df.empty:
-                self._vxn_cache = df
-                self._vxn_cache_date = today
-                _log.debug(f"VXN cache refreshed: {len(df)} rows, date={today}")
-                return float(df["Close"].iloc[-1])
-        except Exception as e:
-            _log.error(f"Failed to fetch VXN: {e}")
-        return None
+        """Close of the latest completed hourly VXN bar. VXN has no London-morning print, so before
+        US open this is the prior US session's last bar."""
+        return self._vxn_feed.current(fetcher)
 
     def app_status_dict(self) -> dict:
         """Return current state for app_status.json."""
@@ -405,27 +429,33 @@ class MultiTierAllocationManager:
                     "asset": "EQGB.L",
                     "label": "Nasdaq",
                     "index": "VXN",
-                    "gate_value": self.vxn_threshold,
+                    "gate_value": self._nasdaq_gate(),
+                    "enter_gate_value": self.vxn_threshold,
+                    "exit_gate_value": self.vxn_exit_threshold,
                     "current_value": self._last_vxn,
-                    "passes": self._last_vxn is not None and self._last_vxn <= self.vxn_threshold,
+                    "passes": self._last_vxn is not None and self._last_vxn <= self._nasdaq_gate(),
                 },
                 {
                     "tier_num": 2,
                     "asset": "SPY",
-                    "label": "Balanced",
+                    "label": "Balanced" + ("" if self.lower_tiers_enabled else " (disabled)"),
                     "index": "VIX",
                     "gate_value": self.vix_tier1,
+                    "enabled": self.lower_tiers_enabled,
                     "current_value": self._last_vix,
-                    "passes": self._last_vix is not None and self._last_vix <= self.vix_tier1,
+                    "passes": (self.lower_tiers_enabled and self._last_vix is not None
+                               and self._last_vix <= self.vix_tier1),
                 },
                 {
                     "tier_num": 3,
                     "asset": "ISF.L",
-                    "label": "Defensive",
+                    "label": "Defensive" + ("" if self.lower_tiers_enabled else " (disabled)"),
                     "index": "VIX",
                     "gate_value": self.vix_tier2,
+                    "enabled": self.lower_tiers_enabled,
                     "current_value": self._last_vix,
-                    "passes": self._last_vix is not None and self.vix_tier1 < self._last_vix <= self.vix_tier2,
+                    "passes": (self.lower_tiers_enabled and self._last_vix is not None
+                               and self.vix_tier1 < self._last_vix <= self.vix_tier2),
                 },
                 {
                     "tier_num": 4,
