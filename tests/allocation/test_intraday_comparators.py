@@ -111,6 +111,60 @@ class TestVolTarget:
         assert all(i % 5 == 0 for i in rebal_idx)
 
 
+class TestVxnScaledBlend:
+    def test_vxn_below_full_weight_gives_weight_one(self):
+        """VXN well below full_weight_at -> weight clips to 1.0 -> tracks Nasdaq after first cadence rebalance."""
+        n = 50
+        log_ret = np.zeros((n, 4))
+        log_ret[:, 0] = np.log1p(0.001)
+        log_ret[:, 3] = np.log1p(0.0002)
+        log_ret[0, :] = 0.0
+        days = pd.bdate_range("2020-01-06", periods=n)
+        grid = pd.date_range("2020-01-06 09:00", periods=n, freq="h", tz="UTC")
+        vxn = np.full(n, 10.0)  # VXN=10 << full_weight_at=15 -> target_w=1.0
+        inp = eng.Inputs(grid, log_ret, np.full(n, 10.0), vxn, np.arange(n), days)
+        run = cmp.vxn_scaled_blend(inp, enter_at=23.0, full_weight_at=15.0, cadence_days=5)
+        bh = eng.buy_and_hold(inp, "NASDAQ")
+        # Weight starts at 0 (lag), rebalances to 1.0 at day 5; from day 6 onward tracks Nasdaq exactly
+        assert np.allclose(run.daily[6:], bh.daily[6:], atol=1e-6)
+
+    def test_vxn_at_enter_at_gives_weight_zero(self):
+        """VXN at enter_at -> weight=0 -> returns = cash."""
+        n = 50
+        log_ret = np.zeros((n, 4))
+        log_ret[:, 0] = np.log1p(0.005)   # Nasdaq higher
+        log_ret[:, 3] = np.log1p(0.0002)
+        log_ret[0, :] = 0.0
+        days = pd.bdate_range("2020-01-06", periods=n)
+        grid = pd.date_range("2020-01-06 09:00", periods=n, freq="h", tz="UTC")
+        vxn = np.full(n, 23.0)  # VXN=enter_at -> weight=0
+        inp = eng.Inputs(grid, log_ret, np.full(n, 23.0), vxn, np.arange(n), days)
+        run = cmp.vxn_scaled_blend(inp, enter_at=23.0, full_weight_at=15.0)
+        cash = eng.buy_and_hold(inp, "CASH")
+        assert np.allclose(run.daily, cash.daily, atol=1e-6)
+
+    def test_vxn_midpoint_weight_between_zero_and_one(self):
+        """VXN midway between enter_at and full_weight_at -> weight between 0 and 1."""
+        n = 50
+        inp = _inp(n_days=n)
+        # Default _inp has VXN=20, enter_at=23, full_weight_at=15 -> w=(23-20)/(23-15)=0.375
+        # lag 1 day: weight[0]=0 (fillna), weight[1:]=0.375
+        run = cmp.vxn_scaled_blend(inp, enter_at=23.0, full_weight_at=15.0)
+        assert isinstance(run, eng.Run)
+        # Total return should be between pure cash and pure Nasdaq
+        nasdaq_total = float(np.prod(1 + eng.buy_and_hold(inp, "NASDAQ").daily[2:]) - 1)
+        cash_total = float(np.prod(1 + eng.buy_and_hold(inp, "CASH").daily[2:]) - 1)
+        strat_total = float(np.prod(1 + run.daily[2:]) - 1)
+        assert cash_total <= strat_total <= nasdaq_total
+
+    def test_returns_run_object_correct_shape(self):
+        inp = _inp(n_days=30)
+        run = cmp.vxn_scaled_blend(inp)
+        assert isinstance(run, eng.Run)
+        assert len(run.daily) == 30
+        assert len(run.switches) == 30
+
+
 class TestSmaVolTarget:
     def test_below_sma_forces_cash(self):
         """When Nasdaq price is in a persistent downtrend, strategy should hold cash."""

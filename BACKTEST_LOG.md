@@ -15,6 +15,101 @@ Running log of every backtest/scan run — newest entry on top. One block per ru
 
 ---
 
+## 2026-09-19 (late night, addendum 2) — Experiments A/B/C: deadband sweep, VXN-scaled, threshold grid — all reject change
+
+**Commands:**
+```
+uv run python scripts/tier_analysis/deadband_sweep.py
+uv run python scripts/tier_analysis/vxn_scaled_sweep.py
+uv run python scripts/tier_analysis/threshold_grid.py
+```
+**New code:** `scripts/tier_analysis/deadband_sweep.py`, `scripts/tier_analysis/vxn_scaled_sweep.py`, `scripts/tier_analysis/threshold_grid.py`. Function `vxn_scaled_blend()` added to `allocation/intraday_comparators.py`. 4 new tests in `test_intraday_comparators.py` (16 total passing). All experiments ran on the same intraday engine / dataset / same-bar fill / 13 bps as the session before.
+
+**Selection criterion used throughout:** winner must beat reference (23/24) on BOTH train (2007-2019) AND test (2020+) xSharpe. Only the test window is genuinely out-of-sample for these experiments.
+
+---
+
+### Experiment A: Wider exit deadband sweep (enter_at=23 fixed, exit_above 24→33)
+
+| exit_above | 26yr xSh | since-2007 xSh | train xSh | test xSh | recent xSh | sw/yr (26yr) |
+|---|---|---|---|---|---|---|
+| **24 (current)** | **+0.758** | **+0.965** | **+1.063** | **+0.761** | +0.373 | 7.4 |
+| 25 | +0.764 | +0.938 | +1.051 | +0.702 | +0.155 | 5.0 |
+| 26 | +0.765 | +0.882 | +0.970 | +0.702 | +0.186 | 4.0 |
+| 27 | +0.709 | +0.858 | +0.893 | **+0.791** | +0.374 | 3.0 |
+| 28 | +0.653 | +0.786 | +0.857 | +0.642 | +0.301 | 2.6 |
+| 30 | +0.634 | +0.742 | +0.822 | +0.578 | +0.381 | 1.8 |
+| 33 | +0.629 | +0.672 | +0.731 | +0.556 | +0.318 | 1.5 |
+
+Findings:
+- **No winner on train+test criterion.** exit_above=27 wins test (+0.791 vs +0.761) but loses train (+0.893 vs +1.063). exit_above=25/26 win marginally on 26yr but lose test.
+- Pareto frontier is NOT monotone: small sweet spot at 25-26 on 26yr, then declining. exit_above=27 pops up on test only.
+- **Recent window not fixed by wider deadband.** All recent xSh values cluster 0.15-0.38 — not meaningfully different from current +0.373. The churn is at the threshold boundary; a wider band doesn't help because VXN is spending time *inside* the band (22-25), not oscillating through it.
+- **Decision: keep exit_above=24.**
+
+---
+
+### Experiment B: VXN-scaled position size sweep
+
+Weight formula: `w = clamp((enter_at - VXN) / (enter_at - full_weight_at), 0, 1)`, lagged 1d, weekly rebalance, 2% deadband. Sweep enter_at ∈ [22, 23, 24], full_weight_at ∈ [12, 14, 15, 17, 20].
+
+Selected rows (enter_at=23):
+
+| full_weight_at | 26yr xSh | test xSh | recent xSh | 26yr maxDD | test maxDD | sw/yr (26yr) |
+|---|---|---|---|---|---|---|
+| **binary 23/24** | **+0.758** | **+0.761** | +0.373 | -21.5 | -13.6 | 7.4 |
+| 12 | +0.428 | +0.803 | +0.356 | -13.2 | -3.3 | 26.5 |
+| 14 | +0.437 | +0.818 | +0.361 | -16.4 | -4.2 | 26.1 |
+| 15 | +0.447 | +0.819 | +0.365 | -18.6 | -4.8 | 25.2 |
+| 17 | +0.483 | **+0.835** | +0.364 | -20.6 | -6.6 | 20.4 |
+| 20 | +0.538 | +0.753 | +0.147 | -21.6 | -11.8 | 11.8 |
+
+Findings:
+- **No winner on train+test criterion.** Every VXN-scaled combination loses 26yr and since-2007 xSharpe badly (best 26yr = +0.563 vs binary +0.758). All fail the double criterion.
+- **Drawdown improvement is real.** enter=23, fw=17: test maxDD -6.6% vs binary -13.6%. But at cost of 26yr xSh +0.483 vs +0.758.
+- **Switch count increases, not decreases.** VXN-scaled does 20-38 sw/yr recently vs binary 18.4. Continuous rebalancing adds churn.
+- **Recent xSh does NOT improve.** Best recent = +0.365 (fw=15) vs binary +0.373. Negligible.
+- **Root cause:** the binary rule earns full Nasdaq return when VXN is clearly low (1999-2000, 2017-2021). Diluting that exposure with partial sizing costs the 26yr alpha. The test improvement is a COVID-era artefact — during high-VXN periods (2020, 2022), partial position = smaller loss, but that's a risk reduction not a Sharpe improvement.
+- **Decision: VXN-scaled rejected.** Does not improve xSharpe; trades 26yr alpha for drawdown reduction already available via vol-target if desired.
+
+---
+
+### Experiment C: Threshold grid search (train=2007-2019, test=2020+)
+
+77 combinations: enter_at ∈ [19..25], deadband ∈ [0..10]. Reference: 23/24 (train=+1.063, test=+0.761).
+
+Pareto frontier on (test_xsh, test_maxdd):
+
+| enter | exit | db | train xSh | test xSh | recent xSh | 26yr xSh | test DD | test sw/yr | beats train? |
+|---|---|---|---|---|---|---|---|---|---|
+| 20 | 27 | 7 | +0.770 | **+0.860** | +0.107 | +0.660 | -16.0 | 2.1 | No |
+| 20 | 26 | 6 | +0.823 | +0.845 | +0.050 | +0.721 | -16.2 | 2.4 | No |
+| 23 | 27 | 4 | +0.893 | +0.791 | +0.374 | +0.709 | -19.2 | 3.9 | No |
+| 22 | 27 | 5 | +0.952 | +0.744 | +0.304 | +0.709 | -20.9 | 3.6 | No |
+| **22 | 25 | 3** | **+1.089** | +0.737 | +0.108 | **+0.795** | -21.5 | 5.6 | **Yes (train only)** |
+| **23 | 24 | 1** | **+1.063** | **+0.761** | **+0.373** | **+0.758** | **-13.6** | **10.7** | **Reference** |
+
+Findings:
+- **The only row beating reference on BOTH train AND test is the reference itself (23/24).** 77 combinations explored; none dominate 23/24 on the double criterion.
+- **Top test winners (enter=20, exit=27: test=+0.860) fail train badly (+0.770 vs +1.063).** These overfit to 2020-2026: COVID shock and 2024 bull run with VXN rarely near 23.
+- **Closest near-miss:** enter=22, exit=25 (train=+1.089 > +1.063 ✓; test=+0.737 < +0.761 ✗; recent=+0.108 — crashes recent window). Loses on test and devastates recent.
+- **23/27 is notable:** train +0.893, test +0.791, recent +0.374 — respectable across all windows but fails train criterion by 0.170 and adds DD on test (-19.2 vs -13.6).
+- **Decision: 23/24 validated as near-optimal.** No threshold pair dominates it on the train+test double criterion. The 23/24 pair was not the result of lucky eyeballing — it is genuinely near the efficiency frontier.
+
+---
+
+### Summary: all three experiments reject change
+
+| Experiment | Hypothesis | Result | Decision |
+|---|---|---|---|
+| A: wider exit | Reduce churn, improve recent xSh | No train+test winner; recent barely moves | Keep exit=24 |
+| B: VXN-scaled | Reduce DD via partial position | Beats test DD but loses 26yr xSh badly | Rejected |
+| C: threshold grid | Systematic search may find better 23/24 | 23/24 uniquely satisfies train+test double criterion | Keep 23/24 |
+
+**Caveat:** all experiments share the same data caveats as the 2026-09-19 (late night) entry. The 2024+ recent window (2.5yr) is the only fully out-of-sample period. The strategy's genuine weakness remains the range-bound VXN near 22-25 during an exceptional Nasdaq bull run (2024+). No parameter change fixes this without sacrificing the long-run validated edge.
+
+---
+
 ## 2026-09-19 (late night, addendum) — D2 asymmetric re-entry (8d) annual breakdown: REJECTED
 
 **Command:** inline script on `allocation/intraday_engine.py` — not committed. D2 = daily state machine: exit immediately when VXN > 24, re-enter only after ≥8 consecutive days with VXN ≤ 23. Same data, same-bar fill, 13 bps/switch.
