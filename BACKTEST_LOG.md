@@ -15,6 +15,127 @@ Running log of every backtest/scan run — newest entry on top. One block per ru
 
 ---
 
+## 2026-09-19 (night) — Current strategy year by year (26 yr); comparison with VWRL / VWRP world funds; £10,000 growth
+
+Tool: scratch scripts on `allocation/intraday_engine.py` (`annual_current.py`, `annual_vwrl.py`, `growth_vwrl.py`, `vwrp_fixed.py`; not in the repo, numbers recorded here) plus read-only IBKR daily-history fetches (`fetch_vwrl.py`, `fetch_vwrp.py`, client ids 25-27, port 4002) saved only to the scratchpad.
+Scope: **current config** = Nasdaq (EQQQ leg) when VXN <= 23, held until VXN > 24, otherwise cash; S&P / FTSE tiers OFF (`lower_tiers_enabled=false`). Same-bar fill, 13 bps per switch. Same dataset and caveats as the two entries below (bridged 1999-2007 intraday shape assumed, estimated pre-2007 VXN, USD proxies before 2004/2005).
+**Data range:** strategy 1999-03-11 to 2026-09-18 (27.6 yrs). VWRL (LSE, GBP, distributing) 2012-05-24 to 2026-09-18 (3,610 daily bars). VT (US-listed world fund, USD, distributing; stand-in before VWRL) 2008-06-26 to 2026-09-18 (4,586 bars). VWRP (LSE, GBP, accumulating) 2019-07-26 to 2026-09-18 (1,785 bars; only 89 bars in 2019, 250+ a year from 2020).
+IBKR share-class names: EQGB "INVESCO NASDAQ 100 GBP HDG" (class not stated; believed accumulating, not verified), EQQQ "INVESCO NASDAQ-100 DIST", VWRL "VANG FTSE AW USDD", ISF "ISHARES CORE FTSE 100", CSH2 "AMND SMT OVRNGT RTR ETF-UEGA". IBKR's dividend-adjusted series (`ADJUSTED_LAST`) only goes back ~1 year, so all fund returns below are PRICE returns unless stated.
+
+### 1. Year-by-year, current strategy vs Nasdaq buy and hold (EQQQ leg), % (2026 to 2026-09-18; 1999 from March)
+| Year | Strategy | Nasdaq | Cash | vs Nasdaq | Strat max DD | Nasdaq max DD | % time in Nasdaq | Switches | Avg VXN | Data |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1999 | +55.5 | +79.1 | +4.2 | -23.6 | -11.9 | -11.9 | 92.3 | 2 | 21.1 | bridged |
+| 2000 | +6.0 | -36.2 | +6.0 | +42.2 | 0.0 | -52.7 | 0.0 | 0 | 29.9 | bridged |
+| 2001 | +5.1 | -33.4 | +5.1 | +38.5 | 0.0 | -58.4 | 0.0 | 0 | 52.3 | bridged |
+| 2002 | +4.0 | -37.4 | +4.0 | +41.4 | 0.0 | -51.9 | 0.0 | 0 | 45.9 | bridged |
+| 2003 | +3.7 | +49.6 | +3.7 | -45.9 | 0.0 | -12.2 | 0.0 | 0 | 31.9 | bridged |
+| 2004 | +1.4 | +9.6 | +4.4 | -8.3 | -16.3 | -15.9 | 67.3 | 11 | 22.3 | bridged |
+| 2005 | +5.8 | +5.8 | +4.6 | 0.0 | -13.1 | -13.1 | 100.0 | 0 | 16.3 | bridged |
+| 2006 | -6.0 | -6.8 | +4.6 | +0.8 | -20.6 | -21.3 | 96.3 | 4 | 18.0 | bridged |
+| 2007 | +18.0 | +18.0 | +5.5 | +0.1 | -6.7 | -10.0 | 71.9 | 12 | 20.7 | bridged/real |
+| 2008 | +6.1 | -22.9 | +4.7 | +29.0 | -5.7 | -33.3 | 10.6 | 13 | 35.6 | real |
+| 2009 | +7.2 | +43.0 | +0.6 | -35.8 | -3.1 | -10.5 | 13.3 | 9 | 36.6 | real |
+| 2010 | +33.7 | +22.9 | +0.5 | +10.8 | -4.0 | -16.0 | 54.7 | 14 | 23.6 | real |
+| 2011 | +2.6 | +3.1 | +0.5 | -0.5 | -9.1 | -16.8 | 54.9 | 12 | 25.2 | real |
+| 2012 | +5.2 | +8.3 | +0.5 | -3.2 | -12.3 | -10.9 | 92.4 | 4 | 19.3 | real |
+| 2013 | +35.0 | +35.0 | +0.5 | 0.0 | -8.7 | -8.7 | 100.0 | 0 | 15.2 | real |
+| 2014 | +27.4 | +26.7 | +0.5 | +0.8 | -8.2 | -8.2 | 98.4 | 2 | 16.0 | real |
+| 2015 | +5.5 | +13.8 | +0.6 | -8.2 | -13.7 | -14.1 | 88.8 | 8 | 18.3 | real |
+| 2016 | +21.6 | +28.1 | +0.6 | -6.5 | -9.8 | -13.3 | 85.2 | 6 | 18.4 | real |
+| 2017 | +19.2 | +19.2 | +0.4 | 0.0 | -6.7 | -6.7 | 100.0 | 0 | 14.1 | real |
+| 2018 | +5.2 | +4.2 | +0.7 | +1.0 | -12.3 | -20.1 | 70.5 | 15 | 20.9 | real |
+| 2019 | +14.7 | +32.6 | +0.8 | -17.8 | -11.5 | -7.4 | 89.5 | 19 | 19.2 | real |
+| 2020 | +7.7 | +42.6 | +0.3 | -35.0 | -5.7 | -21.6 | 14.9 | 1 | 32.8 | real |
+| 2021 | +12.7 | +29.3 | +0.2 | -16.6 | -8.6 | -10.8 | 52.4 | 19 | 24.2 | real |
+| 2022 | -2.7 | -25.9 | +1.5 | +23.3 | -4.2 | -26.8 | 0.8 | 1 | 31.7 | real |
+| 2023 | +26.4 | +47.1 | +4.7 | -20.8 | -7.0 | -7.0 | 68.5 | 5 | 21.7 | real |
+| 2024 | +18.2 | +27.9 | +5.6 | -9.7 | -12.1 | -12.2 | 88.9 | 12 | 19.4 | real |
+| 2025 | +5.6 | +11.3 | +4.7 | -5.7 | -13.6 | -24.1 | 75.8 | 18 | 22.1 | real |
+| 2026 | +8.7 | +16.6 | +3.0 | -7.9 | -7.3 | -10.1 | 38.9 | 16 | 24.8 | real |
+
+Whole period: strategy +2,242% (x23.4), +12.1%/yr, xSharpe +0.76, max DD -21.5%, 7.4 switches/yr; Nasdaq buy and hold +1,785% (x18.8), +11.2%/yr, xSharpe +0.44, max DD -83.0%. Positive years 26 of 28 (negative: 2006 -6.0%, 2022 -2.7%); beats Nasdaq in 10 of 28 years (bear years and 2010; lags most bull years).
+- 2000-2003 are entirely cash (estimated VXN stayed above 24), so 2003's +49.6% rally is missed; this is the least reliable stretch.
+- 2020 and 2022: in Nasdaq only 15% and 1% of the time.
+- 2025-26: 16-18 switches a year vs the 7.4 average as VXN sits in the low 20s.
+- With the live hedged fund EQGB (real hourly since 2017-10; optimistic for older years, see the entry below), strategy vs EQGB buy and hold %: 2018 +17.6 / -6.5; 2019 +22.0 / +40.1; 2020 +5.4 / +45.5; 2021 +12.2 / +27.7; 2022 +0.1 / -35.0; 2023 +27.5 / +53.8; 2024 +16.1 / +26.1; 2025 +8.5 / +19.6; 2026 +10.4 / +15.2.
+
+### 2. Against VWRL (Vanguard FTSE All-World, distributing) and VT (USD world fund), annual %, price returns
+| Year | Strategy | Nasdaq | VWRL | VT (USD) | Strategy - VWRL | Strat max DD | VWRL max DD |
+|---|---|---|---|---|---|---|---|
+| 2008 | +6.1 | -22.9 | n/a | -33.5 (from 2008-06-26) | | -5.7 | n/a |
+| 2009 | +7.2 | +43.0 | n/a | +30.7 | | -3.1 | n/a |
+| 2010 | +33.7 | +22.9 | n/a | +10.9 | | -4.0 | n/a |
+| 2011 | +2.6 | +3.1 | n/a | -9.7 | | -9.1 | n/a |
+| 2012 (from 2012-05-24) | +5.2 | +8.3 | +8.7 | +14.3 | -3.5 | -12.3 | -5.3 |
+| 2013 | +35.0 | +35.0 | +18.9 | +20.3 | +16.1 | -8.7 | -12.1 |
+| 2014 | +27.4 | +26.7 | +9.0 | +1.2 | +18.5 | -8.2 | -8.6 |
+| 2015 | +5.5 | +13.8 | +0.5 | -4.2 | +5.0 | -13.7 | -18.3 |
+| 2016 | +21.6 | +28.1 | +27.1 | +5.9 | -5.5 | -9.8 | -9.9 |
+| 2017 | +19.2 | +19.2 | +11.0 | +21.7 | +8.2 | -6.7 | -5.0 |
+| 2018 | +5.2 | +4.2 | -6.7 | -11.9 | +11.8 | -12.3 | -14.7 |
+| 2019 | +14.7 | +32.6 | +19.6 | +23.7 | -4.8 | -11.5 | -6.1 |
+| 2020 | +7.7 | +42.6 | +10.2 | +14.3 | -2.5 | -5.7 | -25.0 |
+| 2021 | +12.7 | +29.3 | +18.2 | +16.0 | -5.5 | -8.6 | -5.2 |
+| 2022 | -2.7 | -25.9 | -10.2 | -19.8 | +7.6 | -4.2 | -15.1 |
+| 2023 | +26.4 | +47.1 | +13.5 | +19.4 | +12.9 | -7.0 | -7.6 |
+| 2024 | +18.2 | +27.9 | +17.7 | +14.2 | +0.5 | -12.1 | -6.1 |
+| 2025 | +5.6 | +11.3 | +12.3 | +20.1 | -6.7 | -13.6 | -17.8 |
+| 2026 | +8.7 | +16.6 | +12.0 | +12.4 | -3.3 | -7.3 | -7.3 |
+
+Since VWRL listing (2012-05-24 to 2026-09-18, 14.3 yrs, price return): strategy +509% (+13.4%/yr, xSharpe +0.91, max DD -14.9%); Nasdaq +1,230% (+19.8%/yr, +0.97, -28.2%); VWRL +343% (+11.0%/yr, +0.69, -25.0%). Daily correlation with VWRL: strategy 0.57, Nasdaq 0.86. Strategy beat VWRL in 8 of 15 calendar years, including both VWRL down years (2018 +5.2 vs -6.7; 2022 -2.7 vs -10.2). VT (USD) is shown only for context before VWRL existed; its years differ from VWRL by GBP/USD.
+
+### 3. Dividends: VWRL (distributing) vs VWRP (accumulating)
+Measured gap VWRP minus VWRL, full years (pts): 2020 +2.1, 2021 +1.8, 2022 +1.8, 2023 +2.1, 2024 +1.9, 2025 +1.7 (mean **+1.91 pts/yr**, range 1.7-2.1); part years 2019 (from 2019-07-26) +0.9, 2026 (to 09-18) +1.2.
+**A first VWRP run was wrong and discarded:** VWRP has sparse bars in 2019 (89 bars), and comparing on VWRP's trading days only dropped the strategy's, Nasdaq's and VWRL's returns on the other days (bogus -8% for 2019 and an inflated 3.2 pts/yr gap). The numbers here use price levels forward-filled onto the full trading calendar.
+
+### 4. £10,000 growth (compounding the returns above; strategy includes 13 bps per switch; price returns; no tax)
+Since VWRP listing (2019-07-26, 7.2 yrs), year-end balance:
+| | Strategy | Nasdaq | VWRP (acc) | VWRL (price) | Cash |
+|---|---|---|---|---|---|
+| 2019 | £9,739 | £10,209 | £10,097 | £10,003 | £10,035 |
+| 2020 | £10,487 | £14,563 | £11,335 | £11,019 | £10,065 |
+| 2021 | £11,814 | £18,824 | £13,603 | £13,022 | £10,081 |
+| 2022 | £11,500 | £13,946 | £12,459 | £11,688 | £10,236 |
+| 2023 | £14,532 | £20,520 | £14,407 | £13,268 | £10,715 |
+| 2024 | £17,183 | £26,245 | £17,231 | £15,618 | £11,315 |
+| 2025 | £18,137 | £29,202 | £19,634 | £17,532 | £11,846 |
+| 2026 | **£19,706** | **£34,040** | **£22,217** | £19,630 | £12,199 |
+
+Final / per year / worst fall: strategy £19,706, +9.9%, -13.6%; Nasdaq £34,040, +18.7%, -28.2%; VWRP £22,217, +11.8%, -25.1%; VWRL price £19,630, +9.9%, -25.0%.
+
+Since VWRL listing (2012-05-24, 14.3 yrs), year-end balance; VWRL total return ESTIMATED by adding the measured +1.91 pts/yr to every year (an estimate for 2012-2019):
+| | Strategy | Nasdaq (price) | VWRL price | VWRL est. total return | Cash |
+|---|---|---|---|---|---|
+| 2012 | £9,475 | £9,723 | £10,869 | £10,986 | £10,028 |
+| 2013 | £12,793 | £13,129 | £12,927 | £13,317 | £10,078 |
+| 2014 | £16,305 | £16,629 | £14,087 | £14,790 | £10,129 |
+| 2015 | £17,203 | £18,915 | £14,162 | £15,155 | £10,184 |
+| 2016 | £20,918 | £24,223 | £18,230 | £19,880 | £10,249 |
+| 2017 | £24,937 | £28,876 | £20,233 | £22,486 | £10,293 |
+| 2018 | £26,222 | £30,083 | £18,886 | £21,392 | £10,366 |
+| 2019 | £30,083 | £39,876 | £22,578 | £26,065 | £10,451 |
+| 2020 | £32,393 | £56,880 | £24,872 | £29,266 | £10,482 |
+| 2021 | £36,491 | £73,523 | £29,394 | £35,250 | £10,498 |
+| 2022 | £35,520 | £54,469 | £26,383 | £32,239 | £10,660 |
+| 2023 | £44,885 | £80,147 | £29,947 | £37,291 | £11,159 |
+| 2024 | £53,075 | £102,510 | £35,253 | £44,743 | £11,783 |
+| 2025 | £56,021 | £114,058 | £39,573 | £51,189 | £12,336 |
+| 2026 | **£60,868** | **£132,954** | £44,308 | **£58,099** | £12,704 |
+
+Per year: strategy +13.4%, Nasdaq +19.8%, VWRL price +11.0%, VWRL est. total return +13.1%, cash +1.7%. Strategy worst fall -14.9% (£4,454, low 2019-01) vs VWRL -25.0% (£5,920, low 2020-03) and Nasdaq -28.2% (£21,096, low 2022-12). At the 2018-12-24, 2020-03-23 and 2022-10-12 lows the strategy held £26,218 / £32,356 / £35,290 vs VWRL price £18,460 / £17,778 / £26,140.
+
+### Conclusions and caveats
+- **Against a world fund the strategy is about level on return and roughly half the drawdown**, not a clear return win: on a like-for-like (dividends-in) basis it leads VWRL by ~£2,800 on £10k over 14 years (£60,868 vs ~£58,099 estimated), and trails VWRP over the shorter 2019-26 window (£19,706 vs £22,217), mainly by sitting out Nasdaq in 2020-21 and 2025.
+- The strategy's Nasdaq leg is price-only too (EQQQ is distributing, ~0.6%/yr, in Nasdaq ~58% of the time, ~+0.35 pts/yr). If EQGB is accumulating, live returns include it (net of hedging cost).
+- The VWRL est. total return applies one measured 2020-25 gap to 2012-2019; the true earlier gap (dividend yield varied) is unknown. VWRP's 2019 data is sparse, so 2019 and 2026 gaps are part-year and less reliable.
+- VWRL 2016 is +27.1% in the annual table but +28.7% in the growth table: the engine calendar has no bars on 2016-05-18 (VWRL -1.2%), dropped in the compounded curve; final totals (+343%) are unaffected.
+- Strategy figures inherit the caveats of the entries below: bridged 1999-2007 intraday shape assumed, estimated pre-2007 VXN, thresholds chosen on 2007-2019, no tax or dealing costs beyond 13 bps per switch.
+
+Conclusion: year by year the current rule protects capital in bear years (2000-02, 2008, 2022) and lags in bull years; compared with holding a world fund since 2012 it is roughly the same return with about half the drawdown, and it has trailed in the last two years.
+
+---
+
 ## 2026-09-19 (late evening) — Deployed config (VXN 23/24 deadband) over three windows; is FTSE a useful middle tier; panic tier
 
 Tool: scratch scripts on `allocation/intraday_engine.py` (`three_windows.py`, `ftse_role.py`, `panic_tier.py`; not in the repo, numbers recorded here). Same dataset, same-bar fill, 13 bps per switch, Nasdaq leg EQQQ unless noted. Follows the 2026-09-19 (evening) entry below; same caveats apply (bridged 1999-2007 intraday shape assumed, USD proxies pre-2004/2005, thresholds chosen on 2007-2019).
