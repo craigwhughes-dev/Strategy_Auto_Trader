@@ -13,14 +13,15 @@ the engine itself stays currency-agnostic.
 Fee schedule (IBKR UK, Tiered plan, from the 2026-07 pricing pages):
   GBP-denominated: 0.05% of trade value, min GBP 1.00 per order
   USD-denominated: 0.05% of trade value, min USD 1.70, max USD 39.00
-UK extras on BUY orders only: 0.5% stamp duty (SDRT) and the GBP 1.00
-PTM levy on trades over GBP 10,000.
+UK extras on BUY orders only, for UK company SHARES: 0.5% stamp duty (SDRT) and
+the GBP 1.00 PTM levy on trades over GBP 10,000. LSE-listed ETFs / UCITS funds
+(broker.symbols.is_uk_listed_etf) pay neither — only commission.
 The Fixed plan (min GBP 3 / USD 4) is deliberately not modelled yet —
 add it here if the account turns out to be on Fixed.
 
 The optional spread term is a crude half-spread estimate per side
-(defaults: 15 bps FTSE, 5 bps US large-cap) — commission-only backtests
-overstate the edge, so scans should prefer the spread variant unless
+(defaults: 15 bps UK shares, 3 bps UK ETFs, 5 bps US large-cap) — commission-only
+backtests overstate the edge, so scans should prefer the spread variant unless
 isolating commission effects.
 
 At current stake sizes (~GBP 2k) the percentage clauses mostly resolve to
@@ -28,6 +29,8 @@ the per-order minimums; the tiered percentages matter only if stakes grow.
 """
 
 from __future__ import annotations
+
+from ..broker.symbols import is_uk_listed_etf
 
 #: Static USD->GBP conversion for the USD per-order min/max. The min/max
 #: differ by pennies at current stakes, so a live FX feed is not warranted;
@@ -43,7 +46,10 @@ _UK_MIN_GBP = 1.00
 _US_MIN_GBP = 1.70 * USD_GBP
 _US_MAX_GBP = 39.00 * USD_GBP
 
-_UK_SPREAD = 0.0015          # ~15 bps half-spread per side, FTSE
+_UK_SPREAD = 0.0015          # ~15 bps half-spread per side, UK company shares (not measured)
+# Half of the quoted bid-ask spread on the tier funds, median of hourly BID/ASK bars 09:00-15:00 London
+# over ~6 months to 2026-09-18 (IBKR): EQGB 2.7 bps, ISF 1.9, CSH2 0.8, EQQQ 1.1. Rounded up to cover EQGB, the widest.
+_UK_ETF_SPREAD = 0.0003
 _US_SPREAD = 0.0005          # ~5 bps half-spread per side, US large-cap
 
 
@@ -62,18 +68,19 @@ class IbkrTieredCost:
 
     def __init__(self, ticker: str, include_spread: bool = False) -> None:
         self._uk = ticker.upper().endswith(".L")
+        self._etf = is_uk_listed_etf(ticker)
         self._include_spread = include_spread
 
     def cost(self, trade_value: float, is_buy: bool) -> float:
         v = max(0.0, float(trade_value))
         if self._uk:
             c = max(_UK_MIN_GBP, _TIER_PCT * v)
-            if is_buy:
+            if is_buy and not self._etf:  # SDRT and the PTM levy apply to UK company shares, not ETFs
                 c += _STAMP_DUTY_PCT * v
                 if v > _PTM_THRESHOLD_GBP:
                     c += _PTM_LEVY_GBP
             if self._include_spread:
-                c += _UK_SPREAD * v
+                c += (_UK_ETF_SPREAD if self._etf else _UK_SPREAD) * v
         else:
             c = min(max(_US_MIN_GBP, _TIER_PCT * v), _US_MAX_GBP)
             if self._include_spread:

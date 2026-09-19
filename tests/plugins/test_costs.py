@@ -57,6 +57,44 @@ class TestIbkrTieredUk:
         assert m.cost(2000.0, False) == pytest.approx(4.00)
 
 
+class TestIbkrTieredUkEtf:
+    """UK-listed ETFs / UCITS funds pay commission only: no stamp duty (SDRT), no PTM levy.
+
+    Regression: every .L buy used to be charged 0.5% stamp duty plus GBP 1 PTM over GBP 10k, so the
+    ISF.L tier fill of 2026-09-17 was booked at GBP 110.97 instead of ~GBP 10 commission."""
+
+    @pytest.mark.parametrize("ticker", ["ISF.L", "EQGB.L", "CSH2.L", "XSTR.L", "isf.l"])
+    def test_buy_is_commission_only(self, ticker):
+        m = IbkrTieredCost(ticker)
+        assert m.cost(2000.0, True) == m.cost(2000.0, False) == pytest.approx(1.00)
+
+    def test_no_ptm_levy_on_large_etf_buys(self):
+        m = IbkrTieredCost("EQGB.L")
+        assert m.cost(12_000.0, True) == pytest.approx(6.00)
+
+    def test_the_2026_09_17_isf_fill_is_about_ten_pounds_not_110(self):
+        value = 10.512 * 1902  # 19,993.82: ISF.L tier fill
+        cost = IbkrTieredCost("ISF.L").cost(value, True)
+        assert cost == pytest.approx(0.0005 * value)
+        assert cost == pytest.approx(10.0, abs=0.05)
+
+    def test_min_commission_still_applies(self):
+        assert IbkrTieredCost("CSH2.L").cost(500.0, True) == pytest.approx(1.00)
+
+    def test_uk_shares_still_pay_stamp_duty_and_ptm(self):
+        assert IbkrTieredCost("SHEL.L").cost(12_000.0, True) == pytest.approx(67.00)
+        assert IbkrTieredCost("HSBA.L").cost(2000.0, True) == pytest.approx(11.00)
+
+    def test_etf_spread_term_is_the_measured_3bps_not_the_15bps_share_default(self):
+        etf = IbkrTieredCost("ISF.L", include_spread=True).cost(10_000.0, False)
+        share = IbkrTieredCost("SHEL.L", include_spread=True).cost(10_000.0, False)
+        assert etf == pytest.approx(5.00 + 3.00)      # commission 0.05% + 3 bps
+        assert share == pytest.approx(5.00 + 15.00)   # unchanged for UK company shares
+
+    def test_factory_routes_etfs_through_the_exemption(self):
+        assert make_cost_model("ibkr_tiered", "ISF.L", 10.0).cost(2000.0, True) == pytest.approx(1.00)
+
+
 class TestIbkrTieredUs:
 
     def test_min_fee_binds_at_small_stake(self):

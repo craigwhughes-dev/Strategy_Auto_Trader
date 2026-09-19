@@ -8,6 +8,7 @@ from Strategy_Auto_Trader.broker.symbols import (
     IBKR_UNRESOLVABLE,
     ibkr_contract_params,
     ibkr_order_contract_kwargs,
+    is_uk_listed_etf,
     normalize_fill_price,
     yfinance_ticker,
     sizing_price,
@@ -197,3 +198,24 @@ class TestNormalizeFillPrice:
 
     def test_zero_fill_passes_through(self):
         assert normalize_fill_price("HSBA.L", 0.0, 1462.0) == 0.0
+
+
+class TestIsUkListedEtf:
+    @pytest.mark.parametrize("ticker", ["ISF.L", "EQGB.L", "CSH2.L", "XSTR.L", "IGLS.L", "ISXF.L", "isf.l", "csh2.l"])
+    def test_registered_lse_funds_are_etfs(self, ticker):
+        assert is_uk_listed_etf(ticker) is True
+
+    @pytest.mark.parametrize("ticker", ["SHEL.L", "LLOY.L", "HSBA.L", "BT-A.L", "NG.L", "R.L"])
+    def test_uk_company_shares_are_not(self, ticker):
+        assert is_uk_listed_etf(ticker) is False
+
+    @pytest.mark.parametrize("ticker", ["SPY", "AAPL", "BRK-B", "ISF", "EQGB"])
+    def test_non_lse_tickers_are_not(self, ticker):
+        assert is_uk_listed_etf(ticker) is False  # exemption is for the LSE listing (.L) only
+
+    def test_agrees_with_how_ibkr_routes_the_ticker(self):
+        # every ticker routed to LSEETF, or pinned to an explicit exchange, is an ETF; ordinary LSE shares are not
+        for ticker in ("ISF.L", "EQGB.L", "XSTR.L", "IGLS.L", "ISXF.L"):
+            assert ibkr_contract_params(ticker)[1] == "LSEETF" and is_uk_listed_etf(ticker)
+        assert ibkr_contract_params("CSH2.L")[1] == "LSE" and is_uk_listed_etf("CSH2.L")
+        assert ibkr_contract_params("HSBA.L")[1] == "LSE" and not is_uk_listed_etf("HSBA.L")

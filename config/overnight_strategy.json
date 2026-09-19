@@ -69,6 +69,7 @@
     "lower_tiers_enabled": false,
     "vix_tier1": 15,
     "vix_tier2": 17.5,
+    "commission_pct": 0.05,
     "index_refresh_seconds": 300,
     "index_max_outage_seconds": 10800
   },

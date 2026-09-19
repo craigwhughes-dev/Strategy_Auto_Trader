@@ -204,3 +204,32 @@ class TestLowerTiersFlag:
         section = json.loads(CONFIG.read_text(encoding="utf-8"))["tier_allocation"]
         assert section["lower_tiers_enabled"] is False
         assert MultiTierAllocationManager.from_config(section).lower_tiers_enabled is False
+
+
+class TestCommission:
+    def test_default_is_the_ibkr_uk_tiered_rate_not_double_it(self):
+        assert MultiTierAllocationManager().commission_pct == 0.05
+
+    def test_config_sets_the_commission(self):
+        assert MultiTierAllocationManager.from_config({"commission_pct": 0.08}).commission_pct == 0.08
+
+    @pytest.mark.parametrize("bad", [-0.1, "0.05", True])
+    def test_bad_commission_rejected(self, bad):
+        with pytest.raises(ValueError):
+            MultiTierAllocationManager.from_config({"commission_pct": bad})
+
+    def test_shipped_config_commission_is_005(self):
+        section = json.loads(CONFIG.read_text(encoding="utf-8"))["tier_allocation"]
+        assert section["commission_pct"] == 0.05
+        assert MultiTierAllocationManager.from_config(section).commission_pct == 0.05
+
+    def test_rebalance_sizing_uses_the_configured_commission(self):
+        """At 0.05% a GBP 20,000 rotation buys ~1,999 shares at 10.00; at the old 0.1% it left ~GBP 20 more idle."""
+        mgr = MultiTierAllocationManager(vxn_threshold=23.0, vxn_exit_threshold=24.0, lower_tiers_enabled=False)
+        mgr.current_asset = "CSH2.L"
+        orders = mgr.rebalance(TODAY, 20.0, 30.0, {"EQGB.L": 10.0, "CSH2.L": 100.0}, 20_000.0, {"CSH2.L": 0})
+        buy = next(o for o in orders if o.action == "BUY")
+        assert buy.ticker == "EQGB.L"
+        assert buy.quantity == int(20_000.0 / (10.0 * 1.0005))
+        old = int(20_000.0 / (10.0 * 1.001))
+        assert buy.quantity > old

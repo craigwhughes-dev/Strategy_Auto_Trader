@@ -32,7 +32,7 @@ _log = logging.getLogger(__name__)
 # is rejected so a typo cannot silently leave a threshold at its built-in default.
 _NUMBER_KEYS = frozenset({
     "vxn_threshold", "vxn_exit_threshold", "vix_tier1", "vix_tier2",
-    "index_refresh_seconds", "index_max_outage_seconds",
+    "index_refresh_seconds", "index_max_outage_seconds", "commission_pct",
 })
 _BOOL_KEYS = frozenset({"lower_tiers_enabled"})
 _CONFIG_KEYS = _NUMBER_KEYS | _BOOL_KEYS
@@ -78,7 +78,7 @@ class MultiTierAllocationManager:
         vxn_threshold: float = 18.0,
         vix_tier1: float = 15.0,
         vix_tier2: float = 17.5,
-        commission_pct: float = 0.1,
+        commission_pct: float = 0.05,
         vxn_exit_threshold: float | None = None,
         index_refresh_seconds: float = REFRESH_SECONDS,
         index_max_outage_seconds: float = MAX_OUTAGE_SECONDS,
@@ -90,7 +90,8 @@ class MultiTierAllocationManager:
             vxn_threshold: VXN level to ENTER tier 1 (Nasdaq). VXN ≤ this → Nasdaq
             vix_tier1: VIX threshold for tier 2 (SPY). VIX ≤ this → SPY
             vix_tier2: VIX threshold for tier 3 (ISF.L). VIX ≤ this → ISF.L
-            commission_pct: Commission as % of order value (e.g., 0.1 for 0.1%)
+            commission_pct: Commission per side as % of order value. IBKR UK Tiered is 0.05 (0.05%),
+                min GBP 1; UK ETFs pay no stamp duty or PTM levy, so this is the whole cost
             vxn_exit_threshold: deadband upper edge. While Nasdaq is HELD it stays tier 1 until
                 VXN > this. None (default) means no deadband: exit at vxn_threshold.
             index_refresh_seconds: how often VIX/VXN hourly data is re-fetched
@@ -104,6 +105,8 @@ class MultiTierAllocationManager:
             raise ValueError(f"vxn_exit_threshold ({vxn_exit_threshold}) must be >= vxn_threshold ({vxn_threshold})")
         if vix_tier1 >= vix_tier2:
             raise ValueError(f"vix_tier1 ({vix_tier1}) must be < vix_tier2 ({vix_tier2})")
+        if commission_pct < 0:
+            raise ValueError(f"commission_pct ({commission_pct}) must be >= 0")
         self.vxn_threshold = vxn_threshold
         self.vxn_exit_threshold = vxn_exit_threshold
         self.vix_tier1 = vix_tier1

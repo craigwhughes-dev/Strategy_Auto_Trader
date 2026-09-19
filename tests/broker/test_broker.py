@@ -1445,6 +1445,30 @@ class TestBroker:
         expected_cost = max(1.00, 0.0005 * trade_value) + 0.005 * trade_value
         assert pm.positions["LLOY.L"]["entry_cost"] == pytest.approx(expected_cost)
 
+    def test_record_entry_uk_etf_pays_commission_only(self, tmp_path):
+        """The real 2026-09-17 ISF.L tier fill (1,902 @ 10.512) was booked at 110.97 (commission 9.97 +
+        phantom stamp duty 99.97 + PTM 1.00). UCITS ETFs are exempt from both, so only ~10 is due."""
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.types import FillResult
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
+        fill = FillResult("ISF.L", "BUY", 10.512, 1902, "2026-09-17T09:00:00+00:00")
+        pm.record_entry("ISF.L", fill, 1.0, 0.0, 0.0, market="ftse", currency="GBP", stop_managed=False)
+        assert pm.positions["ISF.L"]["entry_cost"] == pytest.approx(0.0005 * 10.512 * 1902)
+        assert pm.positions["ISF.L"]["entry_cost"] < 11.0
+        assert pm.trade_log[-1]["cost"] == pytest.approx(10.0, abs=0.05)
+
+    def test_record_exit_uk_etf_round_trip_costs_only_commission(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.types import FillResult
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
+        pm.record_entry("EQGB.L", FillResult("EQGB.L", "BUY", 50.0, 200, "2026-09-18T09:00:00+00:00"),
+                        1.0, 0.0, 0.0, stop_managed=False)
+        pm.record_exit("EQGB.L", FillResult("EQGB.L", "SELL", 51.0, 200, "2026-09-19T09:00:00+00:00"))
+        last = pm.trade_log[-1]
+        assert last["gross_pl"] == pytest.approx(200.0)
+        assert last["cost"] == pytest.approx(0.0005 * 10_000 + 0.0005 * 10_200)  # 5.00 buy + 5.10 sell, nothing else
+        assert last["pl"] == pytest.approx(200.0 - 10.10)
+
     def test_record_exit_nets_commission_off_both_legs(self, tmp_path):
         """pl is net of entry + exit commission; gross_pl keeps the raw
         (fill - entry) * qty figure for audit."""

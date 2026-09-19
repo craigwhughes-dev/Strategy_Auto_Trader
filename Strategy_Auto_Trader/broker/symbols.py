@@ -76,6 +76,19 @@ def ibkr_contract_params(ticker: str) -> tuple[str, str, str]:
     return ticker.replace("-", " "), "SMART", "USD"
 
 
+def is_uk_listed_etf(ticker: str) -> bool:
+    """True for an LSE-listed ETF/UCITS fund (as opposed to a UK company share).
+
+    These are exempt from UK stamp duty and the PTM levy, so cost models must not charge them.
+    Membership is exactly the two tables above that route ETFs to IBKR (LSEETF listings plus the
+    explicit-exchange ETFs such as CSH2), so registering a fund to trade it also registers the exemption.
+    """
+    if not ticker.upper().endswith(".L"):
+        return False
+    base = ticker[:-2].replace("-", ".").upper()
+    return base in _LSEETF_SYMBOLS or base in _LSE_EXPLICIT_EXCHANGE
+
+
 def ibkr_order_contract_kwargs(ticker: str) -> dict[str, str]:
     """Keyword args for the ib_async Stock used to PLACE ORDERS for ticker.
 
