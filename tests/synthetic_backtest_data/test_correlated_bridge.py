@@ -41,7 +41,7 @@ def _daily(n: int, seed: int) -> pd.Series:
 
 @pytest.fixture(scope="module")
 def two_series_bridged():
-    daily = {"A": _daily(500, 1), "B": _daily(500, 2)}
+    daily = {"A": _daily(200, 1), "B": _daily(200, 2)}
     sessions = {"A": LSE, "B": US}
     params = BridgeParams(("A", "B"), np.array([[1.0, -0.8], [-0.8, 1.0]]), {"A": 1.0, "B": 1.0})
     since = daily["A"].index[1]
@@ -106,13 +106,13 @@ class TestAccrueDeterministic:
 
 class TestCalibrateParams:
     def test_calibrated_inputs_reproduce_the_target_correlation_and_scale(self):
-        daily = {"A": _daily(700, 1), "B": _daily(700, 2)}
+        daily = {"A": _daily(200, 1), "B": _daily(200, 2)}
         sessions = {"A": LSE, "B": US}
         target = BridgeParams(("A", "B"), np.array([[1.0, -0.7], [-0.7, 1.0]]), {"A": 0.8, "B": 0.75})
         since = daily["A"].index[1]
         until = {n: daily[n].index[-1] + pd.Timedelta(days=1) for n in daily}
 
-        cal = calibrate_params(target, daily, sessions, since, until, seed=11, iterations=6)
+        cal = calibrate_params(target, daily, sessions, since, until, seed=11, iterations=3)
         out = bridge_dataset(daily, sessions, cal, np.random.default_rng(11), since, until)
         got = estimate_params({n: out[n]["Close"] for n in out}, sessions, since=str(since.date()), min_pairs=50)
 

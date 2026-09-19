@@ -139,7 +139,8 @@ def test_atomic_write_json_raises_after_exhausting_retries(tmp_path, monkeypatch
         raise PermissionError("Simulated persistent lock")
 
     monkeypatch.setattr("os.replace", always_fails)
-    monkeypatch.setattr("time.sleep", lambda _: None)
+    monkeypatch.setattr("Strategy_Auto_Trader.core.atomic_io.time.sleep", lambda _: None)
+    monkeypatch.setattr("Strategy_Auto_Trader.core.atomic_io._find_file_holders", lambda p: [])
 
     path = tmp_path / "test.json"
     with pytest.raises(PermissionError, match="Simulated persistent lock"):

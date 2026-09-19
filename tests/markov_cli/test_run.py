@@ -110,7 +110,8 @@ class TestRun:
             def __init__(self, ticker):
                 raise RuntimeError("network error")
 
-        with mock.patch("yfinance.Ticker", FakeTicker):
+        with mock.patch("yfinance.Ticker", FakeTicker), \
+             mock.patch("Strategy_Auto_Trader.core.net_retry.time.sleep"):
             name, sector = run_mod._fetch_company_info("AAPL")
         assert name == "AAPL"
         assert sector == ""

@@ -1868,6 +1868,10 @@ class TestBuildNightlyPnlPositions:
 class TestExecuteSignalsWithRetry:
     """Auto-reconnect and retry on socket errors."""
 
+    @pytest.fixture(autouse=True)
+    def no_sleep(self, monkeypatch):
+        monkeypatch.setattr("Strategy_Auto_Trader.markov_cli.live_daemon.time.sleep", lambda _: None)
+
     def test_success_first_attempt(self, monkeypatch):
         """Successful execution on first attempt returns immediately."""
         def fake_execute(*a, **k):

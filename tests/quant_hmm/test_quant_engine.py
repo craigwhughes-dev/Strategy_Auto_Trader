@@ -93,7 +93,8 @@ class TestQuantEngine:
 
     def test_fetch_hourly_exception_returns_none(self):
         from Strategy_Auto_Trader.quant_hmm.quant_engine import fetch_hourly
-        with mock.patch("yfinance.download", side_effect=Exception("network error")):
+        with mock.patch("yfinance.download", side_effect=Exception("network error")), \
+             mock.patch("Strategy_Auto_Trader.core.net_retry.time.sleep"):
             assert fetch_hourly("TEST", source="yfinance") is None
 
     def test_fetch_hourly_flattens_multiindex_columns(self):
@@ -758,7 +759,8 @@ class TestFetchDaily:
 
     def test_fetch_daily_exception_returns_none(self):
         from Strategy_Auto_Trader.quant_hmm.quant_engine import fetch_daily
-        with mock.patch("yfinance.download", side_effect=Exception("network")):
+        with mock.patch("yfinance.download", side_effect=Exception("network")), \
+             mock.patch("Strategy_Auto_Trader.core.net_retry.time.sleep"):
             assert fetch_daily("SPY") is None
 
     def test_fetch_daily_flattens_multiindex_columns(self):
