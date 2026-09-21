@@ -582,3 +582,25 @@ def send_nightly_position_pnl(positions: list[dict]) -> None:
     subject = f"Nightly position P&L: {n} open position{'s' if n != 1 else ''}"
     _send(subject, html)
     logger.info(f"  Nightly position P&L email sent: {subject}")
+
+
+def send_data_outage_alert(hours: float, current_asset: str) -> None:
+    """Alert that VIX and VXN have both been unavailable long enough to force the allocator to cash.
+
+    Fires once per outage (the allocation manager tracks the episode)."""
+    html = f"""<html><body style="margin:0;padding:20px;background:#0f1117;font-family:system-ui,sans-serif;color:#e0e0e0">
+<div style="max-width:700px;margin:0 auto">
+  <h1 style="color:#ef9a9a;margin:0 0 4px">Volatility data outage: moving to cash</h1>
+  <div style="color:#888;margin-bottom:16px">No VIX or VXN reading for over {hours:g} hours</div>
+  <div style="background:#2a1a1a;border:1px solid #4a2a2a;border-radius:8px;padding:12px 16px;margin:16px 0">
+    <p style="color:#ddd;margin:0">The allocator can no longer tell whether volatility has spiked, so it is
+    selling <strong>{current_asset}</strong> and holding cash (CSH2.L) until readings return.</p>
+    <p style="color:#ddd;margin:8px 0 0">When data returns the normal VXN rule resumes from cash (re-entry only at the entry level).
+    If IB Gateway is down the sell cannot be placed until it reconnects.</p>
+  </div>
+  <p style="color:#888;font-size:0.85em">No further alerts will be sent for this outage.</p>
+</div></body></html>"""
+
+    subject = f"VIX/VXN data outage over {hours:g}h — allocator forcing cash"
+    _send(subject, html)
+    logger.info(f"  Data-outage alert sent: {subject}")

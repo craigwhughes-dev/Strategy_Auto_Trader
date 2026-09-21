@@ -129,6 +129,8 @@ class MultiTierAllocationManager:
         self._last_tier_num = None
         self._last_target_asset = None  # Target asset selected by last signal
         self._last_action = None  # "HOLD" | "BUY" | "SELL"
+        self._data_outage = False  # both indices lost for longer than the outage limit
+        self.outage_limit_hours = index_max_outage_seconds / 3600
 
     @classmethod
     def from_config(cls, section: dict | None) -> "MultiTierAllocationManager":
@@ -330,7 +332,7 @@ class MultiTierAllocationManager:
                         action="BUY",
                         quantity=buy_qty,
                         limit_price=None,
-                        reason=f"Rebalance: enter {signal.target_asset} (tier {signal.tier}), VIX={vix:.1f}",
+                        reason=f"Rebalance: enter {signal.target_asset} (tier {signal.tier}), VIX={'n/a' if vix is None else f'{vix:.1f}'}",
                     )
                 )
                 cost = buy_qty * target_price * (1 + self.commission_pct / 100)
@@ -404,6 +406,18 @@ class MultiTierAllocationManager:
                 self._last_known_cash = current_cash
                 self._last_cash_check_time = now
             return current_cash
+
+    def data_outage(self) -> tuple[bool, bool]:
+        """(outage active, outage newly started this call).
+
+        An outage is both VIX and VXN having had no successful fetch for longer than the feeds' outage limit.
+        While active, the daemon must still call rebalance() with both readings None so the signal falls to
+        cash; when either feed recovers the flag clears and the normal rule resumes from cash.
+        """
+        lost = self._vix_feed.is_lost() and self._vxn_feed.is_lost()
+        newly = lost and not self._data_outage
+        self._data_outage = lost
+        return lost, newly
 
     def _get_vix_current(self, fetcher) -> float | None:
         """Close of the latest completed hourly VIX bar (re-fetched at most every few minutes).
@@ -484,5 +498,6 @@ class MultiTierAllocationManager:
             "current_asset": self.current_asset,
             "current_price": self.current_price,
             "last_rebalance_date": self.last_rebalance_date.isoformat() if self.last_rebalance_date else None,
+            "data_outage": self._data_outage,
             "tier_allocation": tier_allocation,
         }

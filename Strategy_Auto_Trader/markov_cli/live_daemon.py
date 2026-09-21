@@ -1259,12 +1259,24 @@ def process_cycle(
         vix_current = allocation_mgr._get_vix_current(_fetch_vix_hourly)
         vxn_current = allocation_mgr._get_vxn_current(_fetch_vxn_hourly)
 
+        # Both indices gone for longer than the outage limit: keep going with both readings None so the
+        # signal falls to cash, instead of skipping the block and holding Nasdaq blind.
+        data_lost, data_newly_lost = allocation_mgr.data_outage()
+        if data_newly_lost:
+            outage_hours = allocation_mgr.outage_limit_hours
+            logger.error(f"[{market_name}] Allocation: VIX and VXN both unavailable for over {outage_hours:g}h — forcing cash")
+            try:
+                from ..output.emailer import send_data_outage_alert
+                send_data_outage_alert(outage_hours, allocation_mgr.current_asset)
+            except Exception as _e:
+                logger.error(f"Data outage alert send failed: {_e}")
+
         if vix_current is not None:
             logger.debug(f"[{market_name}] Allocation: VIX current = {vix_current:.2f}")
         if vxn_current is not None:
             logger.debug(f"[{market_name}] Allocation: VXN current = {vxn_current:.2f}")
 
-        if vix_current is not None or vxn_current is not None:
+        if vix_current is not None or vxn_current is not None or data_lost:
             from datetime import date as _date
             today = _date.today()
             try:

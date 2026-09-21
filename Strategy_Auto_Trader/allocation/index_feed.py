@@ -12,6 +12,8 @@ overnight print, so outside US hours both feeds simply keep returning the last c
 Failure handling: a failed refresh keeps the last good value for `max_outage_seconds`, then
 returns None (the allocator treats a missing VIX as cash and a missing VXN as "no Nasdaq").
 Retries are also spaced by `refresh_seconds` so an IBKR outage is not hammered every cycle.
+`is_lost()` reports the same limit as a flag that also covers a cold start with no data ever, so the
+allocator can tell "both indices gone for longer than the limit" (go to cash) from "no data yet".
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from ..core.trading_sessions import US, bar_end
 _log = logging.getLogger(__name__)
 
 REFRESH_SECONDS = 300
-MAX_OUTAGE_SECONDS = 3 * 3600
+MAX_OUTAGE_SECONDS = 4 * 3600
 
 
 def _utc_now() -> pd.Timestamp:
@@ -58,6 +60,7 @@ class IndexFeed:
         self._max_outage_seconds = max_outage_seconds
         self._clock = clock
         self._df: pd.DataFrame | None = None
+        self._first_attempt: pd.Timestamp | None = None
         self._last_attempt: pd.Timestamp | None = None
         self._last_success: pd.Timestamp | None = None
 
@@ -81,7 +84,20 @@ class IndexFeed:
         _log.debug(f"{self.name} = {close:.2f} (bar ended {ended:%Y-%m-%d %H:%M} UTC)")
         return close
 
+    def is_lost(self) -> bool:
+        """True once no fetch has succeeded for longer than `max_outage_seconds`.
+
+        The clock runs from the last success, or from the first attempt if there has never been one, so a
+        cold start is not an outage until the limit has passed. Never true before the first attempt.
+        """
+        since = self._last_success if self._last_success is not None else self._first_attempt
+        if since is None:
+            return False
+        return (self._clock() - since).total_seconds() > self._max_outage_seconds
+
     def _refresh(self, fetcher: Callable[[], pd.DataFrame | None], now: pd.Timestamp) -> None:
+        if self._first_attempt is None:
+            self._first_attempt = now
         self._last_attempt = now
         try:
             df = fetcher()

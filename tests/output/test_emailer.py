@@ -222,3 +222,15 @@ class TestEmailer:
         from Strategy_Auto_Trader.output.emailer import send_nightly_position_pnl
         send_nightly_position_pnl([])
         mock_send.assert_not_called()
+
+
+class TestDataOutageAlert:
+
+    @mock.patch("Strategy_Auto_Trader.output.emailer._send")
+    def test_send_data_outage_alert_names_the_asset_and_limit(self, mock_send):
+        from Strategy_Auto_Trader.output.emailer import send_data_outage_alert
+        send_data_outage_alert(4.0, "EQGB.L")
+        mock_send.assert_called_once()
+        subject, html = mock_send.call_args[0][0], mock_send.call_args[0][1]
+        assert "4h" in subject and "cash" in subject
+        assert "EQGB.L" in html and "CSH2.L" in html
