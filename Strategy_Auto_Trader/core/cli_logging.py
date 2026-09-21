@@ -16,8 +16,10 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 _LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
 _configured = False
@@ -64,6 +66,55 @@ def install_ibkr_transient_filter(*handlers: logging.Handler) -> None:
     f = _IbkrTransientFilter()
     for h in handlers:
         if not any(isinstance(x, _IbkrTransientFilter) for x in h.filters):
+            h.addFilter(f)
+
+
+# Gateway-connectivity signatures. IBC restarts the gateway and Task Scheduler
+# restarts the daemon inside the quiet window every night, so these are
+# expected there and only produce LogSentinel noise.
+_GATEWAY_DOWN_PATTERNS = _IBKR_TRANSIENT_PATTERNS + (
+    "WinError 10061",
+    "Connect call failed",
+    "could not reach broker",
+    "broker connect failed",
+    "unreachable",
+    "IBKR data reconciliation",
+    "ibkr_reconcile exited",
+    "Auto-bounc",
+)
+
+_QUIET_TZ = ZoneInfo("Europe/London")
+_QUIET_START_HOUR = 0
+_QUIET_END_HOUR = 4  # exclusive
+
+
+class _OvernightGatewayFilter(logging.Filter):
+    """Drop WARNING+ gateway-connectivity records between 00:00 and 04:00 London time.
+
+    Suppressed records are dropped, not downgraded: a WARNING would still be
+    written to the file and picked up by LogSentinel. Anything still failing
+    after 04:00 logs normally. `now_fn` is injectable so tests need no clock.
+    """
+
+    def __init__(self, now_fn: Callable[[], datetime] | None = None):
+        super().__init__()
+        self._now_fn = now_fn or (lambda: datetime.now(_QUIET_TZ))
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno < logging.WARNING:
+            return True
+        if not _QUIET_START_HOUR <= self._now_fn().hour < _QUIET_END_HOUR:
+            return True
+        msg = record.getMessage()
+        return not any(p in msg for p in _GATEWAY_DOWN_PATTERNS)
+
+
+def install_overnight_gateway_filter(*handlers: logging.Handler) -> None:
+    """Add _OvernightGatewayFilter to each handler (same handler-level reasoning as
+    install_ibkr_transient_filter: logger-level filters miss propagated records)."""
+    f = _OvernightGatewayFilter()
+    for h in handlers:
+        if not any(isinstance(x, _OvernightGatewayFilter) for x in h.filters):
             h.addFilter(f)
 
 

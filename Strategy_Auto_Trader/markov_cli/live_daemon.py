@@ -83,7 +83,7 @@ class _DailyFileHandler(logging.Handler):
 
 def setup_logging() -> logging.Logger:
     """Set up daily log that rolls over to a new file at local midnight."""
-    from ..core.cli_logging import install_ibkr_transient_filter
+    from ..core.cli_logging import install_ibkr_transient_filter, install_overnight_gateway_filter
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
     logger = logging.getLogger("live_daemon")
@@ -119,6 +119,7 @@ def setup_logging() -> logging.Logger:
     root.addHandler(console)
 
     install_ibkr_transient_filter(handler, console)
+    install_overnight_gateway_filter(handler, console)
     return logger
 
 
