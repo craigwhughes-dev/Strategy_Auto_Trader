@@ -63,3 +63,23 @@ scripts/make_watchlist_variants.py
 .vscode/
 .idea/
 .DS_Store
+
+# Local tier-strategy analysis work (2026-09-20): review docs, validation modules, scripts and their tests
+STRATEGY_REVIEW.md
+STRATEGY_REVIEW_PANEL_CRITIQUE.md
+TIER_MONITORING_RULES_DRAFT.md
+Strategy_Auto_Trader/allocation/matched_blend.py
+Strategy_Auto_Trader/allocation/multi_tier_intraday_backtest.py
+Strategy_Auto_Trader/allocation/real_window.py
+Strategy_Auto_Trader/allocation/reentry_override.py
+Strategy_Auto_Trader/allocation/tax_ledger.py
+Strategy_Auto_Trader/allocation/threshold_walk_forward.py
+scripts/tier_analysis/liquidity_scale.py
+scripts/tier_analysis/real_data_backtest.py
+scripts/tier_analysis/realized_vol_override.py
+scripts/tier_analysis/t[1-8]_*.py
+tests/allocation/test_matched_blend.py
+tests/allocation/test_real_window.py
+tests/allocation/test_reentry_override.py
+tests/allocation/test_tax_ledger.py
+tests/allocation/test_threshold_walk_forward.py
