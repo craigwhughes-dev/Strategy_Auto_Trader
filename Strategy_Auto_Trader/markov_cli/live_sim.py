@@ -255,7 +255,8 @@ def _get_csh2_return_for_day(csh2_returns: pd.DataFrame | None, day: pd.Timestam
     if csh2_returns is None:
         return None
     try:
-        return float(csh2_returns.loc[day, 'daily_return'])
+        val = float(csh2_returns.loc[day, 'daily_return'])
+        return val if pd.notna(val) else None
     except (KeyError, TypeError):
         return None
 
