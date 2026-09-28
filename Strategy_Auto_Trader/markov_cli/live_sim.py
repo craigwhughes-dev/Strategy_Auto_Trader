@@ -119,28 +119,64 @@ def _max_drawdown(values: list[float]) -> float:
     return max_dd
 
 
-def _portfolio_sharpe_sortino(equity_curve: list[dict]) -> tuple[float, float]:
-    """Annualized Sharpe and Sortino from sparse equity curve.
+def _portfolio_sharpe_sortino(
+    equity_curve: list[dict],
+    cash_returns: "pd.DataFrame | None" = None,
+) -> tuple[float, float, float]:
+    """Annualized Sharpe, excess-over-cash Sharpe (xSharpe) and Sortino from a sparse equity curve.
 
-    Forward-fills portfolio_value to daily frequency, then computes returns.
-    Sortino uses full-sample downside deviation (RMS of min(r,0) over all days).
-    Returns (nan, nan) when there is insufficient history.
+    The equity curve is event-sampled, so portfolio_value is forward-filled onto a BUSINESS-day
+    index before returns are taken. That gives a ~252/yr basis, which is what the sqrt(252)
+    annualisation assumes. This function previously resampled to calendar days ("D") while still
+    annualising by sqrt(252), understating every figure by roughly sqrt(252/365) — so Sharpe and
+    Sortino logged by live_sim before 2026-09-28 are on the old basis and are NOT comparable to
+    these. (Business days still count exchange holidays, ~261/yr vs the engine's true trading
+    days; that residual is under 2% on the sqrt.)
+
+    xSharpe subtracts the cash asset's own return before annualising. Raw Sharpe rewards idle
+    cash, which earns income at almost no volatility, so a strategy that parks most of the pot in
+    CSH2 scores well on raw Sharpe without having any trading edge. xSharpe removes that. It is
+    the metric allocation/intraday_engine.py reports, so it is the only one of the two that can
+    be compared across the two engines. `cash_returns` is the frame returned by
+    _load_csh2_returns(); xSharpe is nan when it is None (same fallback as the allocation engine).
+
+    Sortino stays on raw (not excess) returns, matching intraday_engine.window_stats().
+    Returns (nan, nan, nan) when there is insufficient history.
     """
     if len(equity_curve) < 10:
-        return float("nan"), float("nan")
+        return float("nan"), float("nan"), float("nan")
     pv = pd.Series(
         {row["date"]: row["portfolio_value"] for row in equity_curve}
     ).sort_index()
-    daily = pv.resample("D").last().ffill()
-    rets = daily.pct_change().dropna().values
+    daily = pv.resample("B").last().ffill()
+    rets = daily.pct_change().dropna()
     if len(rets) < 10:
-        return float("nan"), float("nan")
-    mean_r = float(np.mean(rets))
-    std_r = float(np.std(rets, ddof=1))
+        return float("nan"), float("nan"), float("nan")
+    r = rets.to_numpy(dtype=float)
+    mean_r = float(np.mean(r))
+    std_r = float(np.std(r, ddof=1))
     sharpe = mean_r / std_r * np.sqrt(252) if std_r > 0 else float("nan")
-    downside_dev = float(np.sqrt(np.mean(np.minimum(rets, 0.0) ** 2)))
+    downside_dev = float(np.sqrt(np.mean(np.minimum(r, 0.0) ** 2)))
     sortino = mean_r / downside_dev * np.sqrt(252) if downside_dev > 0 else float("nan")
-    return sharpe, sortino
+    xsharpe = _excess_sharpe(rets, cash_returns)
+    return sharpe, xsharpe, sortino
+
+
+def _excess_sharpe(rets: "pd.Series", cash_returns: "pd.DataFrame | None") -> float:
+    """Annualised Sharpe of portfolio returns over the cash asset, aligned on `rets`' index.
+
+    Days the cash series does not cover (weekends already excluded, plus holidays and any gap in
+    the CSH2 history) contribute zero cash return rather than dropping the portfolio's own return
+    for that day — dropping them would silently shorten the sample.
+    """
+    if cash_returns is None or "daily_return" not in getattr(cash_returns, "columns", []):
+        return float("nan")
+    cash_s = pd.to_numeric(cash_returns["daily_return"], errors="coerce")
+    cash_s = cash_s[~cash_s.index.duplicated(keep="last")].sort_index()
+    cash = cash_s.reindex(rets.index).fillna(0.0).to_numpy(dtype=float)
+    excess = rets.to_numpy(dtype=float) - cash
+    std_x = float(np.std(excess, ddof=1))
+    return float(np.mean(excess) / std_x * np.sqrt(252)) if std_x > 0 else float("nan")
 
 
 def resolve_same_day_deployment_cap(strategy_name: str) -> float | None:
@@ -805,6 +841,9 @@ def main(argv: list[str] | None = None) -> int:
 
     _vix_series_cache: pd.Series | None = None  # fetched once, reused across strategies
     _daily_returns_cache: dict[str, pd.Series] | None = None  # built once, reused across strategies
+    # Cash-asset returns for xSharpe. Loaded once here rather than per (strategy, pot size):
+    # arbitrate() loads its own copy for the CSH2 sweep, but that one is scoped to a single run.
+    _cash_returns_for_metrics = _load_csh2_returns()
 
     for strategy_name in args.strategies:
         exempt = args.no_vol_filter or strategy_name in args.vol_filter_exempt
@@ -955,8 +994,11 @@ def main(argv: list[str] | None = None) -> int:
             total_pnl = stock_pnl
             peak_deployed = max((row["deployed"] for row in result["equity_curve"]), default=0.0)
             max_dd = _max_drawdown([row["portfolio_value"] for row in result["equity_curve"]])
-            sharpe, sortino = _portfolio_sharpe_sortino(result["equity_curve"])
+            sharpe, xsharpe, sortino = _portfolio_sharpe_sortino(
+                result["equity_curve"], cash_returns=_cash_returns_for_metrics
+            )
             sharpe_str = f"{sharpe:.2f}" if np.isfinite(sharpe) else "n/a"
+            xsharpe_str = f"{xsharpe:.2f}" if np.isfinite(xsharpe) else "n/a"
             sortino_str = f"{sortino:.2f}" if np.isfinite(sortino) else "n/a"
             vix_rej_str = (f", {result['n_rejected_vix']} rejected for VIX gate"
                            if result['n_rejected_vix'] else "")
@@ -969,7 +1011,7 @@ def main(argv: list[str] | None = None) -> int:
                   f"{vix_rej_str}{corr_rej_str}), "
                   f"final £{result['final_cash']:,.2f} (stock P&L £{stock_pnl:+,.2f}, "
                   f"peak deployed £{peak_deployed:,.2f}, max drawdown {max_dd*100:.1f}%, "
-                  f"Sharpe {sharpe_str}, Sortino {sortino_str})")
+                  f"xSharpe {xsharpe_str}, raw Sharpe {sharpe_str}, Sortino {sortino_str})")
 
             for row in result["equity_curve"]:
                 summary_rows.append({"strategy": strategy_name, "pot_size": pot_size, **row})
@@ -991,6 +1033,7 @@ def main(argv: list[str] | None = None) -> int:
                 "n_rejected_correlation": result["n_rejected_correlation"],
                 "max_drawdown": max_dd,
                 "sharpe": sharpe,
+                "xsharpe": xsharpe,
                 "sortino": sortino,
             }
             summary_rows.append(summary_row)

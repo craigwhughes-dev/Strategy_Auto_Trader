@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from unittest import mock
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -1334,3 +1335,133 @@ class TestMarkToMarket:
 
         opening_row = result["equity_curve"][0]
         assert opening_row["deployed"] == pytest.approx(500.0)  # cost basis, no crash
+
+
+class TestPortfolioSharpeXSharpe:
+    """xSharpe (excess over the cash asset) alongside raw Sharpe.
+
+    Raw Sharpe rewards idle cash, so a mostly-parked portfolio scores well on it
+    without any trading edge; xSharpe is the comparable metric because it is what
+    allocation/intraday_engine.py reports.
+    """
+
+    @staticmethod
+    def _curve(returns: list[float], start: str = "2020-01-01") -> list[dict]:
+        """Equity curve on consecutive business days from a list of daily returns."""
+        days = pd.bdate_range(start, periods=len(returns) + 1)
+        value = 100.0
+        rows = [{"date": days[0], "portfolio_value": value}]
+        for day, r in zip(days[1:], returns):
+            value *= (1 + r)
+            rows.append({"date": day, "portfolio_value": value})
+        return rows
+
+    @staticmethod
+    def _cash(dates, rate: float) -> pd.DataFrame:
+        return pd.DataFrame({"daily_return": [rate] * len(dates)}, index=pd.DatetimeIndex(dates))
+
+    def test_xsharpe_is_nan_without_cash_returns(self):
+        from Strategy_Auto_Trader.markov_cli.live_sim import _portfolio_sharpe_sortino
+
+        curve = self._curve([0.01, -0.005] * 15)
+        sharpe, xsharpe, sortino = _portfolio_sharpe_sortino(curve, cash_returns=None)
+
+        assert np.isfinite(sharpe)
+        assert np.isfinite(sortino)
+        assert np.isnan(xsharpe), "no cash series must mean no xSharpe, not a silent raw Sharpe"
+
+    def test_xsharpe_below_raw_sharpe_when_cash_earns(self):
+        """The whole point: a positive cash yield inflates raw Sharpe relative to xSharpe."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import _portfolio_sharpe_sortino
+
+        curve = self._curve([0.004, 0.001] * 40)
+        dates = [row["date"] for row in curve]
+        sharpe, xsharpe, _ = _portfolio_sharpe_sortino(
+            curve, cash_returns=self._cash(dates, 0.0002)
+        )
+
+        assert np.isfinite(xsharpe)
+        assert xsharpe < sharpe
+
+    def test_cash_only_portfolio_has_zero_xsharpe_but_high_raw_sharpe(self):
+        """A pot that just sits in the cash asset has no edge. Raw Sharpe says otherwise
+        (steady positive return, near-zero vol); xSharpe correctly reports ~no edge."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import _portfolio_sharpe_sortino
+
+        # Real cash rates drift, so a flat rate would give zero variance and a nan
+        # Sharpe for the wrong reason. The portfolio tracks the cash rate with a small
+        # zero-mean wobble, so excess returns have a real denominator rather than being
+        # identically zero (which would make xSharpe a ratio of float noise).
+        cash_rates = [0.0002 + 0.00001 * (i % 7) for i in range(80)]
+        jitter = [0.00002 if i % 2 == 0 else -0.00002 for i in range(80)]
+        curve = self._curve([c + j for c, j in zip(cash_rates, jitter)])
+        dates = [row["date"] for row in curve]
+        cash = pd.DataFrame({"daily_return": [0.0] + cash_rates}, index=pd.DatetimeIndex(dates))
+        sharpe, xsharpe, _ = _portfolio_sharpe_sortino(curve, cash_returns=cash)
+
+        assert sharpe > 100.0, "raw Sharpe on riskless carry is absurdly high — that is the bug"
+        assert abs(xsharpe) < 0.5, "no edge over cash must read as no edge"
+
+    def test_matches_intraday_engine_excess_sharpe(self):
+        """Cross-engine parity: same returns and same cash series must give the same
+        number in live_sim and allocation/intraday_engine, or comparisons stay invalid."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import _portfolio_sharpe_sortino
+        from Strategy_Auto_Trader.allocation.intraday_engine import _excess_sharpe as engine_xsh
+
+        rets = [0.003, -0.002, 0.005, -0.004, 0.001] * 20
+        curve = self._curve(rets)
+        dates = [row["date"] for row in curve]
+        rate = 0.00015
+
+        _, xsharpe, _ = _portfolio_sharpe_sortino(curve, cash_returns=self._cash(dates, rate))
+        expected = engine_xsh(np.array(rets), np.full(len(rets), rate))
+
+        assert xsharpe == pytest.approx(expected, rel=1e-9)
+
+    def test_uses_business_days_so_sqrt252_annualisation_is_right(self):
+        """Calendar-day resampling with a sqrt(252) factor understated every figure by
+        ~sqrt(252/365). Weekend rows must not dilute the series."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import _portfolio_sharpe_sortino
+
+        curve = self._curve([0.002] * 60)
+        n_business_days = len(pd.bdate_range(curve[0]["date"], curve[-1]["date"]))
+        assert n_business_days == len(curve), "fixture must already be business-day spaced"
+
+        sharpe, _, _ = _portfolio_sharpe_sortino(curve, cash_returns=None)
+        # Constant return => zero stdev => nan, which proves no weekend zero-return rows
+        # were injected (those would create variance out of nothing).
+        assert np.isnan(sharpe)
+
+    def test_missing_cash_days_contribute_zero_not_dropped_samples(self):
+        """A gap in the CSH2 history must not shorten the sample — it contributes a
+        zero cash return for that day instead."""
+        from Strategy_Auto_Trader.markov_cli.live_sim import _portfolio_sharpe_sortino
+
+        curve = self._curve([0.003, -0.002] * 30)
+        dates = [row["date"] for row in curve]
+        full = self._cash(dates, 0.0001)
+        sparse = full.iloc[:10]  # cash series covers only the first few days
+
+        _, xsharpe_full, _ = _portfolio_sharpe_sortino(curve, cash_returns=full)
+        _, xsharpe_sparse, _ = _portfolio_sharpe_sortino(curve, cash_returns=sparse)
+
+        assert np.isfinite(xsharpe_sparse)
+        assert xsharpe_sparse > xsharpe_full, "less cash drag subtracted => higher xSharpe"
+
+    def test_duplicate_cash_index_does_not_raise(self):
+        from Strategy_Auto_Trader.markov_cli.live_sim import _portfolio_sharpe_sortino
+
+        curve = self._curve([0.002, -0.001] * 30)
+        dates = [row["date"] for row in curve]
+        cash = self._cash(dates, 0.0001)
+        cash = pd.concat([cash, cash.iloc[:5]]).sort_index()
+
+        _, xsharpe, _ = _portfolio_sharpe_sortino(curve, cash_returns=cash)
+        assert np.isfinite(xsharpe)
+
+    def test_insufficient_history_returns_three_nans(self):
+        from Strategy_Auto_Trader.markov_cli.live_sim import _portfolio_sharpe_sortino
+
+        result = _portfolio_sharpe_sortino(self._curve([0.01] * 3), cash_returns=None)
+        assert len(result) == 3
+        assert all(np.isnan(v) for v in result)

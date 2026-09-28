@@ -15,6 +15,331 @@ Running log of every backtest/scan run — newest entry on top. One block per ru
 
 ---
 
+## 2026-09-28 (evening) — live_sim Sharpe fixed: xSharpe added, business-day basis. optimised_new 26yr recomputed.
+
+**Not a new backtest run** — a metric fix plus a recompute of the 2026-09-28 entry below from its saved equity curve (`data_synthetic/journals/live_sim_synthetic_position_summary_rerun.csv`, SUMMARY row verified identical: +£10,168.54 stock, £13,346.62 CSH2, DD -1.68%, 2107 candidates / 1446 admitted). No re-run, no data change.
+
+**Two defects in `_portfolio_sharpe_sortino()` (`markov_cli/live_sim.py`):**
+1. **Raw Sharpe, no risk-free rate.** `mean/std*sqrt(252)` on total portfolio return. `allocation/intraday_engine.py` reports xSharpe (excess over the cash asset). Every optimised_new-vs-tier-rule comparison was therefore apples-to-oranges, biased toward whichever strategy holds more cash — and optimised_new parks ~80% of the pot in CSH2.
+2. **Calendar-day resampling with a sqrt(252) annualisation.** The equity curve was forward-filled with `resample("D")`, injecting ~113 zero-return weekend days a year, then annualised as if the basis were 252. Understated every live_sim Sharpe/Sortino by roughly sqrt(252/365) ≈ 0.83.
+
+**Fix:** `resample("B")`; function now returns `(sharpe, xsharpe, sortino)`; xSharpe computed against the CSH2 daily-return series already loaded for the cash sweep, nan when that file is missing (same fallback as the allocation engine). Sortino left on raw returns, matching `intraday_engine.window_stats()`. 9 tests in `tests/markov_cli/test_live_sim.py::TestPortfolioSharpeXSharpe`, including a cross-engine parity test asserting live_sim and `intraday_engine._excess_sharpe` agree to 1e-9 on the same inputs. Full suite 1,906 passed.
+
+**optimised_new, 26yr synthetic, £100k, top-k 70 — same equity curve, three conventions:**
+
+| Strategy | Metric basis | Sharpe | Sortino |
+|---|---|---|---|
+| optimised_new | calendar-day raw (as logged 2026-09-28) | 0.73 | 1.15 |
+| optimised_new | business-day raw (new default) | 0.87 | 1.35 |
+| optimised_new | **business-day xSharpe (excess over CSH2)** | **-0.84** | — |
+
+**Conclusion: optimised_new's positive Sharpe was cash carry.** Peak deployed was £20,471 of £100,000, so ~£80k sat in CSH2 earning £13,347 over 26 years against £10,169 of stock P&L — and raw Sharpe scores that income at near-zero volatility. On excess-over-cash the strategy is **-0.84**: the stock sleeve underperformed simply holding the cash asset, risk-adjusted. The headline improves on the raw basis (0.73 -> 0.87 from the annualisation fix) and reverses on the comparable one.
+
+**Comparability note:** every live_sim Sharpe/Sortino in this log predating this entry is on the old calendar-day raw basis. Those figures are not comparable to these, nor to any xSharpe in the allocation-engine entries. Memory `project_tier_comparators_verified_20260918` was corrected the same day for an unrelated raw-vs-excess Sharpe error (see BACKTEST_LOG 2026-09-19 late night, section C).
+
+---
+
+## 2026-09-28 — 26yr synthetic, optimised_new, £100k, top-k 70
+
+**Command:** `uv run python -m Strategy_Auto_Trader.markov_cli.live_sim --strategies optimised_new --universe --synthetic-data-dir data_synthetic/hourly --start-date 2000-01-01 --synthetic-end-date 2026-09-01 --initial-cash 100000 --top-k 70 --workers 4`
+
+**Purpose:** Verify optimised_new unbroken after tier-system code changes.
+
+**Data:** `data_synthetic/hourly/`, 600 tickers, window 2000-04-13 to 2026-09-01 (earliest actual entry 2000-04-13). Top-k 70 selected.
+
+| Strategy | Closed trades | Net P&L (closed) | Avg profit/trade | Peak deployed | Max drawdown | Sharpe | Sortino |
+|---|---|---|---|---|---|---|---|
+| optimised_new | 1446 admitted | +£10,169 stock / +£23,515 total (incl. CSH2) | ~£7 | £20,471 | -1.7% | 0.73 | 1.15 |
+
+**Admission breakdown:** 2107 top-k candidates → 1446 admitted (437 VIX-gated at threshold=20.0, 224 kelly≤0, 0 cash-rejected).
+
+**CSH2 contribution:** ~£13,347 interest over 26yr. Peak deployed only £20.5k against £100k pot — remaining ~£80k parked in CSH2 throughout, making interest returns larger than stock P&L.
+
+**Note:** First run produced `final £nan` / Sharpe -0.11 / DD -83.3% — caused by a NaN in `data/cache/csh2_daily_returns.csv` on 2024-09-16 (price scale jump £159→£114,445 at source series splice; `daily_return` was NaN). The NaN passed `is not None` in `_get_csh2_return_for_day()`. Fixed: added `pd.notna(val)` check; filled bridge row daily_return with Sep-15 value (0.000134). Metrics above are from the clean re-run.
+
+**Conclusion:** No crash, no regression from tier changes. VIX gate reads 20.0 (intentional, validated 2026-09-02). Sharpe 0.73 is modest but positive over 26yr synthetic data.
+
+---
+
+## 2026-09-20 (evening) — PLAN_TIER_VALIDATION.md run: T1, T2, T4, T5, T6, T7, T8 baselines (T3 parked). Criterion outcomes below are reports; owner decisions taken afterwards are listed in the next line.
+
+**Owner decisions after this run (2026-09-20):** keep VXN 23/24 and expect lower numbers (about xSharpe 0.75, drawdown up to about -24%); stale-data rule = go to cash when both VIX and VXN have had no successful fetch for 4 hours, built with tests, daemon NOT restarted; no discretionary re-entry override, T1 closed with no action; no excess-return yardstick rule (R2 dropped); crash-protection alarm R1 = strategy drawdown no deeper than -15% only; whipsaw R3 = track only, no alarm; T7: both funds UK reporting, EQGB accumulating, ISAs and SIPP maxed so this money is taxed until swept into a wrapper.
+
+Common setup for all entries in this block: real data only, 2007-11-20 to 2026-09-18 (`data_synthetic/hourly_spliced`, built 2026-09-19 14:34 UTC), rule = Nasdaq (EQQQ leg, unhedged, price-only) when VXN <= 23, hold until VXN > 24, else cash (CSH2 leg), same-bar fill, 13 bps per switch, `intraday_engine`. Outputs saved as `data/intraday_backtest/t*_20260920.txt`. Shared helper `Strategy_Auto_Trader/allocation/real_window.py`; 210 tests in `tests/allocation` (1,857 in the full suite) pass after the work. Trials run in this block: T1 8, T2 55-cell grid + 15 walk-forward folds, T6 65-cell grid x 2 assets, T3 1 rule. Owner inputs: loss tolerance 15%, higher-rate taxpayer with CGT allowance used up, stale-data X = 4 (hours, provisional).
+
+### T2 — threshold plateau + anchored walk-forward (`scripts/tier_analysis/t2_walk_forward.py`; helpers `threshold_walk_forward.py`)
+Grid: enter 18..28, exit enter..enter+4 (55 cells). Walk-forward: fit on all data before each year (first fit 2007-11..2011-12), pick max xSharpe with fit max DD >= -20%, trade that year, stitch 2012-2026.
+| | CAGR % | max DD % | xSharpe |
+|---|---|---|---|
+| fixed 23/24 (2012+) | +13.8 | -14.9 | +0.94 |
+| walk-forward stitched (same-bar) | +11.4 | -23.5 | +0.74 |
+| walk-forward stitched (next-bar) | +10.1 | -23.9 | +0.65 |
+| Nasdaq buy-and-hold | +20.1 | -28.2 | +0.99 |
+- Plateau: 23/24 real-window xSharpe +0.965 vs median of its 7 valid neighbours +0.940 (diff +0.025, limit 0.05) -> criterion met; rank 2 of 55 on the real window. Good zone is enter 21-25; above 25 xSharpe falls to about 0.7 and max DD to -25..-40%.
+- Test window 2020+: 23/24 +0.76 vs neighbour median +0.63 (a local high). Train-best plain threshold 25/25 (train +1.17) scores only +0.51 on test.
+- Walk-forward kept 0.79 of the fixed-23/24 xSharpe (limit 0.85) -> criterion not met. Chosen enter_at: 25 in 2012-2022, then 22, 22/25, 25, 22 (range 22-25; 22 is 3 from the median 25, limit +/-2) -> criterion not met.
+- Stitched rank among the 55 fixed cells: 33 of 56; median fixed cell +0.78.
+- Caveat: the 2008 crash is in the first fit window, so the walk-forward has no out-of-sample 2008. DD floor -20% and xSharpe selection are my choices; a tighter floor was not run (offered to owner).
+Owner decision pending (options given: keep 23/24 with lower expectations; consider more cautious setting under a new holdout).
+
+### T4 — crash-from-calm stress (`scripts/tier_analysis/t4_gap_stress.py`; owner tolerance 15%)
+Worst losses while running the rule, same-bar / next-bar: worst 1 day -3.9% / -4.4%, worst 3 days -6.9% / -6.9%, worst 5 days -7.3% / -7.5%, max DD -14.9% / -15.1% (full weight). At 75% weight: 5-day -5.5%, DD -11.3%; at 50%: 5-day -3.7%, DD -7.6%. Worst 1-hour -9.2% is probably a bad print (worst day is only -3.9%); data caveat from the 2026-09-19 notice.
+Named events (full weight, same-bar), Nasdaq peak-to-trough / rule state at the Nasdaq peak / hours from peak to exit / rule loss peak-to-exit / rule worst DD in window:
+| Event | Nasdaq | State | Exit lag h | Rule peak->exit | Rule worst DD |
+|---|---|---|---|---|---|
+| 2008 Q4 | -33.7% | cash | 0 | 0.0% | 0.0% |
+| Aug 2011 | -16.9% | invested | 47 | -3.0% | -3.0% |
+| Aug 2015 | -13.6% | invested | 79 | -6.6% | -9.2% |
+| Q4 2018 | -19.4% | invested | 191 | -7.3% | -14.2% |
+| Feb-Mar 2020 | -24.6% | invested | 97 | -6.1% | -6.2% |
+| H1 2022 | -26.1% | invested | 45 | -4.9% | -4.9% |
+| Aug 2024 | -15.0% | invested | 360 | -8.3% | -10.4% |
+| Feb-May 2025 | -27.3% | invested | 235 | -7.4% | -13.1% |
+(Feb 2018 row omitted: the window maximum misidentifies the peak; window worst DD there was -8.5%.) Exits happened at VXN 24-27, after the rule had already given back 3-8%.
+Base rate: 2,916 of 4,756 days start invested with VXN <= 23. Nasdaq fell >= 5% within 5 days on 1.24% of them (36 overlapping windows), >= 8% on 0.17% (5); never within 1 day. Real data contains no gap day from calm.
+Synthetic one-day gap on a random calm day (VXN <= 20, 1,000 draws): full weight, -10% gap: median worst 5-day -10.6%, worst -16.4%, P(full-history max DD deeper than -15%) 59%; -15% gap: median 5-day -15.6%, P(DD < -15%) 99%. 75% weight: -15% gap median 5-day -11.7%, P(DD < -15%) 57%. 50% weight: never deeper than -15% even at a -15% gap (worst 5-day -10.8%).
+Caveat: gap stress is hypothetical; max-DD probabilities include the -14.9% historical baseline, so the 5-day figures are the cleaner read. No pass/fail defined by the plan; result feeds sizing.
+
+### T1 — mechanical re-entry (crash override) rules (`scripts/tier_analysis/t1_override_rules.py`; `reentry_override.py`)
+8 fixed trials: triggers A (Nasdaq above 50-day SMA), B (up >= 10% off 60-day low and >= 20% below 252-day high), C (VXN <= 75% of its 20-day peak and Nasdaq >= 15% below 252-day high), D (>= 20% below 252-day high and up >= 5% over 5 days) x size full / half; 8% trailing stop; active only while the base rule is in cash. Design 2007-2019, confirm 2020-2022, holdout 2023+.
+| Rule | design dCAGR / dDD / dxSh | confirm dCAGR / dDD / dxSh | bear-rally sum (2008 Q4 + 2022) |
+|---|---|---|---|
+| A-full | -1.9 / -7.2 / -0.27 | +1.4 / -6.9 / -0.26 | -15.3pp |
+| A-half | -0.8 / -3.6 / -0.10 | +1.1 / -0.5 / -0.10 | -7.4pp |
+| B-full | -0.4 / 0.0 / -0.10 | 0 / 0 / 0 | -0.9pp |
+| B-half | -0.2 / 0.0 / -0.03 | 0 / 0 / 0 | -0.05pp |
+| C-full | 0.0 / 0.0 / -0.09 | +5.4 / -3.3 / +0.09 | -0.3pp |
+| C-half | +0.1 / 0.0 / -0.02 | +2.9 / +0.9 / +0.16 | +0.1pp |
+| D-full | +0.5 / 0.0 / -0.06 | +1.6 / 0.0 / +0.02 | +10.4pp |
+| D-half | +0.3 / 0.0 / -0.00 | +0.9 / 0.0 / +0.05 | +5.7pp |
+Criterion (xSharpe >= base and CAGR >= base +0.5pp in design AND confirm; DD no worse than base by > 3pp; bear-rally sum > -5pp): no rule met it, so no finalist and the 2023+ holdout was not evaluated.
+Near misses, reported not adopted: C-half fails only on design xSharpe (-0.02) and CAGR margin (+0.1 vs +0.5); its confirm-window benefit is one episode (2020, +31pp for C-full) and it lost in 2022 (-9.7pp) and 2009 (-4.0pp). D fires only 4 times in 19 years and gained in 2008 (+6.2pp) and 2022 (+4.5pp) but not in 2020. Episodes: A 67, B 2, C 7, D 4 (B, C, D too few to judge statistically). Trial count 8.
+Owner decision pending (plan proposes: report no mechanical re-entry supported and consider a capped, logged discretionary override).
+
+### T6 — cross-market: S&P 500 (IUSA leg) driven by VIX (`scripts/tier_analysis/t6_cross_market.py`)
+Thresholds not reused: percentile-mapped (VXN 23/24 = train percentiles 69.6/73.0 -> VIX 20.8/21.7) and train-selected from a 65-cell grid (max train xSharpe, DD >= -20%) -> enter 20, exit 24.
+| | all CAGR / DD / xSh | train | test | 2008 / 2020 / 2022 return % |
+|---|---|---|---|---|
+| S&P buy-and-hold | +11.7 / -36.1 / +0.63 | +10.8 / -36.1 / +0.61 | +13.4 / -25.9 / +0.68 | -16.5 / +12.0 / -10.2 |
+| VIX rule, train-selected 20/24 | +7.0 / -19.0 / +0.54 | +7.9 / -18.6 / +0.66 | +5.5 / -19.0 / +0.30 | -0.2 / +0.8 / -11.5 |
+| VIX rule, percentile-mapped | +5.8 / -17.6 / +0.44 | +5.9 / -17.6 / +0.50 | +5.5 / -17.2 / +0.31 | +10.0 / +3.4 / -10.3 |
+Criterion (train-selected: test max DD <= 60% of S&P buy-and-hold, test xSharpe within 0.15): DD ratio 0.73 (not met); xSharpe +0.30 vs +0.68 (not met). The rule avoided 2008 and 2020 but not 2022 (-11.5% vs S&P -10.2%). Isolation: Nasdaq driven by VIX (train-selected 20/21) test xSharpe +0.31, max DD -22.1% vs the VXN rule's +0.76, -13.6%, so VXN carries most of the Nasdaq result. Train-selected cell ranks 21 of 65 on the test window (median cell +0.26).
+Caveats: real VIX London-morning prints exist only from 2016 (earlier the prior US close is held stale); IUSA hourly data has known spikes (2026-09-19 notice).
+Owner decision pending.
+
+### T7 — UK tax, GIA vs ISA (`scripts/tier_analysis/t7_tax_model.py`; `tax_ledger.py`, 13 tests)
+Assumptions (gov.uk checked 2026-09-20: CGT 24% higher rate, allowance GBP 3,000; matching order same-day -> 30-day -> Section 104 confirmed from HMRC HS284): higher-rate, allowance 0, 24% applied to all years, cash-leg accrual taxed as income at 40% yearly. Owner confirmed 2026-09-20 (after this run) that both EQGB.L and CSH2.L are UK reporting funds (not checked by me against the HMRC ODS list), so the reporting-fund base case applies and the non-reporting row below is not relevant. Owner also confirmed EQGB is the accumulating class. Not modelled as a result: EQGB's reinvested dividends (about 0.6%/yr yield, held ~58% of the time) are outside the price-return series, and as an accumulating reporting fund they would also be taxed each year as excess reportable income (dividend rates) and added to cost basis; rough estimate only: pre-tax return about +0.35 pts/yr, tax on it about -0.1 to -0.2 pts/yr, net small and positive. Allowances for savings/dividends assumed used.
+Ledger reproduces the engine terminal (x11.015 both). 88 purchases, 87 sales, ends in Nasdaq. GBP 10,000 pot:
+| Scenario | terminal | CAGR % |
+|---|---|---|
+| ISA | 110,147 | +13.59 |
+| GIA, sold at end | 59,064 | +9.89 |
+| GIA, Nasdaq fund non-reporting (gains at 40%) | 28,326 | +5.69 |
+| GIA, cash-leg income untaxed (upper bound) | 63,897 | +10.35 |
+Tax drag in a GIA 3.7 pts/yr (CGT GBP 23,944 + income tax GBP 2,467 on the pot). Comparators in a GIA (price returns, sold at end): Nasdaq buy-and-hold +16.19% after tax, S&P 500 buy-and-hold +10.35%, cash +0.98%. With allowance 0 the after-tax % is the same at any pot size (no pot-size break-even); if the GBP 3,000 allowance were available: 11.44% (10k), 10.85% (20k), 10.40% (50k), 10.21% (100k).
+Deviation from the plan: no world-fund series (VWRP) exists in the spliced dataset, so S&P 500 and Nasdaq stand in; the VWRP-in-GIA comparison was NOT done. Dividends (~0.6%/yr on the Nasdaq leg) are outside the price-return series, so no reportable-income tax is modelled there. Not tax advice.
+Owner decision pending.
+
+### T5 — live failure modes: audit (read-only) + stale-data replay (`scripts/tier_analysis/t5_stale_data_replay.py`)
+Audit findings (code: `index_feed.py`, `allocation_manager.py`, `live_daemon.py` lines 1251-1345):
+1. `IndexFeed` keeps the last good reading for 3 hours after fetch failures (MAX_OUTAGE_SECONDS), then returns None.
+2. In `live_daemon.py` the allocation block runs only `if vix_current is not None or vxn_current is not None`. When BOTH are None (the likely case in an IBKR data outage) no signal is computed and the position is HELD, not moved to cash. So the owner's "default to cash after X missed readings" does not exist for the both-missing case.
+3. When ONLY VXN is None (VIX present), `signal()` fails tier 1 and falls to cash (lower tiers disabled), so live goes to cash on one missing index but holds on two. The backtest engine holds state on a NaN VXN (`tiers_vxn_deadband`), matching only the both-missing case. The backtest data has 0 NaN VXN bars, so no result is affected.
+4. If the broker is disconnected, prices are None and `rebalance` is skipped (orders could not be placed anyway); the 09-18 skipped switch fits this path.
+5. Index data uses a separate IBKR client (client_id 2) from the trading connection, so data can fail while the broker is up.
+Replay (500 random outage starts while invested, 13 bps; return of CASH-AFTER-X minus HOLD over outage + 40 bars): for a 32-bar (~4 trading day) outage the mean is -0.46 to -0.54pp, 5th percentile -3.1 to -3.5pp, 95th +2.3 to +2.5pp, better than HOLD in 37-39% of draws; X = 2/3/4/6 differ by about 0.1pp. For a 4-bar outage the mean cost is -0.3pp. Outage starting at the Nasdaq peak before named drawdowns (32 bars): forced cash saved +3.3, +4.0..+5.1, +3.3..+3.8, +8.4..+10.0, +3.8..+6.1, +1.0..+1.6, +1.6..+2.1pp (Aug 2011, Aug 2015, Q4 2018, Feb 2020, H1 2022, Aug 2024, Feb 2025). X unit here is LSE hourly decision bars; the owner's "4 hours" is treated as X = 4 (provisional).
+Implemented after the run (owner chose go-to-cash after 4 hours, no restart): `IndexFeed.is_lost()` and default limit 4h; `MultiTierAllocationManager.data_outage()` (both feeds lost, once-per-episode flag, `data_outage` in app_status), `outage_limit_hours`; `live_daemon.py` keeps running the allocation block with both readings None when the outage is active so the signal falls to cash; `emailer.send_data_outage_alert`; `config/overnight_strategy.json` `index_max_outage_seconds` 10800 -> 14400 (read only at daemon start, so it takes effect on the next restart; code changes likewise). Also fixed a latent crash: a Nasdaq BUY with VIX None formatted `VIX={vix:.1f}` and would have raised; it now prints n/a. 14 new tests (`tests/allocation/test_data_outage.py`, `tests/output/test_emailer.py`), full suite 1,871 passed. Counting: the outage clock is wall-clock time since the last successful fetch (or first attempt after a cold start), not market hours, so VXN's US-hours-only prints do not matter; it resets on a daemon restart. If IB Gateway is down the forced sell waits until it reconnects. Paper-trading acceptance (T5c) needs calendar time and was not run. Draft acceptance criteria and log format: see `TIER_MONITORING_RULES_DRAFT.md`.
+Owner decision pending (whether/how to implement the stale-data rule; existing 3-hour feed TTL vs the proposed 4).
+
+### T8 — monitoring rule baselines (`scripts/tier_analysis/t8_monitoring_baselines.py`; drafts in `TIER_MONITORING_RULES_DRAFT.md`)
+- Nasdaq drawdowns >= 20% (5 episodes): strategy DD / Nasdaq DD ratio 0.17 (2007-09), 0.74 (Q4 2018), 0.26 (2020), 0.25 (2021-23), 0.57 (2025). The drafted "<= 0.50" rule would have fired twice already (2018, 2025).
+- Rolling 36m CAGR minus a reference (reference not chosen): vs static 50/50: latest +0.4pp, 12/64 quarter-ends negative, longest negative run 12; vs vol-target 10%: latest -2.6pp, 19/64 negative, latest run 6 quarter-ends; vs S&P buy-and-hold: latest -3.2pp, 17/64 negative, longest run 12.
+- Whipsaw: switches/yr 2024 12, 2025 18, 2026 (to 09-18) 16; historical maximum over two years 34 (2018-19). No two-year span has exceeded 20 switches/yr; 2025-26 xSharpe +0.37.
+- Rolling 36m xSharpe: min +0.12, 5th pct +0.54, median +1.02, latest +0.70.
+Owner ratification of numbers pending.
+
+### T3 — matched-blend test: PARKED by the owner 2026-09-20
+Code and one run exist (`matched_blend.py`, `t3_matched_blend.py`; outputs `t3_matched_blend_20260920_b{21,63,126}.txt`). Result recorded without a decision: strategy 13.6% CAGR / -14.9% DD vs a matched-CAGR fixed blend (72% Nasdaq) at -24.8% DD over the full window (+9.9pp), -0.8pp in the test window; all paired-bootstrap 90% intervals for the DD gap included zero (21/63/126-day blocks), so the plan criterion was not met. Matched blend is chosen with hindsight and daily rebalanced without cost.
+
+---
+
+## 2026-09-20 (afternoon, addendum) — Real-data-only backtest (2007-11-20 to 2026-09-18), current tier rule
+
+**Command:** `uv run python scripts/tier_analysis/real_data_backtest.py` (new script; output saved to `data/intraday_backtest/real_data_20260920.txt`). Flags: none. Rule `tiers_vxn_deadband(vxn, 23.0, 24.0)` (Nasdaq when VXN <= 23, hold until VXN > 24, else cash; lower tiers off), `simulate` same-bar fill headline and next-bar bound, 13 bps per switch (10/16/26 bps sensitivity). Mode: synthetic-dataset engine, no `live_sim`, no chart.
+
+**Data:** `data_synthetic/hourly_spliced` (built 2026-09-19 14:34 UTC, seed 20260919), Inputs sliced from the first real VXN bar so the run starts in cash with fresh state and no bridged bar is used: **2007-11-20 to 2026-09-18** (42,640 hourly bars, 4,756 London trading days, 18.9 yrs; 0 NaN VIX/VXN bars). Which legs are real in that window:
+- VXN: real from 2007-11-20 (US-hours bars only; London-morning VIX bars only from 2016). VIX: real from 2005-10-03. NASDAQ (EQQQ hourly, unhedged, price only): real from 2005-08-17.
+- CASH (CSH2.L): **real only from 2015-09-02**; before that it is a daily-return proxy (BoE-based, bridged to hourly). So 2007-2015 cash carry is proxy, though cash has ~no intraday variance so the shape assumption is harmless.
+- SP500 buy and hold comparator: IUSA real from 2004-04-16 (USD-proxy pre-2004 not in this window).
+
+### Results (13 bps; next-bar = conservative bound)
+| Window | Rule | Return | CAGR | xSharpe | Max DD | Sw/yr | Next-bar ret / xSh |
+|---|---|---|---|---|---|---|---|
+| Real 2007-11-20 to end (18.9y) | **Current 23/24** | +1,001% | +13.6% | **+0.96** | **-14.9%** | 9.3 | +831% / +0.89 |
+| | plain VXN <= 24 | +1,006% | +13.6% | +0.94 | -18.9% | 18.0 | +717% / +0.81 |
+| | Nasdaq buy and hold | +2,086% | +17.8% | +0.83 | -33.9% | 0 | |
+| | S&P buy and hold | +709% | +11.7% | +0.63 | -36.1% | 0 | |
+| Train 2007-11-20 to 2019-12-31 | **Current 23/24** | +444% | +15.0% | +1.06 | -14.9% | 8.5 | +391% / +1.00 |
+| | plain VXN <= 24 | +490% | +15.7% | +1.09 | -18.9% | 16.4 | +366% / +0.94 |
+| | Nasdaq buy and hold | +556% | +16.7% | +0.83 | -33.9% | 0 | |
+| Test 2020-01-01 to end | **Current 23/24** | +102% | +11.0% | +0.76 | -13.6% | 10.7 | +90% / +0.67 |
+| | plain VXN <= 24 | +87% | +9.8% | +0.63 | -14.9% | 20.8 | +75% / +0.54 |
+| | Nasdaq buy and hold | +233% | +19.6% | **+0.83** | -28.2% | 0 | |
+| Recent 2024-03-25 to end | **Current 23/24** | +24% | +9.0% | +0.37 | -13.6% | 18.4 | +19% / +0.26 |
+| | Nasdaq buy and hold | +52% | +18.1% | **+0.75** | -24.1% | 0 | |
+
+Cost sensitivity (current rule, real window, same-bar): 10 bps +1,061% / xSh 0.99; 13 bps +1,001% / 0.96; 16 bps +945% / 0.94; 26 bps +777% / 0.86. Next-bar at the same costs: 0.91 / 0.89 / 0.87 / 0.79. Test window at 26 bps: xSh 0.63 same-bar, 0.53 next-bar.
+
+Year by year (%; 2007 is 2007-11-20 onward only):
+| Year | Strategy | Next-bar | Nasdaq | Cash | vs Nasdaq | % in Nasdaq | Switches | Avg VXN |
+|---|---|---|---|---|---|---|---|---|
+| 2007 | +4.6 | +4.6 | +5.6 | +0.6 | -1.0 | 12.7 | 1 | 27.0 |
+| 2008 | +6.1 | +5.1 | -22.9 | +4.7 | +29.0 | 10.6 | 13 | 35.6 |
+| 2009 | +7.2 | +7.1 | +43.0 | +0.6 | -35.8 | 13.3 | 9 | 36.6 |
+| 2010 | +33.7 | +32.7 | +22.9 | +0.5 | +10.8 | 54.7 | 14 | 23.6 |
+| 2011 | +2.6 | -0.3 | +3.1 | +0.5 | -0.5 | 54.9 | 12 | 25.2 |
+| 2012 | +5.2 | +3.9 | +8.3 | +0.5 | -3.1 | 92.4 | 4 | 19.3 |
+| 2013 | +35.0 | +35.0 | +35.0 | +0.5 | 0.0 | 100.0 | 0 | 15.2 |
+| 2014 | +27.4 | +26.9 | +26.7 | +0.5 | +0.7 | 98.4 | 2 | 16.0 |
+| 2015 | +5.5 | +5.0 | +13.8 | +0.6 | -8.3 | 88.8 | 8 | 18.3 |
+| 2016 | +21.6 | +23.5 | +28.1 | +0.6 | -6.5 | 85.2 | 6 | 18.4 |
+| 2017 | +19.2 | +19.2 | +19.2 | +0.4 | 0.0 | 100.0 | 0 | 14.1 |
+| 2018 | +5.2 | +4.3 | +4.2 | +0.7 | +1.0 | 70.5 | 15 | 20.9 |
+| 2019 | +14.7 | +9.7 | +32.6 | +0.8 | -17.9 | 89.5 | 19 | 19.2 |
+| 2020 | +7.7 | +7.3 | +42.6 | +0.3 | -34.9 | 14.9 | 1 | 32.8 |
+| 2021 | +12.7 | +9.8 | +29.3 | +0.2 | -16.6 | 52.4 | 19 | 24.2 |
+| 2022 | -2.7 | -3.0 | -25.9 | +1.5 | +23.2 | 0.8 | 1 | 31.7 |
+| 2023 | +26.4 | +26.9 | +47.1 | +4.7 | -20.7 | 68.5 | 5 | 21.7 |
+| 2024 | +18.2 | +16.7 | +27.9 | +5.6 | -9.7 | 88.9 | 12 | 19.4 |
+| 2025 | +5.6 | +4.5 | +11.3 | +4.7 | -5.7 | 75.8 | 18 | 22.1 |
+| 2026 | +8.7 | +7.2 | +16.6 | +3.0 | -7.9 | 38.9 | 16 | 24.8 |
+
+19 of 20 years positive (only 2022, -2.7%); beats Nasdaq in 5 of 20 (2008, 2010, 2014, 2018, 2022).
+
+**Conclusion:**
+- The +1,001% / xSh +0.96 / -14.9% DD figures from the 26-year entries are reproduced exactly, so bridged 1999-2007 data does not contribute to them; the real-only result stands on its own.
+- What the rule delivers on real data is **drawdown protection, not more return**: max DD -14.9% vs -33.9% for Nasdaq, but total return about half (+1,001% vs +2,086%, 13.6% vs 17.8% a year).
+- **Sharpe edge exists in-sample only.** xSharpe beats Nasdaq buy and hold on train (+1.06 vs +0.83) but not on the test window (+0.76 vs +0.83) or recent (+0.37 vs +0.75). The whole-period lead (+0.96 vs +0.83) comes from 2007-2019, where the thresholds were chosen.
+- Deadband matters: plain VXN <= 24 doubles the switch rate (18 vs 9.3/yr) and loses 0.13 xSharpe on test; on train it is marginally better (+1.09), so the deadband is not a train-window win.
+- Costs are second order: 10 to 26 bps moves xSharpe by ~0.13 (real window); next-bar fill costs ~0.07 xSharpe.
+
+**Caveats:** cash leg is proxy before 2015-09-02; unhedged EQQQ price returns (live fund is GBP-hedged EQGB, real only from 2017-10; EQQQ distributes ~0.6%/yr); thresholds 23/24 chosen on 2007-2019 from a coarse grid with no walk-forward run, so the "test" window is out-of-sample only with respect to threshold choice, not to the rule design; VXN real bars are US hours only, so the completed-bar timing is coarse before 2016; same-bar fill assumes execution at bar-end price.
+
+---
+
+## 2026-09-20 (afternoon) — 26-year synthetic backtest, current tier rule: reproduction of the 2026-09-19 (night) baseline
+
+**Command:** `uv run python scripts/tier_analysis/annual_tier_current.py` (output saved to `data/intraday_backtest/26yr_synthetic_20260920.txt`; no code or config changes). The script hard-codes its parameters, there are no CLI flags: `intraday_engine.tiers_vxn_deadband(inp.vxn, 23.0, 24.0)`, `intraday_engine.simulate(inp, tiers)` with the defaults **same-bar fill, 13 bps flat per switch**. Mode: synthetic (`data_synthetic`), not `live_sim`, so no chart.
+
+**Rule under test:** current deployed config. Nasdaq (EQQQ leg, unhedged, price-only) when VXN <= 23; once in, hold until VXN > 24; otherwise cash (CSH2 leg). S&P / FTSE tiers off (`lower_tiers_enabled=false`). Decisions on the LSE hourly grid from the latest completed VIX/VXN bar.
+
+**Data:** `data_synthetic/hourly_spliced/{VIX,VXN,NASDAQ,SP500,FTSE,CASH}.csv`, built 2026-09-19 14:34 UTC (`build_intraday_dataset`, seed 20260919, ~5 min rebuild). Backtest window **1999-03-11 to 2026-09-18** (27.6 yrs, 6,952 trading days). Last bars: VIX/VXN end 2026-09-18 16:00 UTC, NASDAQ/CASH end 2026-09-18 15:30 UTC. 2026 is a partial year (to 09-18); 1999 starts in March.
+
+| Series | Real hourly starts | Bridged rows | Real rows |
+|---|---|---|---|
+| VIX | 2005-10-03 | 13,208 | 58,713 |
+| VXN | 2007-11-20 | 17,616 | 32,116 |
+| NASDAQ (EQQQ) | 2005-08-17 | 14,571 | 41,218 |
+| S&P 500 (IUSA) | 2004-04-16 | 11,538 | 50,668 |
+| FTSE (ISF.L) | 2004-04-16 | 11,574 | 50,803 |
+| CASH (CSH2.L) | 2015-09-02 | 37,449 | 15,561 |
+
+Before each start date the series are correlated Brownian-bridge (intraday shape assumed; VXN 1999-2001 is chart estimates). Pre-2004/05 Nasdaq and S&P legs are USD proxies with no FX. EQGB (live hedged fund) leg uses real hourly from 2017-10 only.
+
+### Year by year, % (strategy vs Nasdaq buy and hold)
+| Year | Strategy | Nasdaq | Cash | vs Nasdaq | Strat max DD | Nasdaq max DD | % time in Nasdaq | Switches | Avg VXN | Data |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1999 | +55.5 | +79.1 | +4.2 | -23.6 | -11.9 | -11.9 | 92.3 | 2 | 21.1 | bridged |
+| 2000 | +6.0 | -36.2 | +6.0 | +42.2 | 0.0 | -52.7 | 0.0 | 0 | 29.9 | bridged |
+| 2001 | +5.1 | -33.4 | +5.1 | +38.5 | 0.0 | -58.4 | 0.0 | 0 | 52.3 | bridged |
+| 2002 | +4.0 | -37.4 | +4.0 | +41.4 | 0.0 | -51.9 | 0.0 | 0 | 45.9 | bridged |
+| 2003 | +3.7 | +49.6 | +3.7 | -45.9 | 0.0 | -12.2 | 0.0 | 0 | 31.9 | bridged |
+| 2004 | +1.4 | +9.6 | +4.4 | -8.3 | -16.3 | -15.9 | 67.3 | 11 | 22.3 | bridged |
+| 2005 | +5.8 | +5.8 | +4.6 | 0.0 | -13.1 | -13.1 | 100.0 | 0 | 16.3 | bridged |
+| 2006 | -6.0 | -6.8 | +4.6 | +0.8 | -20.6 | -21.3 | 96.3 | 4 | 18.0 | bridged |
+| 2007 | +18.0 | +18.0 | +5.5 | +0.1 | -6.7 | -10.0 | 71.9 | 12 | 20.7 | bridged/real |
+| 2008 | +6.1 | -22.9 | +4.7 | +29.0 | -5.7 | -33.3 | 10.6 | 13 | 35.6 | real |
+| 2009 | +7.2 | +43.0 | +0.6 | -35.8 | -3.1 | -10.5 | 13.3 | 9 | 36.6 | real |
+| 2010 | +33.7 | +22.9 | +0.5 | +10.8 | -4.0 | -16.0 | 54.7 | 14 | 23.6 | real |
+| 2011 | +2.6 | +3.1 | +0.5 | -0.5 | -9.1 | -16.8 | 54.9 | 12 | 25.2 | real |
+| 2012 | +5.2 | +8.3 | +0.5 | -3.2 | -12.3 | -10.9 | 92.4 | 4 | 19.3 | real |
+| 2013 | +35.0 | +35.0 | +0.5 | 0.0 | -8.7 | -8.7 | 100.0 | 0 | 15.2 | real |
+| 2014 | +27.4 | +26.7 | +0.5 | +0.8 | -8.2 | -8.2 | 98.4 | 2 | 16.0 | real |
+| 2015 | +5.5 | +13.8 | +0.6 | -8.2 | -13.7 | -14.1 | 88.8 | 8 | 18.3 | real |
+| 2016 | +21.6 | +28.1 | +0.6 | -6.5 | -9.8 | -13.3 | 85.2 | 6 | 18.4 | real |
+| 2017 | +19.2 | +19.2 | +0.4 | 0.0 | -6.7 | -6.7 | 100.0 | 0 | 14.1 | real |
+| 2018 | +5.2 | +4.2 | +0.7 | +1.0 | -12.3 | -20.1 | 70.5 | 15 | 20.9 | real |
+| 2019 | +14.7 | +32.6 | +0.8 | -17.8 | -11.5 | -7.4 | 89.5 | 19 | 19.2 | real |
+| 2020 | +7.7 | +42.6 | +0.3 | -35.0 | -5.7 | -21.6 | 14.9 | 1 | 32.8 | real |
+| 2021 | +12.7 | +29.3 | +0.2 | -16.6 | -8.6 | -10.8 | 52.4 | 19 | 24.2 | real |
+| 2022 | -2.7 | -25.9 | +1.5 | +23.3 | -4.2 | -26.8 | 0.8 | 1 | 31.7 | real |
+| 2023 | +26.4 | +47.1 | +4.7 | -20.8 | -7.0 | -7.0 | 68.5 | 5 | 21.7 | real |
+| 2024 | +18.2 | +27.9 | +5.6 | -9.7 | -12.1 | -12.2 | 88.9 | 12 | 19.4 | real |
+| 2025 | +5.6 | +11.3 | +4.7 | -5.7 | -13.6 | -24.1 | 75.8 | 18 | 22.1 | real |
+| 2026 | +8.7 | +16.6 | +3.0 | -7.9 | -7.3 | -10.1 | 38.9 | 16 | 24.8 | real |
+
+### EQGB (live GBP-hedged fund) leg, real hourly since 2017-10, %
+| Year | Strategy | EQGB buy and hold | Strat max DD |
+|---|---|---|---|
+| 2018 | +17.6 | -6.5 | -4.4 |
+| 2019 | +22.0 | +40.1 | -10.7 |
+| 2020 | +5.4 | +45.5 | -5.9 |
+| 2021 | +12.2 | +27.7 | -8.1 |
+| 2022 | +0.1 | -35.0 | -1.5 |
+| 2023 | +27.5 | +53.8 | -11.3 |
+| 2024 | +16.1 | +26.1 | -10.7 |
+| 2025 | +8.5 | +19.6 | -11.9 |
+| 2026 | +10.4 | +15.2 | -5.7 |
+
+### Whole period (1999-03-11 to 2026-09-18)
+| | Total | Per year | xSharpe | Max DD | Switches/yr |
+|---|---|---|---|---|---|
+| Strategy | +2,242% (x23.4) | +12.1% | +0.76 | -21.5% | 7.4 |
+| Nasdaq buy and hold | +1,785% (x18.8) | +11.2% | +0.44 | -83.0% | 0 |
+
+Years positive 26 of 28 (negative: 2006 -6.0%, 2022 -2.7%); beats Nasdaq in 10 of 28. Worst year -6.0% (2006), best +55.5% (1999); Nasdaq worst -37.4% (2002).
+
+**Conclusion:** exactly reproduces the `2026-09-19 (night)` entry and the baseline in `HANDOFF_26yr_rerun.md` section 5 (+2,242% / +0.76 / -21.5% / 7.4 sw/yr), so the spliced dataset and engine are intact. This is a re-run, not new evidence. The stamp-duty fix (`aa32dca`) does not alter it (tier backtests use a flat bps cost).
+
+**Caveats:**
+- 1999-2007 is bridged data; 2000-2003 is entirely cash because estimated VXN stayed above 24, so the protection in those years (+38 to +42pp/yr vs Nasdaq) and the missed 2003 rally (-45.9pp) both come from assumed data. Treat as a stress test only.
+- Same-bar fill assumes execution at the bar-end price; next-bar (conservative bound) not run here. 13 bps flat per switch, not the per-switch cost from the corrected `IbkrTieredCost` (10 bps commission-only / 16 bps with spread at a £20k pot).
+- Thresholds 23/24 were chosen on 2007-2019 only from a coarse grid; no walk-forward run. All fund returns are price returns (EQQQ distributes ~0.6%/yr).
+- EQGB hourly data is stale before ~2024, so the EQGB leg is an upper bound for older years.
+
+---
+
+## 2026-09-20 (early hours, addendum 3) — Realized-vol override sweep + sub-threshold probe: recovery-miss weakness confirmed unfixable
+
+**Command:** `uv run python scripts/tier_analysis/realized_vol_override.py` (script kept; no code changes to engine or production files)
+
+**Motivation:** strategy misses recovery rallies after crashes (2003: -45.9pp, 2009: -35.8pp, 2020: -35.0pp) because VXN stays elevated while Nasdaq rises. Hypothesis: if realized 20-day Nasdaq vol is low despite high VXN, implied vol is structural hedging demand, not genuine fear — safe to re-enter. Sweep: override "cash when VXN > 24" if realized vol < threshold, for thresholds 5-30% annualised.
+
+**Reference:** train (2007-2019) xSh=+1.063, test (2020+) xSh=+0.761
+
+| Threshold | 26yr xSh | train xSh | test xSh | recent xSh | 26yr DD% | sw/yr | Passes? |
+|---|---|---|---|---|---|---|---|
+| ≤9% | +0.758 | +1.063 | +0.761 | +0.373 | -21.5 | 7.4 | — (no-op) |
+| 10% | +0.740 | +1.031 | +0.746 | +0.372 | -21.5 | 7.2 | No |
+| 12% | +0.750 | +1.020 | +0.819 | +0.533 | -21.5 | 7.1 | No |
+| 15% | +0.704 | +1.001 | +0.780 | +0.455 | -23.2 | 7.2 | No |
+| 18% | +0.688 | +0.943 | +0.709 | +0.667 | -22.1 | 6.9 | No |
+| 20% | +0.681 | +0.879 | +0.761 | +0.919 | -23.9 | 6.2 | No |
+| 25% | +0.660 | +0.847 | +0.497 | +0.439 | -34.9 | 4.6 | No |
+| 30% | +0.661 | +0.908 | +0.649 | +0.425 | -30.5 | 3.3 | No |
+
+**No threshold passes the double criterion.**
+
+**Year-by-year at 12% (closest to useful):** override fired 0 days in 2003, 2009, 2020 — those recovery misses had realized vol > 12% too. Override actually fires in 2010 (11d, -8.5pp train damage), 2021 (12d, -0.4%), 2024-2026 (14d combined, +5.7pp). The mechanism solves a different problem — brief VXN spikes in otherwise low-vol bull markets — not the recovery-miss problem.
+
+**Findings:**
+- **The recovery-miss weakness is unfixable via realized vol.** In 2003, 2009, 2020 both implied AND realized vol were elevated simultaneously. The "structural hedging demand" hypothesis (high implied, low realized) doesn't appear in the data at daily granularity during those recovery years.
+- Low thresholds (≤9%) never fire — the condition VXN > 24 AND realized_vol < 9% effectively never occurs.
+- 12-15% thresholds improve test and recent windows but damage train (2010 false positives). No clean train+test double-win.
+- **Decision: no override. Recovery-miss weakness is an accepted cost of bear-market protection. The 2008 protection (+29pp) exceeds the sum of missed recoveries.**
+
+---
+
 ## 2026-09-19 (late night, addendum 2) — Experiments A/B/C: deadband sweep, VXN-scaled, threshold grid — all reject change
 
 **Commands:**
