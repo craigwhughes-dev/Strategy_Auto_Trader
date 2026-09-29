@@ -15,6 +15,244 @@ Running log of every backtest/scan run — newest entry on top. One block per ru
 
 ---
 
+## 2026-09-29 — PLAN_EXIT_GENERALISATION.md: X0 panel review + X0b register reconciliation. **X0b PASSES, 0 drops.**
+
+**Workstream:** exit-generalisation plan (does the deployed VXN 23/24 rule's *exit* behave the same out of sample as in sample?). This entry covers X0 (panel) and X0b (data reconciliation). X1/X2 not yet run.
+
+**X0 — panel review (done).** `plan-review-panel` on the plan; GLM-4.7 Flash the outside auditor. Four owner-ratified changes folded into `PLAN_EXIT_GENERALISATION.md`:
+1. X1 gate reframed to **exit-timing only** (proxy exit precedes trough within +/-10 trading days in 4 of 5 post-2013 Nasdaq episodes). The 80% daily-agreement bar was dropped — inflated by calm days on a pass, unmeetable by a lagging proxy on the transition days that matter on a fail.
+2. A **third** interpretive reading added to the trap section: a fail could be baseline-vol **regime shift** across decades (a 2001-2012 threshold applied to a different-vol 1970s-90s), not only non-generalisation or proxy-lag. X4 report must carry all three in the headline.
+3. X0b redirected to reconcile **each scored episode's peak/trough closes** (what X2 reads), not 3 arbitrary spot dates.
+4. X3 (venue-robustness read) cut — self-admittedly not independent evidence.
+Mechanical fixes also folded: explicit VXN->RV absolute-level mapping (`hi` is a concrete RV number, not literal 24), deadband initial state pinned `invested`, `protection` reported raw + [0,1]-clipped.
+
+**X0b — reconciliation (done, PASSES).**
+**New code:** `research/reconcile.py`, `scripts/tier_analysis/x0b_reconcile_register.py`, `tests/research/test_reconcile.py` (14 tests). Report: `data/cache/yahoo_index/x0b_reconciliation.csv`. No engine/production/deployed-rule changes.
+
+**Method — two tracks**, because a free independent daily source back to 1970 exists for almost none of these markets:
+- **Track A (independent second source):** ^IXIC vs FRED `NASDAQCOM` (full, 1971+); ^GSPC vs FRED `SP500` (2016+ only). 16 episodes cross-checked.
+- **Track B (intrinsic-defect scan, all 12 indices / all 123 episodes):** depth-consistency vs the register's stored `depth_pct`; unit-shift (adjacent-bar >5x step); isolated-spike **that reverts** (crash troughs are big non-reverting moves and must not be flagged); stale-run (>=5 identical closes).
+- **Reinterpreted drop rule (flagged for owner):** an episode is dropped only on a *detected defect*, never merely for lacking an independent source ("intrinsic-only" is recorded, not dropped). The plan's terser "cannot be reconciled is dropped" read literally would drop every non-^IXIC episode and gut the 14-shock holdout.
+
+**Result: 123 episodes, 0 dropped, 123/123 depth-consistent.** ^IXIC fully FRED-confirmed (max peak/trough rel err 0.0022 = 0.22%, tol 1%). ^GSPC-recent rel err 0.0000. 107 episodes intrinsic-only (no free source), all passing intrinsic scans. `unit_shift=0` across all 12 — index-level Yahoo data is clean of the ISF.L-style 100x bug (that was the tracker ETF, not the index). One methodology bug found and fixed mid-run: the first spike scan flagged ^HSI 1989-06-05 (Tiananmen, real -21.75% one-day fall) and ^TWII 2011-12-19 as defects; adding a reversion requirement cleared both — a genuine capitulation stays down, a bad print reverts.
+
+**Data-trap correction, logged for reuse.** The 2026-09-28 (late, 3) note that "keyless FRED serves only ~3 years and silently ignores `cosd`/`coed`" is true of the `fred/series/observations` **API**, but **NOT** of `https://fred.stlouisfed.org/graph/fredgraph.csv?id=...&cosd=...&coed=...`, which returns full requested history keyless — verified: NASDAQCOM 14,515 rows 1971-2026, SP500 2,610 rows 2016-2026. **Send no User-Agent** (a `Mozilla` UA still stalls FRED). This likely unblocks the parked Test B (HY OAS via `BAMLH0A0HYM2`) from PLAN_CRASH_PHASES.
+
+**X1 — proxy-fidelity hard gate (done, PASSES).**
+**New code:** `research/proxy_fidelity.py`, `scripts/tier_analysis/x1_proxy_fidelity.py`, `tests/research/test_proxy_fidelity.py` (9 tests; 88 research tests total). Reuses the deployed `tiers_vxn_deadband` verbatim, fed realized vol in place of VXN. No engine/production/deployed-rule changes.
+
+**Method.** Grid = ^IXIC trading days from 2001-02-02 (VXN's start), VXN ffilled onto it. Calibration on 2001-2012 (**determined, not fitted**): `hi` = RV level at VXN 24's train percentile; `lo` = bisected so the proxy deadband's train in-cash fraction equals the deployed rule's (0.525). Measurement on 2013-2026: exit timing vs the 4 post-2013 ^IXIC episodes (register overcounted at "5"; only 4 exist at MIN_DEPTH 20%). **Trials = 3** (vol window 10/21/63). Gate (exit-timing only, per 2026-09-29 panel reframe): a window clears if >=80% of episodes have the proxy exit *before the trough* AND within +/-10 trading days of the deployed exit.
+
+| window | lo/hi (annualised RV) | daily agree 2013+ (descriptive) | episodes pass | clears |
+|---|---|---|---|---|
+| 10d | 0.18 / 0.19 | 0.850 | 4/4 | **yes** |
+| 21d | 0.18 / 0.19 | 0.840 | 4/4 | **yes** |
+| 63d | 0.19 / 0.19 | 0.835 | 1/4 | no |
+
+**Verdict: PASSES.** Two windows clear (10 and 21) — a plateau/shelf, not a spike (ground rule 6). 63d fails because a 3-month window is too sluggish (proxy exits 11/16/24 bars late on three of four episodes). Every proxy exit precedes its trough in all windows; on 10d/21d the proxy-vs-deployed gap is 0-9 bars.
+
+**X2 window selected = 21d** (middle of the tested set, per plan; 10d is the plateau confirmation, 63d marks where it breaks). The deadband collapsed to near-single-threshold (lo ~= hi ~= 19% annualised RV) — faithful, because the VXN 23/24 band is only one point wide and maps to a sub-1% RV band. **19% realized vol is the concrete RV number standing in for VXN 24.**
+
+**Honest caveats for X2/X4.** (a) Daily agreement (~0.84) is descriptive only and is partly inflated by calm days both-invested — the exit-timing gate is the real test and it passed. (b) The proxy is essentially a single ~19% realized-vol threshold; X2's regime-shift reading (a 2001-2012-calibrated absolute level applied to different-baseline-vol pre-2001 decades) is now concrete and must carry into the X4 headline.
+
+**X2 — out-of-sample run + X4 report (done). MECHANISM GENERALISES; absolute level does not.**
+**New code:** `research/exit_protection.py`, `scripts/tier_analysis/x2_exit_generalisation.py`, `tests/research/test_exit_protection.py` (9 tests; 97 research total). Reuses the deployed deadband, changes no production code.
+
+**Owner ratifications (2026-09-29) before running:** metric thresholds ratified + report raw distributions/gaps; equivalence framing confirmed AND add a significance check; **run both transfer rules** (fixed-percentile primary, absolute as the reading-3 confound check).
+
+**Design.** 21d RV window (X1's cleared middle window) applied to each market's own index, full history, both transfer rules. Split by shock era: `shock_id <= 13` = 14 pre-2001 holdout shocks, `>= 14` = 13 from-2001 design shocks. Protection raw+clipped, exit_lag, idle_rate per market; aggregated by shock (mean within, median across). `already_out` (gate in cash at peak) recorded separately, never scored 1.0 — its cost lands in idle_rate instead.
+
+| rule | prot design / holdout / gap | idle gap | consistency | equiv p | chance-null p | GENERALISES |
+|---|---|---|---|---|---|---|
+| **fixed_pctl** (primary) | 0.742 / 0.639 / **0.103** | **0.030** | **13/14** | 0.201 | <0.001 | **YES** |
+| absolute (confound check) | 0.723 / 0.597 / 0.126 | 0.071 | 9/13 | 0.049 | <0.001 | no |
+
+**Verdict.** The **mechanism generalises**: a vol-deadband calibrated per market to a fixed percentile (enter 45.6th / exit 49.9th, from the Nasdaq VXN-24 percentile) exits before the worst of the decline in **13 of 14 pre-2001 shocks it was never fitted to**, holdout median protection 0.639, at an idle cost (holdout ~0.362) statistically indistinguishable from the design set (gap 0.030), equivalence supported (p=0.201), and beats random-timing decisively (real 0.800 vs random 0.602, p<0.001). The **absolute-level transfer fails** the consistency criterion (9/13) with borderline-low equivalence (p=0.049) — a single Nasdaq-calibrated 19% RV level is the wrong level in some markets/decades (^IXIC 1978/1980 protect 0.13/0.00). This is **reading 3 (regime-shift/baseline-vol confound) confirmed exactly as the panel anticipated**, and it is the right result: the deployed rule uses actual VXN (Nasdaq-specific implied vol), not a transported absolute number, so a mechanism that generalises while a fixed level does not is direct support for the incumbent's design.
+
+**Three interpretive readings, carried in the headline as required:** (1) generalisation — YES for the mechanism; (2) proxy-lag — not masking, X1 showed the RV proxy tracks the deployed exit within tolerance; (3) regime-shift — real and material, which is precisely why the *percentile* form (not the absolute level) is the honest generalisation claim.
+
+**Caveats.** (a) fixed_pctl thresholds use full-history percentiles — a mild threshold-only look-ahead (~median vol, so small); the state path is causal. (b) n is 11-14 scored shocks per set; median-permutation is low-power at this n (the ratified caveat) — the pass rests on the criteria, with the significance checks corroborating. (c) 55 of 123 episodes were `already_out` under fixed_pctl; excluded from protection scoring but charged to idle_rate, which passed. (d) Everything local-currency (ground rule 9); nothing established about the GBP-unhedged live leg or intraday behaviour.
+
+**X4 outcome licenses (per plan): NO ACTION.** The deployed exit's mechanism gains support from 14 shocks over three decades and up to 8 markets it was never fitted to; the "validated on 2-3 events" objection to the incumbent is retired. Protective-stops discussion (`--protective-stops`, built 2026-07-17, paper-validation pending) is **not** triggered by this result. Plan complete.
+
+---
+
+## 2026-09-28 (late, 3) — FIRST CUT, Test A: price confirmation across 27 shocks. **FAILS.** Stop condition fired.
+
+**Command:** `uv run python scripts/tier_analysis/p5a_price_confirmation.py` (output `data/intraday_backtest/p5a_price_confirmation_20260928.txt`)
+**New code:** `research/confirmation_indicators.py`, `research/phase_scoring.py`, `tests/research/test_confirmation_indicators.py`, `tests/research/test_phase_scoring.py`. 65 research tests, 1,989 full suite. Engine, production files and the deployed rule unchanged.
+**Trial register:** **9 trials** = indicator P x min_depth {15%, 20%, 25%} x hit window {21, 42, 63}. Bonferroni alpha = 0.05/9 = 0.00556. Holdout scored once, all 9 variations in a single pass.
+
+**Pre-registered before running.** Indicator P = close above a **rising** 50-day SMA, fresh crossings only, per market, causal. Unit of observation = the **shock**, not the episode (per-market flags averaged within a shock, then across shocks, so 2008 in twelve markets is one observation). Statistic = **edge = hit rate - false-alarm rate**, where hit = fires within `window` bars after the trough, and false alarm = fires earlier in the episode at a point from which the market still fell >= 10% before bottoming. Design = shocks with any trough from 2007 (contaminated by T1/T9/realized-vol); holdout = shocks entirely pre-2007. Null = circular rotation of each episode's firing pattern, 10,000 draws, preserving firing count and spacing.
+
+**Pre-registration change, logged as required.** The plan's original 9 variations were min_depth x confirm_retrace. `confirm_retrace` has no effect on this test, which uses only the peak and the trough, so it was replaced by the hit `window`, which the test does depend on. Same trial count, same Bonferroni denominator. Sweeping a parameter the test ignores would have been theatre.
+
+**Holdout results:**
+
+| depth | window | shocks | hit | FA | edge | p | null median | baseline edge |
+|---|---|---|---|---|---|---|---|---|
+| 15% | 21 | 24 | 0.154 | 0.532 | -0.378 | 0.901 | -0.261 | -0.032 |
+| 15% | 42 | 24 | 0.676 | 0.532 | +0.144 | 0.0138 | -0.050 | -0.032 |
+| 15% | 63 | 24 | 0.971 | 0.532 | +0.439 | 0.0001 | +0.111 | -0.026 |
+| 20% | 21 | 18 | 0.218 | 0.553 | -0.335 | 0.497 | -0.335 | -0.035 |
+| 20% | 42 | 18 | 0.647 | 0.553 | +0.094 | 0.0115 | -0.122 | -0.024 |
+| 20% | 63 | 18 | 0.963 | 0.553 | +0.410 | 0.0001 | +0.030 | -0.024 |
+| 25% | 21 | 14 | 0.271 | 0.688 | -0.417 | 0.273 | -0.485 | -0.071 |
+| 25% | 42 | 14 | 0.639 | 0.688 | -0.049 | 0.0291 | -0.264 | -0.071 |
+| 25% | 63 | 14 | 0.986 | 0.688 | +0.298 | 0.0001 | -0.105 | -0.054 |
+
+**Criteria outcome: primary 2 of 9, secondary 0 of 9, stability FAIL, beats baseline 6 of 9. VERDICT: FAIL.**
+
+**Why it fails, and why the failure is informative rather than inconclusive:**
+
+1. **The false-alarm rate is catastrophic and stable: 0.53 to 0.95 in every single variation.** The indicator calls a turn *during the decline, with at least another 10% still to fall*, in more than half of all shocks — and in 95% of the deep design-set shocks. The secondary criterion (FA <= 0.333) fails 9 times out of 9. This is exactly T1's failure mode, now confirmed across **27 independent shocks, 12 markets and six decades** rather than one ticker.
+2. **The hit rate is a window-width artefact, not skill.** It rises 0.15 -> 0.68 -> 0.97 as the window widens 21 -> 42 -> 63 bars. At 63 bars the indicator fires within three months of essentially every trough — which any frequently-firing signal does. The null confirms it: at depth 15%/window 63 the **rotated (random) version also scores positive**, null median +0.111. The two variations that pass the primary criterion are both the widest window, i.e. the artefact.
+3. **No plateau anywhere.** Edge runs monotonically with window width (-0.378, +0.144, +0.439 at depth 15%) and the range across variations is -0.417 to +0.439 — a straight function of how wide the target is drawn. This is what the plan's stability criterion existed to catch, and it caught it.
+4. **Beating the naive baseline is a low bar here.** The causal elapsed-time baseline scores about -0.03 to -0.07 (it fires once and mostly misses narrow windows), so "beats baseline in 6 of 9" is not evidence of anything.
+
+**Conclusion — the plan's stop condition has fired.** Per PLAN_CRASH_PHASES.md: stop, and **do not iterate on the indicator set.** The recovery miss is recorded as a permanent accepted cost of the deployed rule. What this establishes is stronger than the three prior failures: the confirmation signature, as operationalised by the most natural causal price indicator, cannot distinguish a recovery from a bear-market rally across markets and decades it was never fitted to. Not because the sample was too small — the sample is 27 shocks — but because the signal is not there.
+
+**Scope of the claim, stated precisely.** This tests **one** indicator. It does not prove no indicator can work. It does mean that under this plan's own pre-registered rule we stop here rather than hunting for a second one, which is the discipline the plan was written to enforce after T9.
+
+**Test B (credit, HY OAS) was registered in parallel and is UNRUN, blocked on data.** Keyless FRED serves only ~3 years and silently ignores `cosd`, `coed` and `vintage_date`; `/data/*.txt` and `/downloaddata/` both return empty. A free FRED API key would unblock it. Note the tension to decide deliberately: running Test B *after* Test A failed is legitimate only because it was pre-registered as a parallel test, not chosen in response to the failure. If it is run, its 9 trials are its own register and its result carries the same stop rule.
+
+**Owner decision (2026-09-28): CLOSED.** The plan is closed on this result rather than obtaining a FRED key to run Test B. The recovery miss is a permanent accepted cost of the deployed VXN 23/24 rule — the price of being in cash when implied vol is high — not an open defect. Test B is formally **withdrawn**, not pending. The discretionary once-a-decade override remains the owner's judgement call and is a sizing/risk-budget decision, not a research question. `PLAN_CRASH_PHASES.md` carries the closure note, what survives, and the three conditions that would justify reopening.
+
+**Caveats.** Yahoo index histories have not yet been reconciled against a second source (P3's three-spot-date standard), so a data defect cannot be fully excluded — though a defect large enough to manufacture a 0.53-0.95 false-alarm rate across 12 independent markets is implausible. Depths are local-currency and dividend-unadjusted, correct for dating drawdowns. The 182-day shock window and the 10% false-alarm threshold are pre-registered but arbitrary.
+
+---
+
+## 2026-09-28 (late, 2) — P4a feasibility: cross-market event register. Sample gate PASSES 27 vs 10. P3a blocked on a FRED key.
+
+**Command:** `uv run python scripts/tier_analysis/p4a_event_register.py`
+**New code:** `research/index_history.py`, `research/crash_phases.py` (+`group_into_shocks`, `count_independent_shocks`), `tests/research/test_index_history.py`, `tests/research/test_shock_grouping.py`. 34 research tests, 1,958 full suite. Engine, production files and the deployed rule unchanged.
+**Trial register:** 0 strategy trials. This checks whether the first cut is answerable at all; it tests no indicator and makes no claim about detectability.
+
+**Why.** The owner chose the data-feasibility step over running the whole first cut, precisely because the plan's own stop-gate (>=10 *independent shocks*, ratified 2026-09-28) looked likely to fire and the cross-market data was not on disk.
+
+**Result: the gate passes with room to spare.** 12 local-currency indices, 123 episodes, grouped into shocks by single-linkage on trough dates with a pre-registered 182-day window:
+
+| measure | count | gate |
+|---|---|---|
+| independent shocks | **27** | >= 10 PASS |
+| shocks with at least one non-US market (holdout-usable) | **23** | >= 10 PASS |
+| shocks containing a >=25% drawdown somewhere | 22 | — |
+| episodes: design (US) / holdout | 22 / 101 | — |
+
+Data obtained (bars, span): S&P 500 14,306 (1970+), Nasdaq Composite 14,028 (1971+), Nikkei 225 13,948 (1970+), FTSE 100 10,796 (1984+), ASX All Ordinaries 10,655 (1984+), Hang Seng 9,807 (1986+), DAX 9,798 (1987+), IPC Mexico 8,737 (1991+), Bovespa 8,279 (1993+), KOSPI 7,332 (1996+), Sensex 7,203 (1997+), TAIEX 7,165 (1997+).
+
+The grouping reproduces known history without being tuned to: 1987 collapses 6 markets into one shock, 1997-98 Asia/LTCM 10, 2008 all 12, 2020 all 12, while the Nikkei's 1990, 1992 and 1995 legs stay separate. Register at `data/cache/yahoo_index/event_register.csv`.
+
+**Three findings that change the first cut's shape:**
+
+1. **P3a is blocked on a free FRED API key.** ALFRED vintage data needs `api.stlouisfed.org` with a key; no key exists on this machine. Worse, the obvious keyless route is a trap: `fredgraph.csv?id=BAMLH0A0HYM2&vintage_date=2009-03-09` returns **HTTP 200 with data starting 2023-09-29** — it silently ignores `vintage_date` and serves a recent window of the current series. Anyone assuming that URL gives a vintage would put look-ahead into the indicator and see no error.
+2. **HY OAS can only reach half the register.** It starts 1996, so it covers **14 of the 27** shocks, and it is a US credit series being applied to non-US episodes. Defensible via the global credit factor, but it is a real coverage asymmetry against a holdout defined as non-US. A per-market price-based confirmation indicator covers all 27 with no new data and no vintage problem.
+3. **Stooq is not a usable programmatic source.** Its CSV endpoint is behind a JS bot challenge — `https://stooq.com/q/d/l/?s=^dax&i=d` returns HTTP 200 with a challenge page, not data, for every index symbol tried. The plan assumed it usable. The existing `stooq_daily.py` works only against the local bulk dump already on disk (US/UK single names plus `^vix`, no index series).
+
+**Source note, flagged deliberately.** The index closes come from Yahoo's chart endpoint, a scoped exception to this project's standing "always use IBKR, never yfinance" rule. Rationale recorded in `research/index_history.py`: what is needed is daily closes on foreign indices to date historical episodes; the standing objection concerns the 730-day intraday cap and stale hourly bars feeding backtests, neither of which applies; IBKR has no index data subscriptions on this account; and nothing fetched here prices a trade, sizes a position or drives a signal. Every cache file stamps its fetch date.
+
+**Conclusion.** The sample-size worry that motivated the whole plan is resolved — 27 independent shocks across 12 markets and six decades, against a hoped-for 10. The first cut is answerable. Two owner decisions remain before it runs: whether to create a free FRED API key for ALFRED vintages, and whether the first indicator should still be HY OAS (14/27 coverage, US-only, vintage-dependent) or a per-market price indicator (27/27, no new data).
+
+**Caveats.** Episode depths are local-currency and unadjusted for dividends, which is correct for dating drawdowns and wrong for return measurement. The 182-day shock window is pre-registered but arbitrary; the register carries `shock_id` so it can be recomputed. Yahoo histories are not reconciled against a second source yet — P3's three-spot-date reconciliation standard has not been applied to these series and must be before any scoring.
+
+---
+
+## 2026-09-28 (late) — P0 prechecks for PLAN_CRASH_PHASES.md: oracle-lag curve + universe coverage. Plan SHRUNK, not started.
+
+**Command:** `uv run python scripts/tier_analysis/p0_oracle_lag_curve.py` (output `data/intraday_backtest/p0_oracle_lag_20260928.txt`)
+**New code:** `research/crash_phases.py` (new `Strategy_Auto_Trader/research/` namespace, deliberately NOT in `allocation/`), `tests/research/test_crash_phases.py` (19 tests). Engine, production files and the deployed rule unchanged.
+**Trial register:** 0 strategy trials. Nothing here is a candidate rule; both runs are diagnostics.
+
+**Motivation.** The plan was panel-reviewed before any code (P0, as the plan required). The panel — five personas plus GitHub Copilot as the outside auditor — converged on three things: multiple-testing exposure is unspecified while the plan's whole defence rests on it; the cross-market test is not out-of-sample (2008 in Tokyo and 2008 in New York are one shock, ρ≈0.7-0.9); and nothing in P5's pass criterion is tied to an economic requirement. Two cheap prechecks were run before committing to P1-P6.
+
+**Precheck 1 — oracle-lag curve.** An override that is *given the drawdown trough by hindsight* and re-enters Nasdaq `lag` trading days later, holding until the base VXN 23/24 rule takes over. Not tradeable; it is the ceiling no causal detector can reach. Real window 2007-11-20 onward, 13 bps/switch, same engine as T1/T9.
+
+Episode-relative pp added over the override's own span, full size (the two deep episodes; measured span-relative because the GFC trough is **2008-10-16** — EQQQ is GBP-unhedged so it bottomed with sterling in Oct 2008, not with the USD index in Mar 2009, and a calendar-year split misattributes every lag difference to 2008):
+
+| lag (trading days) | 0 | 5 | 10 | 15 | 20 | 30 | 40 | 60 | 90 |
+|---|---|---|---|---|---|---|---|---|---|
+| GFC (trough 2008-10-16) | +49.9 | +38.8 | +32.7 | +34.8 | +37.8 | +38.8 | +30.0 | +33.4 | +34.4 |
+| COVID (trough 2020-03-12) | +69.8 | +55.4 | +56.9 | +63.4 | +48.8 | +40.6 | +34.9 | +27.4 | +16.7 |
+| 2022 (trough 2022-12-28) | +16.3 | +14.8 | +10.9 | +13.3 | +7.3 | +1.8 | +3.3 | +0.5 | — |
+| 2018 / 2025 | +5.5 / +2.9 | +5.1 / +7.6 | −0.5 / +3.3 | +0.0 / +1.3 | — | — | — | — | — |
+
+Whole-window, full size: lag 0 adds +2,650pp and takes max DD to **−19.2%**; lag ≥10 leaves max DD at −14.5 to −14.9%. Base: +1,000.8%, xSharpe +0.96, max DD −14.9%.
+
+Four results, in order of how much they change the plan:
+
+1. **The prize is real and large.** Perfect timing is worth +50pp (GFC span) and +70pp (COVID span). The recovery miss is not a rounding error, so the question was worth asking.
+2. **RETRACTED — the risk budget does not bind.** This entry first claimed the oracle breached the owner's loss tolerance (max DD −19.2% against "15%") and concluded a full-size re-entry was undeployable. That conflated three different numbers and the owner corrected it. What the record actually says: the 15% is a tolerance on the **worst loss while invested**, which T4 measured over 1/3/5-day horizons and whose own caveat reads "max-DD probabilities include the −14.9% historical baseline, so the 5-day figures are the cleaner read"; the owner's decision of 2026-09-20 was to keep VXN 23/24 **expecting drawdown up to about −24%**; and −15% survives only as monitoring alarm R1 ("strategy drawdown no deeper than −15% only"), an alert threshold, not a cap. Measured correctly (columns added to the script and rerun), the oracle's **worst 5-day loss is −7.3% at every lag and both sizes — identical to the base rule's −7.3%**; worst 1-day goes from −3.9% (base) to −5.8% (full size, lag 0–10). Max DD −19.2% sits inside the accepted −24%. **A full-size re-entry is deployable on both measures.** No sizing restriction follows from the prechecks. The "zero headroom" note in the 2026-09-20 block (line ~101) inherits the same conflation and should be read with this correction.
+3. **The day tolerance is generous, and the panel's objection to it was wrong.** At 15 trading days late the oracle still captures 70% (GFC) and 91% (COVID) of its lag-0 value; at 30 days, 78% and 58%. P5's "≤15 trading days" criterion is adequate — the pre-run objection that it was too loose is not supported. Correction recorded here rather than acted on.
+4. **Sub-monthly precision is worth nothing and is pure noise.** Both deep-episode curves are non-monotonic (GFC: 10d 65% < 15d 70% < 20d 76% < 30d 78%; 2025: lag 5 is 2.6× lag 0). Anything inside roughly a month is equivalent. This undercuts P5's framing directly: the useful question is not "does an indicator fire *near a boundary*" but "does it fire somewhere in the first month or two of a recovery" — a much coarser, much easier target, and one that needs far less statistical machinery.
+5. **The prize is concentrated in the two deep episodes.** 2018, 2022 and 2025 offer +16pp at best and decay to nothing within 30 days. Adding shallow episodes to the register raises N without adding information about the case that matters.
+
+**Precheck 2 — universe coverage.** How many of the 614 tickers in `data_synthetic/hourly/` actually have data on each date (P2's breadth indicators are undefined without them):
+
+| date | 2000-01 | 2003-01 | 2007-01 | 2008-10 | 2009-03 | 2012-01 | 2016-01 | 2020-03 | 2022-12 | 2025-04 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| tickers | 273 | 285 | 447 | 461 | 461 | 485 | 551 | 580 | 601 | 611 |
+| % of 614 | 44.5 | 46.4 | 72.8 | 75.1 | 75.1 | 79.0 | 89.7 | 94.5 | 97.9 | 99.5 |
+
+Breadth is computable at the two episodes that matter (75% and 95% coverage) but unusable before 2003 (under half). Every name in the panel survived to 2026, so the sample is survivorship-selected as well as shrinking — the bias is worst in exactly the early recovery windows. P2 is not killed; it is confirmed to add nothing pre-2003.
+
+**Defect found and fixed in the P1 labeller.** The first implementation closed an episode when the price regained its prior peak, the obvious reading. On the Nasdaq that produced **one 83% episode running 2000-03-27 to 2014-11-13**, because the dot-com peak was not regained until 2014 — 2008 and 2009 vanished inside it and every "2009" column read +0.0. Episodes are now closed 252 trading days after the trough (the plan's own wording, "plus the following 12 months") with the running high reset afterwards, which finds the GFC episode from its lower 2007 local peak. Regression test: `test_a_later_crash_from_a_lower_high_is_found_as_its_own_episode`.
+
+**Owner decisions, 2026-09-28.** (a) P1 definitions ratified at **20% depth**. A 25% floor was ratified first, to
+target the deep episodes the oracle curve says carry the whole prize, then reverted when the consequence surfaced:
+depth is measured on **EQQQ in GBP, unhedged**, and sterling's ~10% fall in March 2020 compresses COVID to
+**-21.6%** against the USD index's ~-30%, so 25% excluded the single best recovery event (+70pp at the trough) for
+a currency reason rather than an economic one, cutting in-window episodes from 5 to 2. Depth stays on the traded
+asset with a 20% floor; sensitivity grid {15%, 20%, 25%} x {40%, 50%, 60%}. (b) The **stop-below-10-independent-
+shocks** rule is kept. (c) Whether to run the first cut at all is still open — it was first put on the false
+premise corrected in point 2 above and needs re-asking on the corrected basis.
+
+**Conclusion.** Plan shrunk, owner approved the shrink before these runs. P2 deferred, P4's cross-sectional leg and the CBOE series (VVIX, put/call, VIX3M) dropped — the last three have almost no coverage on a holdout defined as non-US plus pre-2007, so they could never satisfy the primary criterion. Remaining first cut: ALFRED-vintage HY OAS plus Stooq cross-market indices, confirmation phase only. **Not started.** Two owner decisions are open before it runs (see PLAN_CRASH_PHASES.md).
+
+**Caveats.** The oracle uses hindsight by construction and must never be quoted as a strategy result. The 2007 peak date sits on bridged pre-2007 data and is used only to bound the drawdown. Drawdown figures are whole-window portfolio drawdowns, not per-episode. The lag curves rest on two deep episodes; their non-monotonicity is itself evidence that single-lag readings should not be over-interpreted.
+
+---
+
+## 2026-09-28 (night) — T9: time-based re-entry override — REJECTED. One gate-passing config, shown to be a parameter spike.
+
+**Command:** `uv run python scripts/tier_analysis/t9_time_based_reentry.py` (output `data/intraday_backtest/t9_20260928.txt`)
+**New code:** `allocation/time_based_reentry.py`, `tests/allocation/test_time_based_reentry.py` (18 tests). Engine, production files and the deployed rule unchanged.
+
+**Motivation.** T1 tested four price/vol re-entry triggers, none passed. The realized-vol sweep (2026-09-20 early hours, addendum 3) found no observable separates a recovery from a continuing crash — in 2009 and 2020 implied AND realized vol were both elevated throughout. T9 tests the opposite idea: stop trying to identify the recovery, arm on **elapsed time alone**. Once the base rule has been continuously in cash for `wait_days`, ramp a fraction of the pot back into Nasdaq over `ramp_days` regardless of VXN or price; ends when the base rule re-enters, or on T1's 8% trailing stop (no re-arm within a cash episode — that would be a fixed-interval retry).
+
+**Setup.** Same as T1 for comparability: real data 2007-11-20..2026-09-18, `intraday_engine`, 13 bps/switch, same design/confirm/holdout windows and same gate. Grid stated up front: wait (21, 63, 126, 252) x ramp (1, 63) x size (1.0, 0.5) = **16 trials**.
+
+**Base-rule cash episodes** (what the wait grid has to work with): 81 episodes, median **3 days**, longest 320. Episodes exceeding wait 21d: 14; 63d: 6; 126d: 3; 252d: 3.
+
+**Gate result: one finalist, `w252r1F`** (wait 252 trading days, no ramp, full size). Design +0.6pp CAGR / +0.03 xSharpe; confirm +2.3pp / +0.17; holdout 2023+ CAGR +19.8 vs base +15.5, xSharpe +1.01 vs +0.82. It also passed the holdout — the only rule in T1 or T9 to get that far.
+
+**It does not survive a plateau check.** T2 required the deployed VXN thresholds to sit within 0.05 xSharpe of their neighbours' median. Sweeping `wait` at full size:
+
+| wait | episodes | whole-window pp vs base | xSharpe | 2009 | 2020 | 2021 | 2022 | 2023 |
+|---|---|---|---|---|---|---|---|---|
+| 100 | 3 | -127.4 | +0.88 | -1.7 | -0.7 | 0.0 | -9.2 | 0.0 |
+| 126 | 3 | +40.0 | +0.94 | +7.7 | -6.7 | 0.0 | +3.1 | 0.0 |
+| 150 | 3 | -95.3 | +0.90 | -1.0 | -2.6 | 0.0 | -5.4 | 0.0 |
+| 175 | 3 | -109.7 | +0.89 | -7.9 | +10.1 | -5.4 | -6.5 | 0.0 |
+| 200 | 3 | +5.6 | +0.93 | +18.1 | -0.4 | -5.4 | -9.1 | 0.0 |
+| 225 | 3 | +27.2 | +0.95 | +19.3 | 0.0 | -5.8 | -8.2 | 0.0 |
+| 240 | 3 | +179.2 | +0.99 | +13.0 | 0.0 | -11.1 | -0.8 | +20.1 |
+| **252** | 3 | **+334.1** | **+1.04** | +7.1 | 0.0 | +7.6 | 0.0 | +18.2 |
+| 265 | 3 | +281.1 | +1.04 | +7.3 | 0.0 | +9.9 | 0.0 | +10.2 |
+| 280 | 3 | +78.6 | +0.98 | +3.0 | 0.0 | +3.1 | 0.0 | +1.8 |
+| 300 | 1 | +14.6 | +0.97 | 0.0 | 0.0 | 0.0 | 0.0 | +1.7 |
+| 330 | 0 | 0.0 | +0.96 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| BASE | — | 0.0 | +0.96 | — | — | — | — | — |
+
+The whole-window figure changes sign five times across the sweep and swings from -127pp to +334pp. 252 is a spike, not a plateau: its neighbours at 225 (+27) and 280 (+79) are 4-12x below it. All twelve settings act on the **same three cash episodes** — the parameter is only choosing where inside each episode to enter, and on three events that is curve-fitting, not selection.
+
+**It also does not address the stated problem.** The weakness is missed crash recoveries (2003 -45.9pp, 2009 -35.8pp, 2020 -35.0pp vs Nasdaq). `w252r1F` recovers **+7.1pp of 2009** (about 20% of that year's gap) and **exactly nothing in 2020** — the 2020 cash episode ran past 252 days, so the override armed in 2021, not during the recovery. Its +334pp comes from 2021 (+7.6) and 2023 (+18.2), i.e. from being long after prolonged cash spells, which is a different benefit from crash-recovery capture and rests on two events.
+
+**Conclusion: no time-based override adopted.** This is the second independent mechanism (after T1's price/vol triggers and the realized-vol sweep) to fail on the same weakness, and the first to fail specifically because the only configuration that works is unstable in its own parameter. Combined with T1, the finding is stronger than "no rule found": **the recovery-miss weakness is not addressable by any mechanical rule that can be validated on this data**, because the sample is three events. Any future proposal here should be judged as a sizing/risk-budget decision, not a backtest question.
+
+**Drawdown headroom note (relevant to any discretionary override):** the base rule's max DD is -14.9% against a stated 15% loss tolerance — zero headroom. T4's weight ladder is the only source of room: 75% weight gives -11.3%, 50% gives -7.6%. Funding a discretionary override means giving up base-case return to buy that room first.
+
+---
+
 ## 2026-09-28 (evening) — live_sim Sharpe fixed: xSharpe added, business-day basis. optimised_new 26yr recomputed.
 
 **Not a new backtest run** — a metric fix plus a recompute of the 2026-09-28 entry below from its saved equity curve (`data_synthetic/journals/live_sim_synthetic_position_summary_rerun.csv`, SUMMARY row verified identical: +£10,168.54 stock, £13,346.62 CSH2, DD -1.68%, 2107 candidates / 1446 admitted). No re-run, no data change.
