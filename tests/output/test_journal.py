@@ -680,3 +680,57 @@ class TestJournalMigration:
         with open(journal_path, newline="") as f:
             rows = list(csv.DictReader(f))
         assert len(rows) == 2
+
+
+class TestLiveJournalGuard:
+    """Simulated trades must never reach the real broker-fill journal."""
+
+    def test_live_journal_path_is_rejected(self):
+        from Strategy_Auto_Trader.output.journal import (
+            LIVE_JOURNAL,
+            LiveJournalWriteError,
+            assert_not_live_journal,
+        )
+        import pytest
+        with pytest.raises(LiveJournalWriteError, match="live fill journal"):
+            assert_not_live_journal(LIVE_JOURNAL, "live_sim")
+
+    def test_error_names_the_offending_writer(self):
+        from Strategy_Auto_Trader.output.journal import (
+            LIVE_JOURNAL,
+            LiveJournalWriteError,
+            assert_not_live_journal,
+        )
+        import pytest
+        with pytest.raises(LiveJournalWriteError, match="monte_carlo"):
+            assert_not_live_journal(LIVE_JOURNAL, "monte_carlo")
+
+    def test_non_normalised_path_to_live_journal_is_rejected(self):
+        """Guard resolves paths — '..' indirection must not slip past it."""
+        from Strategy_Auto_Trader.output.journal import (
+            LIVE_JOURNAL,
+            LiveJournalWriteError,
+            assert_not_live_journal,
+        )
+        import pytest
+        sneaky = LIVE_JOURNAL.parent / "sub" / ".." / "live.csv"
+        with pytest.raises(LiveJournalWriteError):
+            assert_not_live_journal(sneaky, "live_sim")
+
+    def test_other_paths_pass_through_unchanged(self, tmp_path):
+        from Strategy_Auto_Trader.output.journal import assert_not_live_journal
+        target = tmp_path / "live_sim_20260929.csv"
+        assert assert_not_live_journal(target, "live_sim") == target
+
+    def test_backtest_journal_is_allowed(self):
+        from Strategy_Auto_Trader.output.journal import (
+            BACKTEST_JOURNAL,
+            assert_not_live_journal,
+        )
+        assert assert_not_live_journal(BACKTEST_JOURNAL, "batch") == BACKTEST_JOURNAL
+
+    def test_string_path_is_accepted_and_returned_as_path(self, tmp_path):
+        from pathlib import Path
+        from Strategy_Auto_Trader.output.journal import assert_not_live_journal
+        got = assert_not_live_journal(str(tmp_path / "sim.csv"), "live_sim")
+        assert isinstance(got, Path)

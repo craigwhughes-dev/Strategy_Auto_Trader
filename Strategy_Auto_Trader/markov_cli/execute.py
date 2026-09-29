@@ -21,9 +21,13 @@ from pathlib import Path
 
 from ..core.cli_logging import setup_cli_logger
 
-ROOT = Path(__file__).resolve().parent.parent.parent
-DATA_DIR = ROOT / "data"
-STATE_DIR = ROOT / "state"
+from ..core.profiles import resolve_profile
+
+PROFILE = resolve_profile()
+ROOT = PROFILE.root
+DATA_DIR = PROFILE.data_dir
+STATE_DIR = PROFILE.state_dir
+#: Shared reference data; the profile's own strategy config is PROFILE.config_path.
 CONFIG_DIR = ROOT / "config"
 
 logger = logging.getLogger("live_daemon.execute")
@@ -447,13 +451,18 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_arg_parser().parse_args(argv)
 
     broker_cfg = {}
-    config_path = CONFIG_DIR / "overnight_strategy.json"
+    exec_cfg = {}
+    config_path = PROFILE.config_path
     if config_path.exists():
         with open(config_path, encoding="utf-8") as f:
-            broker_cfg = json.load(f).get("broker", {})
+            _cfg = json.load(f)
+        broker_cfg = _cfg.get("broker", {})
+        exec_cfg = _cfg.get("execution", {})
     broker_host = broker_cfg.get("host", "127.0.0.1")
     broker_port = broker_cfg.get("port", 7497)
     broker_client_id = broker_cfg.get("client_id", 1)
+    broker_expected_account = broker_cfg.get("expected_account")
+    broker_real_money = bool(exec_cfg.get("real_money", False))
 
     if not args.dry_run:
         # Execution reads precomputed signals (no HMM here), but a real
@@ -491,7 +500,14 @@ def main(argv: list[str] | None = None) -> int:
         broker = NullBroker(prices=prices)
     else:
         from ..broker.ibkr_adapter import IBKRAdapter
-        broker = IBKRAdapter(host=broker_host, port=broker_port, client_id=broker_client_id)
+        if broker_expected_account is None:
+            logger.error("broker.expected_account is not set — refusing to place "
+                         "orders against an unverified account (use --dry-run)")
+            return 1
+        broker = IBKRAdapter(host=broker_host, port=broker_port,
+                             client_id=broker_client_id,
+                             expected_account=broker_expected_account,
+                             allow_live_account=broker_real_money)
 
     broker.connect()
     try:

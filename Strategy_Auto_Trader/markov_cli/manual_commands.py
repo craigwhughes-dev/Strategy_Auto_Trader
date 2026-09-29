@@ -468,8 +468,8 @@ def process_manual_commands(
     if daemon_state is None:
         daemon_state = {}
     if not commands_dir:
-        root = Path(__file__).resolve().parent.parent.parent
-        commands_dir = root / "state" / "commands"
+        from ..core.profiles import resolve_profile
+        commands_dir = resolve_profile().commands_dir
 
     _ensure_command_dirs(commands_dir)
     pending_dir = commands_dir / "pending"

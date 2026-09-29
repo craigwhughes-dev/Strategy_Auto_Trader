@@ -92,6 +92,10 @@ Once dry-run looks good:
 1. Edit `config/overnight_strategy.json`:
    - Find: `"dry_run": true`
    - Change to: `"dry_run": false`
+   - Set `broker.expected_account` to the account id you intend to trade —
+     startup refuses to place orders without it.
+   - Leave `execution.real_money` at `false` for a paper account. Setting it
+     `true` is what permits real-money trading; see Account safety.
 
 2. Start TWS or IB Gateway on the paper trading port:
    - **TWS**: Log in to paper account, leave it running
@@ -110,6 +114,69 @@ Once dry-run looks good:
      SELL: TICKER_B x50 @ 234.56
    ```
 
+## Profiles — running more than one daemon from this checkout
+
+A profile is one isolated trading environment: its own config, state, logs,
+lock and broker client id. It is selected by the `SAT_PROFILE` environment
+variable **before the process starts** (paths are fixed at import), so it is set
+in the Task Scheduler action, not passed as a flag. `--profile <name>` only
+asserts that the intent matches and exits 2 on a mismatch.
+
+| Profile | Config | State / lock / commands | Logs |
+|---------|--------|-------------------------|------|
+| `default` (unset) | `config/overnight_strategy.json` | `state/` | `logs/` |
+| `<name>` | `config/profiles/<name>/overnight_strategy.json` | `state/profiles/<name>/` | `logs/profiles/<name>/` |
+
+The default profile keeps the historical paths exactly, so an existing
+deployment is unaffected by this mechanism existing.
+
+Watchlists, the universe files and the fetched market-data cache stay **shared**
+— they are reference data, and the relative paths inside a profile's config
+still resolve against the checkout root.
+
+To add a second daemon (e.g. paper-testing a new strategy beside a live one):
+
+1. `mkdir config\profiles\paper2` and copy a config into it.
+2. **Change `broker.client_id`** — two daemons on one client id silently
+   disconnect each other from IBKR. Startup refuses to run if a live daemon in
+   another profile already holds the id, or is trading the same account.
+3. Set `SAT_PROFILE=paper2` in that task's action.
+
+A separate git checkout is optional belt-and-braces (it stops a research edit
+reaching live code mid-session); the profile is what provides the isolation.
+The orphan-daemon sweep only kills daemons it can attribute to **this**
+checkout, so it will not kill a sibling checkout's instance.
+
+## Account safety
+
+Two gates stand between a config edit and unintended real-money orders:
+
+| Key | Meaning |
+|-----|---------|
+| `broker.expected_account` | Required whenever `dry_run` is false. Every connect (including unattended reconnects) verifies the session reports this account, and aborts otherwise. |
+| `execution.real_money` | Permission to trade a non-paper account. Default `false`: a session whose account id does not start `DU`/`DF` is refused. |
+
+An unknown account-id prefix is treated as real money, so the unrecognised case
+fails toward caution rather than trading.
+
+## Flattening the book
+
+| Situation | Command |
+|-----------|---------|
+| Daemon healthy | `uv run python -m Strategy_Auto_Trader.markov_cli.manual_control flatten --yes` |
+| Daemon dead or unresponsive | `uv run python -m Strategy_Auto_Trader.markov_cli.panic_flatten --yes` |
+
+`manual_control flatten` queues `PAUSE_BUYING` then `SELL_ALL` for the daemon to
+execute, so the ledger and the broker stay in step. `SELL_ALL` is requeued while
+any holding's market is closed and expires after 24h. Buying stays paused until
+`manual_control unpause`. **If the daemon is not running, nothing happens.**
+
+`panic_flatten` talks to IBKR directly on its own client id. It previews and
+sends nothing without `--yes`, refuses to run while a daemon for the profile is
+detectably alive (`--force` overrides), and sells only positions in that
+profile's own ledger — holdings the broker reports that this system never opened
+are listed and left alone.
+
 ## Configuration
 
 All settings in `config/overnight_strategy.json`:
@@ -123,6 +190,10 @@ All settings in `config/overnight_strategy.json`:
 | `daytime.poll_interval_seconds` | 60 | How often to check for new cycles |
 | `execution.capital_pot` | 20000 | Total paper account capital |
 | `execution.dry_run` | true | Safe default (no real orders until you flip to false) |
+| `execution.real_money` | false | Permission to trade a non-paper account (see Account safety) |
+| `broker.expected_account` | — | Required when `dry_run` is false; verified on every connect |
+| `broker.client_id` | 1 | Must be unique per profile |
+| `broker.panic_client_id` | 11 | Client id used by `panic_flatten` |
 
 ## How It Works
 

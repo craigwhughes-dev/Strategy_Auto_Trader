@@ -13,9 +13,10 @@ the engine itself stays currency-agnostic.
 Fee schedule (IBKR UK, Tiered plan, from the 2026-07 pricing pages):
   GBP-denominated: 0.05% of trade value, min GBP 1.00 per order
   USD-denominated: 0.05% of trade value, min USD 1.70, max USD 39.00
-UK extras on BUY orders only, for UK company SHARES: 0.5% stamp duty (SDRT) and
-the GBP 1.00 PTM levy on trades over GBP 10,000. LSE-listed ETFs / UCITS funds
-(broker.symbols.is_uk_listed_etf) pay neither — only commission.
+UK extras for UK company SHARES: 0.5% stamp duty (SDRT) on BUYs only, and the
+GBP 1.00 PTM levy on BOTH sides of a trade over GBP 10,000 (the levy is charged
+on purchases and sales alike; only SDRT is purchase-only). LSE-listed ETFs /
+UCITS funds (broker.symbols.is_uk_listed_etf) pay neither — only commission.
 The Fixed plan (min GBP 3 / USD 4) is deliberately not modelled yet —
 add it here if the account turns out to be on Fixed.
 
@@ -75,10 +76,11 @@ class IbkrTieredCost:
         v = max(0.0, float(trade_value))
         if self._uk:
             c = max(_UK_MIN_GBP, _TIER_PCT * v)
-            if is_buy and not self._etf:  # SDRT and the PTM levy apply to UK company shares, not ETFs
-                c += _STAMP_DUTY_PCT * v
+            if not self._etf:  # SDRT and the PTM levy apply to UK company shares, not ETFs
+                if is_buy:
+                    c += _STAMP_DUTY_PCT * v
                 if v > _PTM_THRESHOLD_GBP:
-                    c += _PTM_LEVY_GBP
+                    c += _PTM_LEVY_GBP  # charged on sales too, unlike SDRT
             if self._include_spread:
                 c += (_UK_ETF_SPREAD if self._etf else _UK_SPREAD) * v
         else:

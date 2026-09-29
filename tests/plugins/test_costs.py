@@ -48,8 +48,16 @@ class TestIbkrTieredUk:
         m = IbkrTieredCost("SHEL.L")
         # 12k buy: commission 6.00 + stamp 60.00 + PTM 1.00
         assert m.cost(12_000.0, True) == pytest.approx(67.00)
-        # sell side: no stamp, no PTM
-        assert m.cost(12_000.0, False) == pytest.approx(6.00)
+
+    def test_ptm_levy_is_charged_on_sells_too(self):
+        """SDRT is purchase-only; the PTM levy is charged on both sides."""
+        m = IbkrTieredCost("SHEL.L")
+        # 12k sell: commission 6.00 + PTM 1.00, no stamp duty
+        assert m.cost(12_000.0, False) == pytest.approx(7.00)
+
+    def test_no_ptm_levy_on_sells_at_or_below_threshold(self):
+        m = IbkrTieredCost("SHEL.L")
+        assert m.cost(10_000.0, False) == pytest.approx(5.00)
 
     def test_spread_term(self):
         m = IbkrTieredCost("SHEL.L", include_spread=True)
@@ -181,3 +189,39 @@ class TestEngineParity:
             transaction_costs_total=costs,
         )
         assert stats["transaction_costs_total"] == pytest.approx(round(costs, 2))
+
+
+class TestEqqqIsTaxExempt:
+    """EQQQ.L is an LSE UCITS ETF used in the tier research datasets.
+
+    It is not in the order-routing tables (not wired for live orders), which
+    previously meant cost models charged it 0.5% stamp duty as if it were a UK
+    company share — a phantom cost on the Nasdaq leg of every tier backtest.
+    """
+
+    def test_eqqq_pays_no_stamp_duty(self):
+        m = IbkrTieredCost("EQQQ.L")
+        assert m.cost(20_000.0, True) == pytest.approx(10.00)
+
+    def test_eqqq_pays_no_ptm_levy(self):
+        m = IbkrTieredCost("EQQQ.L")
+        assert m.cost(20_000.0, False) == pytest.approx(10.00)
+
+    def test_eqqq_uses_the_etf_spread(self):
+        m = IbkrTieredCost("EQQQ.L", include_spread=True)
+        # 10k: commission 5.00 + 3bps ETF spread 3.00
+        assert m.cost(10_000.0, False) == pytest.approx(8.00)
+
+    def test_eqqq_recognised_as_uk_listed_etf(self):
+        from Strategy_Auto_Trader.broker.symbols import is_uk_listed_etf
+        assert is_uk_listed_etf("EQQQ.L") is True
+
+    def test_tax_exemption_does_not_change_order_routing(self):
+        """Exemption is decoupled from routing: EQQQ has no verified LSEETF listing."""
+        from Strategy_Auto_Trader.broker.symbols import ibkr_contract_params
+        assert ibkr_contract_params("EQQQ.L") == ("EQQQ", "LSE", "GBP")
+
+    def test_uk_share_still_taxed(self):
+        """Guard against the exemption widening to real UK shares."""
+        from Strategy_Auto_Trader.broker.symbols import is_uk_listed_etf
+        assert is_uk_listed_etf("SHEL.L") is False

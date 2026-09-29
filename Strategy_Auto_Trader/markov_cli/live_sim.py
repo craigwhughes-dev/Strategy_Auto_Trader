@@ -52,7 +52,12 @@ import pandas as pd
 
 from . import full_scan
 from ..broker.symbols import sizing_price
-from ..output.journal import LIVE_JOURNAL, TradeRecord, append_trades
+from ..output.journal import (
+    LIVE_JOURNAL,
+    TradeRecord,
+    append_trades,
+    assert_not_live_journal,
+)
 from ..plugins.costs import COST_MODEL_CHOICES, make_cost_model
 from ..quant_hmm.ticker_ranking import (
     Candidate,
@@ -764,7 +769,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="Lookback period for price momentum factor (calendar days, default: 252 ≈ 12mo, "
                              "swept 2026-09-12 — 12mo consistently beats 6mo).")
     parser.add_argument("--journal", default=None,
-                        help="Journal CSV to append trades to (default: data/journals/live.csv)")
+                        help="Journal CSV to append simulated trades to (default: "
+                             "data/journals/live_sim_<timestamp>.csv). The real fill journal "
+                             "(data/journals/live.csv) is rejected — simulated rows are "
+                             "indistinguishable from broker fills once merged.")
     parser.add_argument("--position-summary", default=None,
                         help="Path to write the per-(strategy,pot_size,date) equity-curve CSV "
                              "(default: data/journals/live_sim_position_summary_<timestamp>.csv). "
@@ -828,6 +836,9 @@ def main(argv: list[str] | None = None) -> int:
             args.position_summary = str(_SYNTHETIC_JOURNAL_DIR / f"live_sim_synthetic_position_summary_{ts}.csv")
 
     pot_sizes = args.pot_sizes if args.pot_sizes else [args.initial_cash]
+    # One stamp for every output of this run, so the journal and its position
+    # summary are matchable by filename rather than by approximate mtime.
+    run_ts = pd.Timestamp.now().strftime("%Y%m%dT%H%M%S")
 
     logger.info(f"Live simulation: {len(args.tickers)} tickers x {len(args.strategies)} strategies "
           f"x {len(pot_sizes)} pot size(s)")
@@ -1038,16 +1049,18 @@ def main(argv: list[str] | None = None) -> int:
             }
             summary_rows.append(summary_row)
 
-    journal_path = Path(args.journal) if args.journal else LIVE_JOURNAL
+    if args.journal:
+        journal_path = assert_not_live_journal(Path(args.journal), "live_sim")
+    else:
+        journal_path = LIVE_JOURNAL.parent / f"live_sim_{run_ts}.csv"
     n_logged = append_trades(journal_path, all_executed)
     logger.info(f"\n{'='*64}\n {n_logged} trade(s) logged to {journal_path}\n{'='*64}")
 
     if summary_rows:
         if args.position_summary:
-            summary_path = Path(args.position_summary)
+            summary_path = assert_not_live_journal(Path(args.position_summary), "live_sim")
         else:
-            ts = pd.Timestamp.now().strftime("%Y%m%dT%H%M%S")
-            summary_path = LIVE_JOURNAL.parent / f"live_sim_position_summary_{ts}.csv"
+            summary_path = LIVE_JOURNAL.parent / f"live_sim_position_summary_{run_ts}.csv"
         _write_position_summary(summary_rows, summary_path)
         logger.info(f" position summary written to {summary_path}")
 

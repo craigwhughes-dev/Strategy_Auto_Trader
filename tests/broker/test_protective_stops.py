@@ -582,3 +582,40 @@ class TestProtectiveStops:
         from Strategy_Auto_Trader.broker.protocols import BrokerAdapterProtocol
         broker = NullBroker()
         assert isinstance(broker, BrokerAdapterProtocol)
+
+
+class TestProtectiveStopsTierModeGate:
+    """--protective-stops must not reach allocator-managed tier assets."""
+
+    @staticmethod
+    def _logger():
+        import logging
+        return logging.getLogger("test_tier_gate")
+
+    def test_tier_mode_disables_protective_stops(self):
+        from Strategy_Auto_Trader.markov_cli.live_daemon import resolve_protective_stops
+        assert resolve_protective_stops(True, tier_mode=True, logger=self._logger()) is False
+
+    def test_tier_mode_warns_when_overriding(self, caplog):
+        import logging
+        from Strategy_Auto_Trader.markov_cli.live_daemon import resolve_protective_stops
+        with caplog.at_level(logging.WARNING, logger="test_tier_gate"):
+            resolve_protective_stops(True, tier_mode=True, logger=self._logger())
+        assert "--protective-stops ignored in --tier-mode" in caplog.text
+
+    def test_non_tier_mode_preserves_enabled_flag(self):
+        from Strategy_Auto_Trader.markov_cli.live_daemon import resolve_protective_stops
+        assert resolve_protective_stops(True, tier_mode=False, logger=self._logger()) is True
+
+    def test_disabled_flag_stays_disabled_in_both_modes(self):
+        from Strategy_Auto_Trader.markov_cli.live_daemon import resolve_protective_stops
+        log = self._logger()
+        assert resolve_protective_stops(False, tier_mode=False, logger=log) is False
+        assert resolve_protective_stops(False, tier_mode=True, logger=log) is False
+
+    def test_tier_mode_gate_silent_when_flag_already_off(self, caplog):
+        import logging
+        from Strategy_Auto_Trader.markov_cli.live_daemon import resolve_protective_stops
+        with caplog.at_level(logging.WARNING, logger="test_tier_gate"):
+            resolve_protective_stops(False, tier_mode=True, logger=self._logger())
+        assert "--protective-stops ignored" not in caplog.text

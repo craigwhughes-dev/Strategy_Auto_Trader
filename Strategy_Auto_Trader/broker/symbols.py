@@ -51,6 +51,14 @@ _LSEETF_SYMBOLS: frozenset[str] = frozenset({"ISF", "XSTR", "IGLS", "ISXF", "EQG
 # port 4002: LSE/GBP returns delayed quotes and 1-min historical bars.
 _LSE_EXPLICIT_EXCHANGE: dict[str, str] = {"CSH2": "LSE"}
 
+# LSE-listed ETFs that cost models must treat as stamp-duty/PTM exempt but that
+# are NOT (yet) wired for order routing above. Kept separate deliberately: the
+# routing tables double as a record of exchanges verified against IBKR, and a
+# fund used only in research must not be given an unverified exchange just to
+# be costed correctly. EQQQ (Invesco EQQQ Nasdaq-100 UCITS) is the Nasdaq leg
+# of the tier research datasets.
+_UK_ETF_TAX_EXEMPT: frozenset[str] = frozenset({"EQQQ"})
+
 
 def ibkr_contract_params(ticker: str) -> tuple[str, str, str]:
     """Map a yfinance ticker to (symbol, exchange, currency) for an IBKR Stock.
@@ -80,13 +88,16 @@ def is_uk_listed_etf(ticker: str) -> bool:
     """True for an LSE-listed ETF/UCITS fund (as opposed to a UK company share).
 
     These are exempt from UK stamp duty and the PTM levy, so cost models must not charge them.
-    Membership is exactly the two tables above that route ETFs to IBKR (LSEETF listings plus the
-    explicit-exchange ETFs such as CSH2), so registering a fund to trade it also registers the exemption.
+    Membership is the two routing tables above (LSEETF listings plus explicit-exchange ETFs such
+    as CSH2), so registering a fund to trade it also registers the exemption, plus
+    _UK_ETF_TAX_EXEMPT for funds that appear in research datasets before they are order-routable.
     """
     if not ticker.upper().endswith(".L"):
         return False
     base = ticker[:-2].replace("-", ".").upper()
-    return base in _LSEETF_SYMBOLS or base in _LSE_EXPLICIT_EXCHANGE
+    return (base in _LSEETF_SYMBOLS
+            or base in _LSE_EXPLICIT_EXCHANGE
+            or base in _UK_ETF_TAX_EXEMPT)
 
 
 def ibkr_order_contract_kwargs(ticker: str) -> dict[str, str]:

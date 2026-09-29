@@ -21,6 +21,24 @@ BACKTEST_JOURNAL = JOURNAL_DIR / "backtest.csv"
 LIVE_JOURNAL = JOURNAL_DIR / "live.csv"
 
 
+class LiveJournalWriteError(RuntimeError):
+    """A simulation tried to append to the real broker-fill journal."""
+
+
+def assert_not_live_journal(path: Path, writer: str) -> Path:
+    """Guard LIVE_JOURNAL against simulated trades; returns `path` unchanged.
+
+    LIVE_JOURNAL is the record of actual broker fills and the basis for
+    P&L and CGT. Simulated rows mixed in are indistinguishable after the
+    fact, so a simulator aiming at it is a hard error, not a warning.
+    """
+    if Path(path).resolve() == LIVE_JOURNAL.resolve():
+        raise LiveJournalWriteError(
+            f"{writer} may not write to the live fill journal ({LIVE_JOURNAL}) — "
+            f"pass --journal with a simulation path instead")
+    return Path(path)
+
+
 @dataclass
 class TradeRecord:
     """One closed (or still-open) trade. Field order defines the CSV column order."""

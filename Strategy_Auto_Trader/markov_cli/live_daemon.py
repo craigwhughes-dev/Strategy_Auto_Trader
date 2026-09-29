@@ -27,11 +27,22 @@ try:
 except ImportError:
     psutil = None
 
-ROOT = Path(__file__).resolve().parent.parent.parent
-CONFIG_DIR = ROOT / "config"
-STATE_DIR = ROOT / "state"
-DATA_DIR = ROOT / "data"
-LOGS_DIR = ROOT / "logs"
+from ..core.profiles import (
+    active_profile_name,
+    list_profile_state_dirs,
+    resolve_profile,
+)
+
+# Profile is resolved from the environment at import and never reassigned, so
+# these stay real constants — a daemon cannot change which ledger it owns
+# halfway through its life. See core/profiles.py; --profile only asserts the
+# caller's intent matches what $SAT_PROFILE already selected.
+PROFILE = resolve_profile()
+ROOT = PROFILE.root
+CONFIG_DIR = PROFILE.config_dir
+STATE_DIR = PROFILE.state_dir
+DATA_DIR = PROFILE.data_dir
+LOGS_DIR = PROFILE.logs_dir
 
 # How long to wait between failed ibkr_data_reconcile attempts before retrying.
 # Without this, every 60s poll re-enters the function when TWS is down during
@@ -142,6 +153,57 @@ def _is_daemon_cmdline(cmdline: list[str] | None) -> bool:
     return any(m in joined for m in _DAEMON_CMDLINE_MARKERS)
 
 
+def _under_root(path_str: str | None, root: Path) -> bool:
+    """Whether `path_str` names `root` itself or something inside it.
+
+    Compared with normcase (Windows paths are case-insensitive) and a trailing
+    separator, so a sibling checkout like `.../Trader2` is not read as being
+    inside `.../Trader`.
+    """
+    if not path_str:
+        return False
+    base = os.path.normcase(str(root)).rstrip(os.sep)
+    target = os.path.normcase(str(path_str)).rstrip(os.sep)
+    return target == base or target.startswith(base + os.sep)
+
+
+def _is_same_checkout(proc, root: Path | None = None) -> bool | None:
+    """Whether `proc` belongs to this checkout. None if not determinable.
+
+    Only positive matches prove ownership: a working directory, interpreter or
+    cmdline argument inside `root`. Absence proves nothing except from `cwd`,
+    the one signal the launcher controls (`run_daemon.bat` does `cd /d %~dp0`).
+    In particular `exe` is useless as negative evidence here — `.venv` on
+    Windows resolves to the shared uv-managed interpreter outside the
+    checkout, so a same-checkout daemon reports a foreign exe.
+
+    None means "unattributable", and callers must not kill what they cannot
+    attribute: an unrelated checkout may be another account's daemon.
+    """
+    root = root if root is not None else ROOT
+
+    def _read(getter):
+        try:
+            return getter()
+        except Exception:
+            return None
+
+    for value in (_read(getattr(proc, "cwd", lambda: None)),
+                  _read(getattr(proc, "exe", lambda: None))):
+        if value and _under_root(value, root):
+            return True
+    cmdline = _read(getattr(proc, "cmdline", lambda: None)) or []
+    try:
+        if any(_under_root(arg, root) for arg in cmdline):
+            return True
+    except TypeError:
+        cmdline = []
+
+    # Negative verdict only from a readable cwd; everything else is unknown.
+    cwd = _read(getattr(proc, "cwd", lambda: None))
+    return False if cwd else None
+
+
 def _try_lock(handle) -> bool:
     """Take a non-blocking exclusive OS lock on *handle*. True on success."""
     try:
@@ -159,14 +221,86 @@ def _try_lock(handle) -> bool:
 
 def _read_holder_pid() -> int | None:
     """PID recorded by the current/most recent lock holder, if readable."""
-    pid_path = STATE_DIR / "daemon.pid"
+    record = _read_pid_record(STATE_DIR / "daemon.pid")
+    return record["pid"] if record else None
+
+
+def _read_pid_record(pid_path: Path) -> dict | None:
+    """Parse a `daemon.pid` file: "pid|started_at|client_id|account".
+
+    Older files carry only the first two fields; the extra ones are optional
+    so a daemon written by a previous version still reads cleanly.
+    """
     try:
-        return int(pid_path.read_text(encoding="utf-8").split("|")[0])
+        parts = pid_path.read_text(encoding="utf-8").strip().split("|")
     except FileNotFoundError:
         return None
     except Exception as e:
         logging.getLogger("live_daemon").warning("daemon.pid unreadable: %s", e)
         return None
+    try:
+        pid = int(parts[0])
+    except (IndexError, ValueError):
+        return None
+    client_id = None
+    if len(parts) > 2 and parts[2].strip():
+        try:
+            client_id = int(parts[2])
+        except ValueError:
+            client_id = None
+    account = parts[3].strip() if len(parts) > 3 and parts[3].strip() else None
+    return {"pid": pid, "started_at": parts[1] if len(parts) > 1 else "",
+            "client_id": client_id, "account": account}
+
+
+def _pid_is_live_daemon(pid: int) -> bool:
+    """Whether `pid` is currently a running live_daemon from this checkout."""
+    if psutil is None:
+        return False
+    try:
+        proc = psutil.Process(pid)
+        return (_is_daemon_cmdline(proc.cmdline())
+                and _is_same_checkout(proc) is not False)
+    except Exception:
+        return False
+
+
+def check_profile_collisions(
+    client_id: int,
+    account: str | None,
+    logger: logging.Logger,
+    state_dirs: dict[str, Path] | None = None,
+) -> list[str]:
+    """Conflicts with live daemons running under OTHER profiles of this checkout.
+
+    Two daemons sharing a broker client id silently disconnect each other from
+    IBKR; two driving the same account double-trade it. Both are the natural
+    result of copying a profile config and editing only some of it, so they are
+    checked before any order can be placed rather than diagnosed afterwards.
+
+    Returns a list of human-readable conflicts (empty when clear).
+    """
+    if state_dirs is None:
+        state_dirs = list_profile_state_dirs(ROOT)
+    conflicts: list[str] = []
+    for name, state_dir in state_dirs.items():
+        if name == PROFILE.name:
+            continue
+        record = _read_pid_record(state_dir / "daemon.pid")
+        if not record or not _pid_is_live_daemon(record["pid"]):
+            continue
+        if record["client_id"] is not None and record["client_id"] == client_id:
+            conflicts.append(
+                f"profile {name!r} (PID {record['pid']}) is already using broker "
+                f"client_id {client_id} — change broker.client_id in one of them")
+        if account and record["account"] and record["account"] == account:
+            conflicts.append(
+                f"profile {name!r} (PID {record['pid']}) is already trading account "
+                f"{account} — two daemons on one account will double-trade it")
+    if conflicts:
+        for c in conflicts:
+            logger.critical(f"Profile collision: {c}")
+    return conflicts
 
 
 def _kill_daemon_process(pid: int, logger: logging.Logger) -> bool:
@@ -183,6 +317,11 @@ def _kill_daemon_process(pid: int, logger: logging.Logger) -> bool:
         if not _is_daemon_cmdline(proc.cmdline()):
             logger.warning(f"PID {pid} is not a live_daemon process "
                            f"({proc.name()}); refusing to kill")
+            return False
+        if _is_same_checkout(proc) is not True:
+            logger.warning(f"PID {pid} is a live_daemon from a different or "
+                           f"unattributable checkout (this one is {ROOT}); "
+                           f"refusing to kill")
             return False
         victims = [proc] + proc.children(recursive=True)
         for p in victims:
@@ -214,8 +353,11 @@ def _kill_daemon_process(pid: int, logger: logging.Logger) -> bool:
 def kill_stray_daemons(logger: logging.Logger) -> int:
     """Kill orphan live_daemon processes that aren't part of this instance.
 
-    An orphan is any python process with a live_daemon cmdline that is not
-    this process, an ancestor (the uv/venv shim chain), or a descendant.
+    An orphan is any python process with a live_daemon cmdline that belongs to
+    THIS checkout and is not this process, an ancestor (the uv/venv shim
+    chain), or a descendant. Daemons from another checkout are left alone:
+    they may be a different account's instance, and the process lock — not
+    this sweep — is what prevents two daemons sharing one state directory.
     Call only while holding the process lock — the lock holder is the single
     authority allowed to kill others.
     """
@@ -236,6 +378,14 @@ def kill_stray_daemons(logger: logging.Logger) -> int:
             if not (proc.info["name"] or "").lower().startswith("python"):
                 continue
             if not _is_daemon_cmdline(proc.info["cmdline"]):
+                continue
+            same = _is_same_checkout(proc)
+            if same is not True:
+                logger.warning(
+                    f"Ignoring live_daemon PID {proc.pid}: "
+                    + ("belongs to another checkout" if same is False
+                       else "checkout could not be determined")
+                    + " — not ours to kill")
                 continue
             logger.warning(f"Found stray daemon process PID {proc.pid}")
             if _kill_daemon_process(proc.pid, logger):
@@ -305,6 +455,25 @@ def acquire_process_lock(logger: logging.Logger, takeover: bool = False) -> bool
     _lock_handle = handle
     logger.info(f"Process lock acquired (PID {os.getpid()})")
     return True
+
+
+def record_daemon_identity(
+    client_id: int, account: str | None, logger: logging.Logger
+) -> None:
+    """Add broker identity to this profile's pid file.
+
+    Written after config load rather than at lock time, because the lock is
+    taken before the config is read. Sibling profiles read these fields to
+    detect a shared client id or account.
+    """
+    record = _read_pid_record(STATE_DIR / "daemon.pid")
+    started_at = record["started_at"] if record else datetime.now().isoformat()
+    try:
+        (STATE_DIR / "daemon.pid").write_text(
+            f"{os.getpid()}|{started_at}|{client_id}|{account or ''}\n",
+            encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Could not record daemon identity in daemon.pid: {e}")
 
 
 def release_process_lock(logger: logging.Logger) -> None:
@@ -414,7 +583,7 @@ def cleanup_incomplete_runs(data_dir: Path, logger: logging.Logger,
 
 def load_config() -> dict:
     """Load overnight_strategy.json."""
-    config_path = CONFIG_DIR / "overnight_strategy.json"
+    config_path = PROFILE.config_path
     with open(config_path, encoding="utf-8") as f:
         return json.load(f)
 
@@ -1669,6 +1838,23 @@ def _check_top_k_screen_health(
         daemon_state["halt_top_k_stale"] = False
 
 
+def resolve_protective_stops(
+    protective_stops: bool, tier_mode: bool, logger: logging.Logger
+) -> bool:
+    """Whether backstop stop orders should run, given the daemon's mode.
+
+    Tier assets are rebalanced by the allocator, never exited on a stop, so a
+    backstop stop under one would fire against the allocator's own intent.
+    Resolved once at startup rather than at each call site so no stop path
+    stays reachable in tier_mode.
+    """
+    if tier_mode and protective_stops:
+        logger.warning("--protective-stops ignored in --tier-mode "
+                       "(tier assets are allocator-managed, not stop-managed)")
+        return False
+    return protective_stops
+
+
 def check_protective_stops(
     portfolio: object,
     broker: object,
@@ -2260,12 +2446,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--send-nightly-roundup", action="store_true",
         help="Send nightly roundup email with today's results and exit")
+    parser.add_argument(
+        "--profile", default=None,
+        help="Assert this daemon is running under the named profile. The "
+             "profile is selected by $SAT_PROFILE before import (paths are "
+             "fixed at that point), so this flag only confirms intent and "
+             "fails loudly on a mismatch.")
     args = parser.parse_args(argv)
+
+    if args.profile and active_profile_name(args.profile) != PROFILE.name:
+        print(f"--profile {args.profile!r} does not match the active profile "
+              f"{PROFILE.name!r}. Paths are fixed at import, so set the "
+              f"environment variable instead: SAT_PROFILE={args.profile}",
+              file=sys.stderr)
+        return 2
 
     logger = setup_logging()
     logger.info("="*64)
     logger.info("Live daemon starting")
     logger.info("="*64)
+
+    args.protective_stops = resolve_protective_stops(
+        args.protective_stops, args.tier_mode, logger)
+
     logger.info(f"Startup config: {vars(args)}")
 
     # Handle --send-nightly-roundup flag (send email and exit)
@@ -2336,13 +2539,29 @@ def main(argv: list[str] | None = None) -> int:
     else:
         from ..broker.ibkr_adapter import IBKRAdapter
         broker_cfg = config.get("broker", {})
+        real_money = bool(exec_cfg.get("real_money", False))
+        expected_account = broker_cfg.get("expected_account")
+        if expected_account is None:
+            logger.critical(
+                "broker.expected_account is not set and dry_run is false — "
+                "refusing to place orders against an unverified account")
+            release_process_lock(logger)
+            return 1
+        broker_client_id = int(broker_cfg.get("client_id", 1))
+        if check_profile_collisions(broker_client_id, expected_account, logger):
+            release_process_lock(logger)
+            return 1
+        record_daemon_identity(broker_client_id, expected_account, logger)
         broker = IBKRAdapter(
             host=broker_cfg.get("host", "127.0.0.1"),
             port=broker_cfg.get("port", 7497),
-            client_id=broker_cfg.get("client_id", 1),
+            client_id=broker_client_id,
+            expected_account=expected_account,
+            allow_live_account=real_money,
         )
-        logger.info(f"Using IBKRAdapter (live paper trading) at "
-                    f"{broker._host}:{broker._port}")
+        mode = "REAL MONEY" if real_money else "paper"
+        logger.warning(f"Using IBKRAdapter ({mode}) at "
+                       f"{broker._host}:{broker._port} account={expected_account}")
 
     # Set up portfolio
     from ..broker.portfolio import PortfolioManager

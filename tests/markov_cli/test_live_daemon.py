@@ -1462,6 +1462,8 @@ def test_main_self_check_skips_broker_even_when_live(monkeypatch, config):
     from Strategy_Auto_Trader.core import self_check
 
     config["execution"]["dry_run"] = False
+    # Live order paths now require a named account (see broker account guard).
+    config["broker"] = {"expected_account": "DU123456", "client_id": 1}
     monkeypatch.setattr(live_daemon, "setup_logging", lambda: mock.Mock())
     monkeypatch.setattr(live_daemon, "load_config", lambda: config)
     monkeypatch.setattr(live_daemon, "validate_startup_environment", lambda logger: True)
@@ -1599,6 +1601,8 @@ def test_main_startup_reconciliation_retries_until_done(monkeypatch, config, tmp
     monkeypatch.setattr(live_daemon.time, "sleep", lambda s: None)
 
     config["execution"]["dry_run"] = False
+    # Live order paths now require a named account (see broker account guard).
+    config["broker"] = {"expected_account": "DU123456", "client_id": 1}
     assert live_daemon.main([]) == 0
 
     assert len(startup_recon_calls) == 2  # Called twice: fails, retries, succeeds
@@ -1641,6 +1645,8 @@ def test_main_retries_pending_tickers_after_reconciliation_clears(monkeypatch, c
     monkeypatch.setattr(live_daemon.time, "sleep", lambda s: None)
 
     config["execution"]["dry_run"] = False
+    # Live order paths now require a named account (see broker account guard).
+    config["broker"] = {"expected_account": "DU123456", "client_id": 1}
     assert live_daemon.main([]) == 0
 
     assert retry_calls  # retry_pending_tickers was invoked after reconciliation succeeded
@@ -2513,9 +2519,13 @@ class TestKillStrayDaemons:
         return fake
 
     @staticmethod
-    def _proc(pid, name, cmdline):
+    def _proc(pid, name, cmdline, cwd=None):
+        """A fake process; `cwd` defaults to this checkout so it is attributable."""
         p = mock.Mock(pid=pid)
         p.info = {"pid": pid, "name": name, "cmdline": cmdline}
+        p.exe.return_value = None
+        p.cwd.return_value = str(live_daemon.ROOT) if cwd is None else cwd
+        p.cmdline.return_value = cmdline
         return p
 
     def test_kills_stray_and_spares_self_ancestors_and_others(self, monkeypatch):
@@ -2553,6 +2563,108 @@ class TestKillStrayDaemons:
         logger = mock.Mock()
         assert live_daemon.kill_stray_daemons(logger) == 0
         assert logger.warning.called
+
+    def test_daemon_from_another_checkout_is_spared(self, monkeypatch):
+        """A second checkout may be a different account's daemon — not ours to kill."""
+        daemon_cmd = ["python", "-m", "Strategy_Auto_Trader.markov_cli.live_daemon"]
+        foreign = self._proc(200, "python.exe", daemon_cmd,
+                             cwd=str(Path(live_daemon.ROOT).parent / "Trader_live"))
+        self._fake_psutil(monkeypatch, [foreign])
+        killed = []
+        monkeypatch.setattr(live_daemon, "_kill_daemon_process",
+                            lambda pid, logger: killed.append(pid) or True)
+        assert live_daemon.kill_stray_daemons(mock.Mock()) == 0
+        assert killed == []
+
+    def test_sibling_directory_prefix_is_not_treated_as_ours(self, monkeypatch):
+        """`<root>2` shares a string prefix with `<root>` but is a different checkout."""
+        daemon_cmd = ["python", "-m", "Strategy_Auto_Trader.markov_cli.live_daemon"]
+        sibling = self._proc(200, "python.exe", daemon_cmd,
+                             cwd=str(live_daemon.ROOT) + "2")
+        self._fake_psutil(monkeypatch, [sibling])
+        killed = []
+        monkeypatch.setattr(live_daemon, "_kill_daemon_process",
+                            lambda pid, logger: killed.append(pid) or True)
+        assert live_daemon.kill_stray_daemons(mock.Mock()) == 0
+        assert killed == []
+
+    def test_unattributable_daemon_is_spared_and_logged(self, monkeypatch):
+        """Access denied on every path source — cannot attribute, so do not kill."""
+        daemon_cmd = ["python", "-m", "Strategy_Auto_Trader.markov_cli.live_daemon"]
+        opaque = self._proc(200, "python.exe", daemon_cmd)
+        opaque.exe.side_effect = OSError("denied")
+        opaque.cwd.side_effect = OSError("denied")
+        opaque.cmdline.side_effect = OSError("denied")
+        self._fake_psutil(monkeypatch, [opaque])
+        killed = []
+        monkeypatch.setattr(live_daemon, "_kill_daemon_process",
+                            lambda pid, logger: killed.append(pid) or True)
+        logger = mock.Mock()
+        assert live_daemon.kill_stray_daemons(logger) == 0
+        assert killed == []
+        assert any("could not be determined" in str(c)
+                   for c in logger.warning.call_args_list)
+
+    def test_venv_interpreter_inside_root_attributes_the_process(self, monkeypatch):
+        """Attribution works from the interpreter path when cwd is elsewhere."""
+        daemon_cmd = ["python", "-m", "Strategy_Auto_Trader.markov_cli.live_daemon"]
+        proc = self._proc(200, "python.exe", daemon_cmd, cwd=r"C:\Windows")
+        proc.exe.return_value = str(Path(live_daemon.ROOT) / ".venv" / "Scripts" / "python.exe")
+        self._fake_psutil(monkeypatch, [proc])
+        killed = []
+        monkeypatch.setattr(live_daemon, "_kill_daemon_process",
+                            lambda pid, logger: killed.append(pid) or True)
+        assert live_daemon.kill_stray_daemons(mock.Mock()) == 1
+        assert killed == [200]
+
+
+class TestIsSameCheckout:
+    """Checkout attribution used to decide which daemons may be killed."""
+
+    @staticmethod
+    def _proc(exe=None, cwd=None, cmdline=None):
+        p = mock.Mock()
+        p.exe.return_value = exe
+        p.cwd.return_value = cwd
+        p.cmdline.return_value = cmdline if cmdline is not None else []
+        return p
+
+    def test_root_itself_counts_as_inside(self):
+        assert live_daemon._is_same_checkout(
+            self._proc(cwd=str(live_daemon.ROOT))) is True
+
+    def test_path_under_root_counts_as_inside(self):
+        assert live_daemon._is_same_checkout(
+            self._proc(cwd=str(Path(live_daemon.ROOT) / "state"))) is True
+
+    def test_cmdline_script_path_attributes_the_process(self):
+        script = str(Path(live_daemon.ROOT) / "Strategy_Auto_Trader"
+                     / "markov_cli" / "live_daemon.py")
+        assert live_daemon._is_same_checkout(
+            self._proc(cmdline=["python", script])) is True
+
+    def test_foreign_paths_return_false(self):
+        assert live_daemon._is_same_checkout(
+            self._proc(cwd=str(Path(live_daemon.ROOT).parent / "Other"),
+                       cmdline=["python", "-m", "x"])) is False
+
+    def test_all_sources_unreadable_returns_none(self):
+        p = self._proc()
+        p.exe.side_effect = OSError("denied")
+        p.cwd.side_effect = OSError("denied")
+        p.cmdline.side_effect = OSError("denied")
+        assert live_daemon._is_same_checkout(p) is None
+
+    def test_empty_values_are_not_attributable(self):
+        assert live_daemon._is_same_checkout(self._proc(exe=None, cwd=None)) is None
+
+    def test_case_insensitive_match_on_windows_paths(self):
+        assert live_daemon._is_same_checkout(
+            self._proc(cwd=str(live_daemon.ROOT).upper())) is True
+
+    def test_explicit_root_argument_is_honoured(self, tmp_path):
+        assert live_daemon._is_same_checkout(
+            self._proc(cwd=str(tmp_path)), root=tmp_path) is True
 
 
 def test_process_cycle_paused_by_user_blocks_new_entries(monkeypatch, tmp_path):
@@ -3315,3 +3427,41 @@ class TestRetryPendingTickers:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestCheckoutAttributionRealWorldShapes:
+    """Signal reliability differs per source; these are the shapes seen in practice."""
+
+    @staticmethod
+    def _proc(exe=None, cwd=None, cmdline=None, denied=()):
+        p = mock.Mock()
+        for attr, value in (("exe", exe), ("cwd", cwd), ("cmdline", cmdline or [])):
+            if attr in denied:
+                getattr(p, attr).side_effect = OSError("access denied")
+            else:
+                getattr(p, attr).return_value = value
+        return p
+
+    def test_uv_shared_interpreter_is_not_negative_evidence(self):
+        """`.venv` resolves to the shared uv python, outside the checkout."""
+        uv_python = r"C:\Users\x\AppData\Roaming\uv\python\cpython-3.12\python.exe"
+        assert live_daemon._is_same_checkout(
+            self._proc(exe=uv_python, denied=("cwd", "cmdline"))) is None
+
+    def test_uv_interpreter_with_our_cwd_is_ours(self):
+        uv_python = r"C:\Users\x\AppData\Roaming\uv\python\cpython-3.12\python.exe"
+        assert live_daemon._is_same_checkout(
+            self._proc(exe=uv_python, cwd=str(live_daemon.ROOT))) is True
+
+    def test_elevated_process_with_everything_denied_is_unknown(self):
+        assert live_daemon._is_same_checkout(
+            self._proc(denied=("exe", "cwd", "cmdline"))) is None
+
+    def test_readable_foreign_cwd_is_a_negative_verdict(self):
+        assert live_daemon._is_same_checkout(
+            self._proc(cwd=str(Path(live_daemon.ROOT).parent / "Other"),
+                       denied=("exe", "cmdline"))) is False
+
+    def test_non_iterable_cmdline_does_not_raise(self):
+        assert live_daemon._is_same_checkout(
+            self._proc(cmdline=object(), denied=("exe", "cwd"))) is None

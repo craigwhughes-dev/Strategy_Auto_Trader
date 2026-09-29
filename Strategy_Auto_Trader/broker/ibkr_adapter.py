@@ -62,6 +62,61 @@ def _first_positive(*values) -> float | None:
     return None
 
 
+class AccountMismatchError(RuntimeError):
+    """The connected IBKR session is not the account this process may trade.
+
+    Raised instead of trading whatever session happens to answer on the
+    configured port — a Gateway relaunched under a different login, or a
+    port edited from paper to live, must abort rather than place orders.
+    """
+
+
+def is_paper_account(account_id: str) -> bool:
+    """Whether `account_id` is an IBKR paper/demo account.
+
+    Paper ids start "DU", free-trial demos "DF". Every other prefix is
+    treated as real money: the unknown case must fail toward caution, since
+    the cost of misreading a live account as paper is unintended real trades.
+    """
+    return account_id.strip().upper().startswith(("DU", "DF"))
+
+
+def verify_account(
+    accounts: list[str],
+    expected_account: str | None,
+    allow_live_account: bool,
+) -> str:
+    """Check a freshly connected session's accounts; return the one to trade.
+
+    Raises AccountMismatchError if the session reports no accounts, if
+    `expected_account` is set and absent, or if a real-money account was
+    reached without `allow_live_account`.
+    """
+    if not accounts:
+        raise AccountMismatchError(
+            "IBKR session reports no managed accounts — refusing to trade")
+
+    if expected_account is not None:
+        if expected_account not in accounts:
+            raise AccountMismatchError(
+                f"expected account {expected_account!r} not in this session "
+                f"({', '.join(accounts)}) — refusing to trade")
+        selected = expected_account
+    elif len(accounts) == 1:
+        selected = accounts[0]
+    else:
+        raise AccountMismatchError(
+            f"session manages {len(accounts)} accounts ({', '.join(accounts)}) "
+            f"and no expected_account is configured — refusing to guess")
+
+    if not is_paper_account(selected) and not allow_live_account:
+        raise AccountMismatchError(
+            f"account {selected} is not a paper account and real_money is not "
+            f"enabled — refusing to trade real money")
+
+    return selected
+
+
 class IBKRAdapter:
     """Wraps ib_async for order placement and position queries.
 
@@ -76,11 +131,19 @@ class IBKRAdapter:
         client_id: int = 1,
         timeout: float = 30.0,
         connect_timeout: float = 30.0,
+        expected_account: str | None = None,
+        allow_live_account: bool = False,
     ) -> None:
         self._host = host
         self._port = port
         self._client_id = client_id
         self._timeout = timeout
+        # Which account this session is allowed to trade, and whether a
+        # non-paper one is permitted at all. Checked on every connect, not
+        # once at startup: the daemon reconnects unattended for weeks, and a
+        # Gateway restarted under a different login must not be traded.
+        self._expected_account = expected_account
+        self._allow_live_account = allow_live_account
         # ib_async's default connect timeout (4s) is too tight for a busy
         # TWS; its handshake is also known to time out transiently.
         self._connect_timeout = connect_timeout
@@ -105,6 +168,17 @@ class IBKRAdapter:
         self._ib = IB()
         self._ib.connect(self._host, self._port, clientId=self._client_id,
                          timeout=self._connect_timeout)
+        # Only verify when an account was configured. Every order path
+        # (live_daemon, execute) refuses to run without one, so orders are
+        # always verified; read-only callers that never place orders are left
+        # able to connect as before.
+        if self._expected_account is not None:
+            try:
+                verify_account(self.managed_accounts(), self._expected_account,
+                               self._allow_live_account)
+            except AccountMismatchError:
+                self.disconnect()
+                raise
 
     def managed_accounts(self) -> list[str]:
         """Return the account ids the session is authorised for."""

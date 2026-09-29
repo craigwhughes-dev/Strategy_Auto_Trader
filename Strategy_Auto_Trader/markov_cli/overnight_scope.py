@@ -21,10 +21,15 @@ from ..core.cli_logging import setup_cli_logger
 logger = logging.getLogger(__name__)
 
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+from ..core.profiles import resolve_profile
+
+PROFILE = resolve_profile()
+ROOT = PROFILE.root
+#: Shared reference data (watchlists, universe files) — NOT per-profile, and
+#: the relative paths inside a profile's config still resolve against it.
 CONFIG_DIR = ROOT / "config"
-STATE_DIR = ROOT / "state"
-DATA_DIR = ROOT / "data"
+STATE_DIR = PROFILE.state_dir
+DATA_DIR = PROFILE.data_dir
 
 #: Ticker-dict keys that are treated as live daemon overrides when carried
 #: from a watchlist into in_scope_<market>.json. Whitelisted explicitly (not
@@ -35,9 +40,8 @@ OVERRIDE_KEYS = {"strategy"}
 
 
 def load_config() -> dict:
-    """Load overnight_strategy.json from config/."""
-    config_path = CONFIG_DIR / "overnight_strategy.json"
-    with open(config_path, encoding="utf-8") as f:
+    """Load the active profile's overnight_strategy.json."""
+    with open(PROFILE.config_path, encoding="utf-8") as f:
         return json.load(f)
 
 

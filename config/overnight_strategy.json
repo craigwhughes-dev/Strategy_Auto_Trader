@@ -61,7 +61,8 @@
   },
   "execution": {
     "capital_pot": 20000,
-    "dry_run": false
+    "dry_run": false,
+    "real_money": false
   },
   "tier_allocation": {
     "vxn_threshold": 23,
@@ -76,6 +77,7 @@
   "broker": {
     "host": "127.0.0.1",
     "port": 4002,
-    "client_id": 1
+    "client_id": 1,
+    "expected_account": "DUR166977"
   }
 }
