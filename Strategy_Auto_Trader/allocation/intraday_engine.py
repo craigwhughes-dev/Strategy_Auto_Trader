@@ -99,6 +99,23 @@ def tiers_vix_only(vix: np.ndarray, cut_1: float, cut_2: float, cut_3: float) ->
     return tiers
 
 
+def _persistent_state(enter_mask: np.ndarray, exit_mask: np.ndarray, default: bool) -> np.ndarray:
+    """Accumulate-based persistent binary state, shared by every VXN/VVIX gate in this module.
+
+    enter_mask[i] True -> state True from bar i; exit_mask[i] True -> state False from bar i;
+    neither -> state carries forward unchanged (this is what makes NaN / inside-the-deadband bars
+    keep prior state). `default` is the state before any event has ever fired.
+    """
+    event = np.zeros(len(enter_mask), dtype=np.int8)
+    event[enter_mask] = 1
+    event[exit_mask] = -1
+    idx = np.arange(len(enter_mask))
+    last_event = np.maximum.accumulate(np.where(event != 0, idx, -1))
+    fired = last_event >= 0
+    state_at_last_event = event[np.maximum(last_event, 0)] == 1
+    return np.where(fired, state_at_last_event, default)
+
+
 def tiers_vxn_deadband(vxn: np.ndarray, enter_at: float, exit_above: float) -> np.ndarray:
     """Nasdaq-or-cash with a deadband on VXN: enter when VXN <= enter_at, then hold until VXN > exit_above.
 
@@ -108,11 +125,122 @@ def tiers_vxn_deadband(vxn: np.ndarray, enter_at: float, exit_above: float) -> n
     """
     if exit_above < enter_at:
         raise ValueError(f"exit_above ({exit_above}) must be >= enter_at ({enter_at})")
-    event = np.zeros(len(vxn), dtype=np.int8)
-    event[vxn <= enter_at] = 1
-    event[vxn > exit_above] = -1
-    last_event = np.maximum.accumulate(np.where(event != 0, np.arange(len(vxn)), -1))
-    in_market = (last_event >= 0) & (event[np.maximum(last_event, 0)] == 1)
+    in_market = _persistent_state(vxn <= enter_at, vxn > exit_above, default=False)
+    return np.where(in_market, 0, _CASH)
+
+
+def load_vvix_daily() -> pd.Series:
+    """Real Cboe VVIX (vol-of-VIX) daily closes, Yahoo ``^VVIX`` 2007-01-03+.
+
+    FRED does not carry VVIX under any series id (VVIXCLS and other guesses all 404 as of
+    2026-09-30) — checked before reaching for yfinance. Uses the project's existing scoped
+    yfinance exception (`research/index_history.py`; daily index closes only, never used to
+    price a trade) rather than inventing a second fetch path. No pre-2006 bridge: unlike VXN,
+    there is no published earlier-methodology VVIX series to anchor a synthetic bridge to, and
+    real coverage (2007-01-03) already predates every real/train/test window boundary (2007-11-20+).
+    """
+    from ..research.index_history import load_daily_closes
+    return load_daily_closes("^VVIX")
+
+
+def vvix_for_grid(grid: pd.DatetimeIndex, daily: pd.Series | None = None) -> np.ndarray:
+    """Broadcast daily VVIX closes onto an hourly grid: stamp each close at 21:30 UTC (after the
+    US session), then hold stale — same convention as ``daily_to_end_series`` in
+    multi_tier_26yr_backtest.py. NaN before 2007-01-03 / before the first print."""
+    if daily is None:
+        daily = load_vvix_daily()
+    stamped = pd.Series(
+        daily.to_numpy(),
+        index=pd.DatetimeIndex([pd.Timestamp(d.date()).tz_localize("UTC") + pd.Timedelta(hours=21, minutes=30) for d in daily.index]),
+    ).sort_index()
+    return stamped.reindex(grid, method="ffill").to_numpy()
+
+
+_VIX_DAILY_1990 = Path("data_synthetic/daily/VIX_1990_2026.csv")
+
+# Fit of real VVIX (Yahoo ^VVIX, 2007-01-03+) against an EWMA-realized-vol-of-VIX proxy over
+# their full overlap (2007-01-03..2026-09-30, n=4947 trading days): vvix ~= _PROXY_A*proxy + _PROXY_B,
+# proxy = 21.7 * annualized EWMA(halflife=12d) stdev of daily log-returns of VIX itself (i.e. vol-of-vol,
+# not vol). Swept rolling windows (10/21/30d, corr ~0.51-0.52, insensitive) and EWMA halflives
+# (3-30d, corr peaks 0.609-0.610 at halflife 10-15d) before settling on 12d. R^2=0.37, RMSE=12.8
+# (real VVIX std=16.2) - a soft/noisy fit, NOT a reconstruction: real VVIX is CBOE-computed
+# implied vol of VIX options (forward-looking), this proxy is realized vol of the VIX cash index
+# (backward-looking), and the two only agree 33-38% of the time on which days are in each other's
+# top decile. Good enough for coarse pre-2007 regime bucketing; do not use for a tight threshold
+# gate expecting real-VVIX-like spike timing.
+_PROXY_A = 0.261
+_PROXY_B = 63.44
+_PROXY_EWMA_HALFLIFE = 12
+
+
+def load_vvix_proxy() -> pd.Series:
+    """VVIX daily series back to 1990: real Cboe ^VVIX where it exists (2007-01-03+), a fitted
+    EWMA-vol-of-VIX proxy everywhere before that. See _PROXY_A/_PROXY_B comment above for how the
+    proxy segment is constructed and how well it actually tracks the real series (corr ~0.61,
+    R^2=0.37 on the overlap) - treat proxy-segment values as directional/regime-level only.
+    """
+    vix_df = pd.read_csv(_VIX_DAILY_1990, index_col=0, parse_dates=True)
+    vix_close = vix_df["Close"].sort_index()
+    vix_close.index = vix_close.index.tz_localize(None)
+    log_ret = np.log(vix_close).diff()
+    ewma_vol = log_ret.pow(2).ewm(halflife=_PROXY_EWMA_HALFLIFE).mean().pow(0.5) * np.sqrt(252) * 100
+    proxy = (_PROXY_A * ewma_vol + _PROXY_B).rename("vvix_proxy")
+
+    real = load_vvix_daily()
+    real_naive = pd.Series(real.to_numpy(), index=real.index.tz_localize(None))
+    return real_naive.combine_first(proxy).rename("vvix_proxy")  # real values win wherever both exist
+
+
+def tiers_vxn_vvix_deadband(vxn: np.ndarray, vvix: np.ndarray, vxn_enter: float, vxn_exit: float, vvix_threshold: float) -> np.ndarray:
+    """VXN deadband (Nasdaq-or-cash) with a persistent VVIX veto: once VVIX >= vvix_threshold,
+    force cash until VVIX drops back below it. NaN in VVIX never forces cash and never reopens a
+    closed gate on its own — same accumulate-based persistence as tiers_vxn_deadband, not a
+    stateless ``np.where`` on the raw comparison (a stateless compare would treat NaN as a breach).
+    """
+    tiers = tiers_vxn_deadband(vxn, vxn_enter, vxn_exit)
+    gate_open = _persistent_state(vvix < vvix_threshold, vvix >= vvix_threshold, default=True)
+    return np.where(gate_open, tiers, _CASH)
+
+
+def tiers_vxn_vvix_banded(
+    vxn: np.ndarray,
+    vvix: np.ndarray,
+    vvix_edges: tuple[float, ...],
+    vxn_pairs: tuple[tuple[float, float], ...],
+    base_band: int,
+) -> np.ndarray:
+    """Nasdaq-or-cash VXN deadband whose (enter_at, exit_above) pair is picked per-bar from a small
+    ladder of discrete VVIX bands, both legs moving together (calm -> both loosen, stressed -> both
+    tighten).
+
+    ``vvix_edges`` (strictly ascending) cuts VVIX into len(vvix_edges)+1 bands:
+      VVIX < edges[0]               -> vxn_pairs[0]   (calmest)
+      edges[i-1] <= VVIX < edges[i] -> vxn_pairs[i]
+      VVIX >= edges[-1]             -> vxn_pairs[-1]  (most stressed)
+
+    ``base_band`` names the index of the "no VVIX effect" pair — NaN VVIX (no reading yet, or a
+    stale-hold gap) always resolves to base_band, matching tiers_vxn_deadband's own NaN-keeps-state
+    convention (here: NaN keeps today's threshold pair fixed at the base rule, not just position).
+
+    Configuring every entry of vxn_pairs identically reproduces tiers_vxn_deadband(vxn, *that pair)
+    exactly, for any vvix_edges/base_band/vvix values (including all-NaN) — the ladder only matters
+    when the pairs actually differ. Each pair must satisfy exit_above >= enter_at.
+    """
+    if len(vxn_pairs) != len(vvix_edges) + 1:
+        raise ValueError(f"need {len(vvix_edges) + 1} vxn_pairs for {len(vvix_edges)} vvix_edges, got {len(vxn_pairs)}")
+    if not 0 <= base_band < len(vxn_pairs):
+        raise ValueError(f"base_band {base_band} out of range for {len(vxn_pairs)} bands")
+    for enter_at, exit_above in vxn_pairs:
+        if exit_above < enter_at:
+            raise ValueError(f"exit_above ({exit_above}) must be >= enter_at ({enter_at})")
+
+    nan = np.isnan(vvix)
+    band = np.searchsorted(np.asarray(vvix_edges), np.where(nan, 0.0, vvix), side="right")
+    band[nan] = base_band
+
+    enter_at_arr = np.asarray([p[0] for p in vxn_pairs])[band]
+    exit_above_arr = np.asarray([p[1] for p in vxn_pairs])[band]
+    in_market = _persistent_state(vxn <= enter_at_arr, vxn > exit_above_arr, default=False)
     return np.where(in_market, 0, _CASH)
 
 

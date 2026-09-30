@@ -46,6 +46,7 @@ MARKETS = {
     "^TWII": ("TAIEX", "TWD"),
     "^BSESN": ("BSE Sensex", "INR"),
     "^MXX": ("IPC Mexico", "MXN"),
+    "^VVIX": ("Cboe VVIX (vol-of-VIX)", "USD"),
 }
 
 

@@ -15,6 +15,241 @@ Running log of every backtest/scan run — newest entry on top. One block per ru
 
 ---
 
+## 2026-09-30 19:05 — VVIX-banded deadband: diagnostic work-through (7 checks) + VVIX-persistence filter + synthetic pre-2007 extension. Reference config now **76/122 edges, ±2 (calm 25/26 / stressed 21/22), N=3-day confirm**. No adoption decision made — findings only.
+
+**Question.** Follow-up to the 17:05 entry below (fixed 76/122 banded rule: beats deployed on real/train, underperforms on test). Owner asked for a punch-list of further validation before considering adoption. Worked through all of it plus one idea that emerged from the diagnostics (a persistence/confirmation filter on the VVIX side) and a data-extension request (owner's own synthetic `vvix_proxy` back to 1990).
+
+**Tool:** ad-hoc inline analysis this session, not saved as permanent scripts (exploratory, not a repeatable pipeline) — all built on `eng.tiers_vxn_vvix_banded()`, `eng.load_vvix_daily()` / `eng.load_vvix_proxy()` (both now in `intraday_engine.py`), and `eng.window_stats()`/`eng.simulate()`. Re-derivable from this entry if needed later.
+**Data:** real `^VVIX` (Yahoo, 2007-01-03+) for the 7-test work-through and the persistence sweep. `vvix_proxy` (real VVIX where it exists, an EWMA-realized-vol-of-VIX fit back to 1990 elsewhere — see `load_vvix_proxy()`'s docstring for the fit stats: corr ~0.61, R²=0.37 vs real VVIX on the overlap, "directional/regime-level only") for the pre-2007 extension check.
+
+**1. Seven-check work-through, all vs. the 76/122 banded rule from the 17:05 entry:**
+
+| # | Check | Result |
+|---|---|---|
+| 1 | Permanently-wider VXN-only (25/26, no VVIX) vs. deployed | **Worse** on every window (real xSh 0.783 vs 0.965, test 0.363 vs 0.761, maxDD -23.2 vs -14.9) — VVIX is adding real information, not just a wider band |
+| 2 | Event-level breakdown (exact divergence dates) | Wins = sustained multi-week runs, Apr-Sep 2008 and Aug-Nov 2009 (VXN near threshold, VVIX calm 64-76). Losses = mostly 1-3 day VVIX spikes (Feb 2018 "Volmageddon", isolated 2021/2024 days) — asymmetric: real signal on the win side, noise on the loss side |
+| 3 | Edge sensitivity (3×3 grid, low∈{70,76,80}, high∈{110,122,130}) | Robust direction — no sign flips on real/train anywhere in the grid; test always below deployed (0.53-0.73). High edge needs to sit ≳122 or maxDD gets worse (-16.5 at high=110 vs -14.9 at ≥122) |
+| 4 | Percentile-based edges (causal expanding-window rank, 25th/75th) instead of fixed levels | **Mostly erases the real/train advantage** — real goes slightly negative vs deployed (0.954 vs 0.965), test unchanged (0.666). Likely cause: Apr-Sep 2008 is early in VVIX's own history, so a causal percentile there is thin/unstable. Weakens the case this is genuine regime information rather than a fixed-level coincidence with 2008/2009's specific VVIX range |
+| 5 | Monte Carlo | **N/A for this subsystem** without a much larger build — `monte_carlo.py` needs a fitted HMM regime model and Entry/Exit classes, neither of which this tier/basket system has |
+| 6 | Asset generalization (same tiers, held on SP500/FTSE instead of Nasdaq via `basket_engine`) | Same real/train-win, test-lose shape on both — not Nasdaq-specific, but it's the same timing signal repriced, not independent evidence |
+| 7 | `next_bar` fill (order-latency robustness) | Survives, same shape, slightly smaller margins |
+
+**2. VVIX-persistence filter** (emerged from #2: require VVIX past the edge for N consecutive trading days before the band reacts, mirroring the VXN leg's own deadband hysteresis — filters the 1-3 day noise spikes without necessarily losing the multi-week 2008/2009 signal):
+
+| N | xSh real | xSh train | xSh test | maxDD real | sw/yr real | divergent bars, test window |
+|---|---|---|---|---|---|---|
+| none (N=1) | 1.012 | 1.175 | 0.667 | -14.9 | 10.4 | 75 |
+| N=3 | **1.036** | **1.186** | 0.719 | -14.9 | 9.7 | 24 |
+| N=5 | 1.015 | 1.142 | 0.748 | -14.9 | 9.7 | 9 |
+| N=7..30 | 0.977-1.016 | 1.080-1.138 | 0.761 (= deployed exactly) | -14.9 | 9.3-9.5 | **0** |
+
+N≥7 looks like it "ties deployed" on test but doesn't — checked directly, **zero bars differ from deployed anywhere in the test window at N≥7** (no VVIX episode in 2020-2026 sustains 7+ consecutive days past 76/122). That's the mechanism going fully dormant in the 2020s, not a validated signal. N=3 and N=5 are the only points where it's still engaged (24 and 9 divergent test bars) and improved anyway — real, partial noise-filtering, still short of deployed on test (0.719-0.748 vs 0.761).
+
+**3. Pre-2007 extension on `vvix_proxy`, edges unchanged at 76/122** (reference config, per owner's decision to stick with these rather than rescale): **null result**. Checked directly — zero divergent bars in the `bridged` window (1999-2007). The proxy's dynamic range is far more compressed than real VVIX (std ~6.8 vs ~16.2, consistent with its R²=0.37 fit quality) and never sustains 3+ days past 76/122 in the part of history real VVIX doesn't already cover, so the extension adds no test coverage either way at these edge values. (A rescaled-edges version, 79/99 matched to the proxy's own 10th/95th percentile, did produce a positive bridged-window result — xSh 0.360→0.438, maxDD -21.5→-18.5 — but also changes behaviour in the real-VVIX era since it applies the new edges there too, so it isn't a clean "add bridged evidence" comparison. Parked per owner's call; not pursued further.)
+
+**Net reading, not a verdict:** #1 and #2 support the idea (real information content, not just a wider band); #4 (percentile framing) meaningfully undercuts it, since that's the more principled way to express a vol condition and it erases most of the edge; the persistence filter (§2) gives a real but partial improvement at N=3-5 without resolving the test-window shortfall; the proxy extension (§3) neither adds nor removes evidence at the reference 76/122 edges. Owner has not made an adoption call; this entry records findings, not a decision.
+
+---
+
+## 2026-09-30 17:05 — VVIX-banded VXN deadband (widen when calm, tighten when stressed) vs. fixed 23/24. **Beats deployed on real (18yr) and train (12yr) for every config; underperforms on test (2020+, 6yr) for every config. Owner has not decided how to weigh this — not a rejection.**
+
+**Question.** Follow-up to the 16:20 entry below, which tested the wrong mechanism (a hard VVIX veto) and was rejected. The owner's actual idea: don't veto, let VVIX **move the VXN 23/24 deadband itself** — widen (more permissive) when VVIX says calm, tighten (exit sooner) when VVIX says stressed, both legs (enter + exit) moving together so deadband width stays ~constant. Confirmed via clarifying question: plain discrete VVIX bands (not continuous scaling, not percentile bands), "test a few configs rather than guessing".
+
+**Tool:** `scripts/tier_analysis/test_vvix_banded.py`. **Command:** `uv run python scripts/tier_analysis/test_vvix_banded.py`
+**Data:** Cboe VVIX, Yahoo `^VVIX` (real 2007-01-03+, same source/coverage as the 16:20 entry, no pre-2007 bridge — none needed, `real`/`train`/`test` windows are 2007-11-20+, fully inside coverage). `all` window shown for reference only — pre-2007 VVIX is NaN, which resolves to the base band (no VVIX effect), so `all` is diluted, not independent evidence.
+**Configs swept** (both legs move together; base band = deployed 23/24 always; primary config declared *before* running, to avoid picking the flattering result post-hoc):
+
+| label | vvix_edges | calm pair | stressed pair | why |
+|---|---|---|---|---|
+| 80/105 d2 | 80 / 105 | 25/26 | 21/22 | ~10-15th / ~80-85th pctile |
+| **83/102 d2 (primary)** | 83 / 102 | 25/26 | 21/22 | 25th/75th pctile exactly, symmetric |
+| 76/122 d2 | 76 / 122 | 25/26 | 21/22 | 10th/95th pctile — tail-only triggers |
+| 83/102 d1 | 83 / 102 | 24/25 | 22/23 | smaller nudge, same edges |
+| 83/102 d4 | 83 / 102 | 27/28 | 19/20 | larger nudge, same edges |
+
+VVIX quantiles used to pick edges: 5%=71.7, 10%=76.4, 25%=82.9, 50%=91.2, 75%=102.3, 90%=115.3, 95%=122.2, 99%=143.1.
+
+| Config | xSharpe (real) | xSharpe (train) | xSharpe (test) | CAGR% (real) | maxDD% (real) | sw/yr (real) |
+|---|---|---|---|---|---|---|
+| **VXN 23/24 deployed** | **0.965** | **1.063** | **0.761** | **13.6** | **-14.9** | 9.3 |
+| 80/105 d2 | 1.006 | 1.214 | 0.543 | 14.1 | -17.4 | 12.3 |
+| 83/102 d2 (primary) | 1.027 | 1.223 | 0.593 | 14.3 | -17.7 | 13.6 |
+| 76/122 d2 | 1.012 | 1.175 | 0.667 | 14.3 | -14.9 | 10.4 |
+| 83/102 d1 | 1.017 | 1.154 | 0.722 | 14.2 | -15.1 | 10.5 |
+| 83/102 d4 | 0.923 | 1.189 | 0.306 | 12.7 | -19.9 | 16.4 |
+
+Cost: 13bps, fill: same_bar.
+
+**Read — genuinely mixed, not a clean pass or fail.** Every config beats deployed on `real` and `train` xSharpe (up to +0.16 on train for the primary config), and `real` still wins despite `test` dragging it down — train's outperformance is large enough to more than offset test's underperformance in the blended 18-year number. But on `test` (2020-01-01+, ~5.8 years — COVID crash, 2022 rate shock, then a low-vol run), **every config underperforms deployed**, including the primary one declared in advance. maxDD on `real` is also worse for 4 of 5 configs (up to -19.9% vs -14.9% deployed).
+
+Two live readings of the test-window shortfall, not distinguished by this sweep: (1) the band-widening is shaped around train-era VVIX levels and doesn't generalize — same risk this repo's exit-generalisation study (2026-09-28) already flagged for fixed-level VXN/vol thresholds; or (2) test is a short (~6yr), regime-heavy window (COVID + 2022 + AI bull run) where VVIX's baseline level may have structurally shifted, and the shortfall is as much a small-sample/regime artifact as evidence against the mechanism. This sweep can't tell those apart on its own.
+
+**Action:** none taken pending owner review — this is an open call, not a rejection. Candidate next steps if pursued further: check whether VVIX's own level distribution shifted materially pre/post-2020 (would support reading 2 over reading 1); or an expanding-window/percentile-based VVIX band instead of fixed levels (mirrors this repo's finding that percentile-based VXN mechanisms generalize better than absolute-level ones).
+
+---
+
+## 2026-09-30 16:20 — VVIX (vol-of-VIX) hard-cash-gate on top of deployed VXN 23/24, threshold sweep. **No threshold beats deployed on any window; effect is monotone-negative.**
+
+**Question.** Deployed tier rule is VXN 23/24 deadband (Nasdaq-or-cash). Does adding a VVIX veto (force cash when vol-of-vol spikes) improve xSharpe/drawdown over the deployed rule alone?
+
+**Tool:** `scripts/tier_analysis/test_vvix_gate.py`. **Command:** `uv run python scripts/tier_analysis/test_vvix_gate.py`
+**Data:** Cboe VVIX, Yahoo `^VVIX` (real 2007-01-03+; FRED does not carry VVIX under any series id — `VVIXCLS` and other guesses all 404, checked before reaching for yfinance). No pre-2006/2007 bridge: unlike VXN, there is no published earlier-methodology VVIX to anchor a synthetic one to, and real coverage already predates every `real`/`train`/`test` window boundary (2007-11-20+), so none was needed. `all` window (1999+) shown for reference only — pre-2007 VVIX is NaN, which never forces cash (persistent-gate, accumulate-based, same NaN handling as `tiers_vxn_deadband`), so every threshold is identical to deployed before 2007.
+**Threshold note:** VVIX trades on a different scale than VIX/VXN — checked `describe()` first: median ~91, range ~60-208 over the real window. An initial VIX-scale guess (30-70) was rejected before running the sweep (would have permanently closed the gate, giving a meaningless all-cash result). Swept 80/90/100/110/120/130 instead (roughly the 10th-99th percentile).
+
+| Holding | xSharpe (real) | xSharpe (train) | xSharpe (test) | CAGR% (real) | maxDD% (real) | sw/yr (real) |
+|---|---|---|---|---|---|---|
+| **VXN 23/24 deployed** | **0.965** | **1.063** | **0.761** | **13.6** | **-14.9** | 9.3 |
+| VXN 23/24 + VVIX<80 | 0.176 | 0.133 | 0.429 | 2.4 | -13.3 | 10.7 |
+| VXN 23/24 + VVIX<90 | 0.524 | 0.610 | 0.317 | 5.9 | -15.2 | 19.6 |
+| VXN 23/24 + VVIX<100 | 0.796 | 0.989 | 0.351 | 10.1 | -22.3 | 18.4 |
+| VXN 23/24 + VVIX<110 | 0.843 | 0.974 | 0.565 | 11.6 | -18.0 | 13.0 |
+| VXN 23/24 + VVIX<120 | 0.908 | 1.049 | 0.610 | 12.6 | -14.9 | 10.5 |
+| VXN 23/24 + VVIX<130 | 0.941 | 1.044 | 0.729 | 13.2 | -14.9 | 9.5 |
+
+Cost: 13bps, fill: same_bar.
+
+**Verdict.** Monotone: the tighter the VVIX threshold, the worse every metric — xSharpe, CAGR, and (below 110) maxDD too, since the extra gate whipsaws in and out around the deployed rule's own entries rather than pre-empting them. As the threshold loosens toward 130 the result asymptotes toward deployed but never crosses it, on any of real/train/test. **VVIX adds no alpha to this tier strategy; do not add it.** Consistent with the same negative finding already recorded for `same_day_deployment_cap_pct` ([[project_daily_limit_and_kelly_parity_20260811]]-adjacent territory) — another plausible-sounding vol-concentration gate that tests worse than doing nothing.
+
+---
+
+## 2026-09-29 16:10 — Tail insurance on a 100%-held fund (owner holds VWRL, unprotected). **Current position breaches both recorded risk numbers. Cheapest fix costs ~0.5-0.8 CAGR pts but is n=2 insurance.**
+
+**Question (owner).** Owner's actual position clarified: **100% VWRL today, no protection**, and unwilling to hold a permanent cash sleeve (tax, drag). So the matched-drawdown cash control from the 15:20 entry does not bear on the decision — the only two options are stay fully invested, or gate. Objective is therefore NOT xSharpe but **drawdown removed per CAGR point given up, while staying in-market as much of the time as possible**.
+
+**Tools (new):** `scripts/tier_analysis/tail_insurance_sweep.py`, `scripts/tier_analysis/tail_insurance_candidates.py`.
+**Commands:** `uv run python scripts/tier_analysis/tail_insurance_sweep.py WORLD`; `... tail_insurance_candidates.py WORLD`
+**Data range:** as the 15:20 entry — `real` 2007-11-20..2026-09-18 (4,756 days), `test` 2020-01-02..2026-09-18 (1,696 days). WORLD = 0.65 SP500 / 0.35 FTSE proxy. 13bps/switch. VXN gate (VIX already ruled out at 15:20).
+**Selection change:** previous sweep ranked on train xSharpe and stopped at VXN 32, which picked a mid gate trading 7.4x/yr. This sweep runs VXN enter 20..44, widths 0/2/4/6, and reports in-market %, worst 1/3/5-day loss and max DD — per [[feedback_loss_tolerance_is_not_max_drawdown]], **the owner's 15% is a worst-5-day-loss tolerance and ~-24% is the accepted max DD**; quoting max DD against 15% conflates them.
+
+**Result 1 — the unprotected position is outside both of the owner's own numbers.**
+
+| gate | in-mkt% | sw/yr | CAGR% | give-up | worst 1d | worst 3d | worst 5d | maxDD | vs tolerances |
+|---|---|---|---|---|---|---|---|---|---|
+| **no gate (today)** | 100.0 | 0.0 | 8.8 | 0.0 | -10.2 | -14.8 | **-21.0** | **-38.6** | **BEYOND both** |
+| **VXN 42/46** | 95.2 | 1.3 | 8.1 | **0.8** | -5.0 | -10.6 | **-11.9** | -27.1 | 5d ok, maxDD beyond |
+| VXN 40/44 | 94.7 | 1.3 | 7.5 | 1.3 | -5.4 | -10.6 | -12.8 | -26.8 | 5d ok, maxDD beyond |
+| VXN 38/42 | 94.1 | 1.6 | 6.5 | 2.3 | -5.4 | -10.6 | -14.0 | -27.4 | 5d ok, maxDD beyond |
+| VXN 30/34 | 87.1 | 3.7 | 4.7 | 4.1 | -4.3 | -7.9 | -9.6 | -32.7 | 5d ok, maxDD beyond |
+| VXN 26/30 | 78.8 | 4.3 | 4.4 | 4.4 | -6.1 | -9.4 | -10.9 | -22.1 | within both |
+| VXN 22/24 | 60.9 | 6.4 | 5.5 | 3.3 | -3.2 | -4.7 | -5.7 | -15.1 | within both |
+
+*(`real`, 18.9 yrs. On `test` 2020+ the three far-end gates are inside BOTH — 42/46 gives 10.2% CAGR, 0.5 give-up, -11.9% worst 5d, -20.9% maxDD. The constraint that binds on `real` is 2008.)*
+
+**Result 2 — the cheap gate is a TWO-EVENT insurance policy.** Per-event peak-to-trough, WORLD, and in-market share during each:
+
+| event | no gate | VXN 42/46 | in-mkt 42/46 |
+|---|---|---|---|
+| 2008 Q4 GFC | -29.8% | **-14.2%** | 29% |
+| COVID 2020 | -28.4% | **-15.6%** | 52% |
+| Aug 2011 | -15.4% | -15.4% | 100% |
+| Aug 2015 | -9.6% | -9.6% | 100% |
+| Q4 2018 | -14.3% | -14.3% | 100% |
+| H1 2022 rates | -12.3% | -12.3% | 100% |
+
+It fires in 2008 and 2020 and is fully invested through the other four. That is not a defect — those two *are* the rare high-vol windows the owner asked to be protected in — but **n=2**, and it is nearly tautological (VXN exceeded 42 in exactly those two).
+
+Worth noting the mid gates can make an event *worse* through whipsaw: VXN 30/34 turns Aug 2011 into **-19.3%** (vs -15.4% unprotected) and H1 2022 into -14.6% (vs -12.3%), by exiting mid-fall and re-entering wrong.
+
+**Result 3 — VXN 42 is an absolute level, which this repo established today does not transfer.** VXN 42 = the **94.7th percentile** of real-era bars; VXN 46 = 98.1st. The exit-generalisation study closed earlier today ([[project_exit_generalisation_plan_20260928]]) found the deployed exit's **mechanism** generalises on a **fixed-percentile** basis (13/14 pre-2001 shocks) while the **absolute level does NOT** (9/13, equivalence p=0.049). Hard-coding VXN>=42 is exactly the threshold form that finding warns against.
+
+**Percentile variant tested, INCONCLUSIVE.** Causal expanding-window percentile (min 2,500 bars ≈ 2 yrs history, invested before that) at 90/96, 95/98, 97.0/98.5. Best (90/96) is 98.5% in-market, 0.3 sw/yr, real CAGR 8.9 (give-up **-0.1**, i.e. free), worst 5d **-11.2%** (best of any variant) — but max DD -35.2%, because 2008 falls before the expanding window has enough history and the gate is forced invested through it. **The comparison is handicapped, not decided:** it is not evidence against percentile gating, only evidence that an expanding-window percentile cannot be tested on the one event that dominates this window's drawdown. A full-history percentile (as the exit-generalisation study used) carries mild look-ahead and was not run here.
+
+**Verdict.** This is the one variant of the owner's idea that is **not dominated**: ~95% invested, 1-2 trades/yr, 0.5-0.8 CAGR points, and it removes 9 points of worst-5-day loss and 14-15 points of event drawdown in the two crises it catches. Whether that is worth buying depends on belief that a future crisis resembles 2008/2020 in implied-vol terms — which is exactly the question the fixed-percentile form is designed to survive and the absolute form is not.
+
+**Action: none taken.** No config, engine or deployed-rule change. Open items if the owner proceeds: (1) use a percentile threshold, not VXN>=42, and validate it through the existing exit-generalisation harness rather than this sweep; (2) real VWRL.L history (IBKR, 2012+) instead of the 0.65/0.35 proxy; (3) operationally this needs a **separate IBKR account** — `check_profile_collisions()` refuses two daemons on one account; (4) CGT on selling an existing unwrapped holding is uncosted here and could exceed the 0.8 CAGR-point gate cost.
+
+---
+
+## 2026-09-29 15:20 — VIX/VXN gate on an ALREADY-HELD fund (owner holds VWRL etc). **Gate ≈ holding less of it. No free drawdown protection.**
+
+**Question (owner).** "None of this alters the fact I already have a load of e.g. VWRL. I like the idea of having it move to cash based on VIX." Different question from the basket entry below: the benchmark is **buy-and-hold of the fund the owner already owns**, not the deployed Nasdaq tier and not cash.
+
+**Tools (new):** `scripts/tier_analysis/vix_gate_existing_holding.py`, `scripts/tier_analysis/gate_index_matrix.py`, `scripts/tier_analysis/gate_vs_cash_at_matched_dd.py`. All on `allocation/basket_engine.py` (parity-proven against `intraday_engine.simulate` to 9.4e-16 — see entry below).
+**Commands:** `uv run python scripts/tier_analysis/vix_gate_existing_holding.py`; `... gate_index_matrix.py`; `... gate_vs_cash_at_matched_dd.py`
+**Data range:** 62,377 LSE hourly bars / 6,952 London trading days, **1999-03-11 .. 2026-09-18**. Real-vol era from 2007-11-20. 13bps/switch, fill `same_bar`.
+**Protocol:** gate enter swept 12..32 step 2, deadband width 0/1/2/4 (352 configs). **Threshold picked on TRAIN (2007-11-20..2019-12-31) only; 2020+ is an untouched holdout.** WORLD = 0.65 SP500 / 0.35 FTSE proxy (dataset has no all-world fund).
+
+**Result 1 — VIX is the wrong index. It loses to buy-and-hold on every holding.**
+
+| holding | B&H xSharpe test | best VIX gate, test | best VXN gate, test | test CAGR gate vs B&H | test maxDD gate vs B&H |
+|---|---|---|---|---|---|
+| NASDAQ | +0.83 | +0.28 (26/27) | +0.58 (22/23) | 8.5 vs 19.6 | -16.7 vs -28.2 |
+| SP500 | +0.68 | +0.30 (20/24) | +0.56 (24/25) | 7.4 vs 13.4 | -11.5 vs -25.9 |
+| **WORLD (VWRL proxy)** | **+0.56** | **+0.16 (26/30)** | **+0.38 (22/24)** | **5.2 vs 10.7** | **-8.0 vs -28.4** |
+| FTSE | +0.21 | -0.18 (26/30) | -0.16 (22/26) | 1.5 vs 5.0 | -16.3 vs -34.8 |
+
+VXN beats VIX as the gate index on **all four** holdings, world equity included — implied vol of the highest-beta index leads broad equity stress better than SPX implied vol does. But no gate, on either index, beats buy-and-hold on out-of-sample xSharpe.
+
+**Result 2 — the gate DOES cut drawdown hard.** Best VXN gate on WORLD: test max DD **-28.4% -> -8.0%**, a 72% reduction, for half the CAGR (5.2 vs 10.7). That is a real effect, not noise, and it is exactly what the owner asked for.
+
+**Result 3 (decisive) — at matched drawdown, the gate is not better than simply holding less of the fund.**
+
+| holding | gate (VXN) | gate CAGR / DD | matched cash blend | blend CAGR / DD | CAGR edge |
+|---|---|---|---|---|---|
+| NASDAQ | 22/23 | 8.5 / -16.7 | 20% NASDAQ + 80% cash | 12.3 / -16.6 | **-3.8 cash wins** |
+| SP500 | 24/25 | 7.4 / -11.5 | 25% SP500 | 7.9 / -11.3 | -0.5 cash wins |
+| **WORLD** | **22/24** | **5.2 / -8.0** | **20% WORLD + 80% cash** | **5.4 / -7.9** | **-0.2 cash wins** |
+| FTSE | 22/26 | 1.5 / -16.3 | 55% FTSE | 3.9 / -16.0 | -2.4 cash wins |
+
+*(2020+ holdout. On the full 2007+ window the Nasdaq gate wins big, +5.2 CAGR at matched DD, and WORLD is a wash at +0.3 — so the Nasdaq gate's edge is a 2008-2019 phenomenon that did not repeat on 2020+.)*
+
+**Verdict: the vol gate is a drawdown-reduction device, not a return-enhancement device**, and at matched drawdown it is within noise of the zero-effort alternative (hold ~20% of the fund, rest in cash). For VWRL specifically the gap is **-0.2% CAGR** — a wash — before counting switching cost (7.4/yr), CGT on selling an existing unwrapped holding, and the operational cost of a second gated pot (`check_profile_collisions()` refuses two daemons on one IBKR account, so this needs a separate account).
+
+**Caveat on the incumbent, logged deliberately.** Same table shows the deployed VXN 23/24 Nasdaq rule at test xSharpe **+0.76 vs Nasdaq buy-and-hold +0.83** — i.e. on the 2020+ holdout the deployed rule also loses to buy-and-hold on xSharpe, winning only on drawdown (-13.6% vs -28.2%). It wins on the full 2007+ window (+0.96 vs +0.83). This is one holdout window and is not on its own grounds to change the deployed rule, but it belongs on the record next to the "tier rule beats B&H" claim from 2026-09-18.
+
+**Action: none taken.** No config, engine or deployed-rule change. Owner's call whether a ~20%-invested drawdown profile is what they want — if so, the cheaper route is holding less VWRL, not gating it.
+
+---
+
+## 2026-09-29 15:02 — Tier 1 as a weighted basket (Nasdaq + all-world + FTSE) instead of 100% Nasdaq. **REJECTED — dominated by cash dilution.**
+
+**Question (owner).** Split the top tier across several funds already held outside the pot (e.g. £20k Nasdaq + £20k Vanguard all-world + £20k FTSE) to get drawdown protection, rather than holding one Nasdaq ETF.
+
+**Tool:** `scripts/tier_analysis/basket_tier1.py` (new), on `Strategy_Auto_Trader/allocation/basket_engine.py` (new).
+**Command:** `uv run python scripts/tier_analysis/basket_tier1.py`
+**Internally:** `intraday_engine.load_inputs()` -> `data_synthetic/hourly_spliced/`; deployed rule `tiers_vxn_deadband(vxn, 23.0, 24.0)`; `basket_engine.basket_run` per weight set; `eng.window_stats` per era.
+**Data range:** 62,377 LSE hourly bars / 6,952 London trading days, **1999-03-11 .. 2026-09-18**. Real-VXN era from 2007-11-20 (`real`/`train`/`test` windows); earlier is correlated-bridge.
+**Cost:** 13 bps per full round-trip switch, charged pro-rata on turnover. Fill `same_bar`. Journal: none (allocation engine, not `live_sim.py`) — table only, no chart.
+
+**New code.** `allocation/basket_engine.py` generalises the single-asset engine to a per-bar weight matrix: weights DRIFT with returns and reset to target only when the target changes (what the daemon would actually do); turnover-based cost. `tests/allocation/test_basket_engine.py`, 18 tests; 259 allocation tests pass. **Parity proven:** a one-hot weight matrix reproduces `intraday_engine.simulate` to 9.4e-16 on daily returns and exactly on switch counts, so these numbers sit on the same scale as every prior tier result. Engine, production files and the deployed rule unchanged.
+
+**Proxy caveat.** The spliced dataset has no all-world fund. `WORLD` = 0.65 SP500 / 0.35 FTSE, daily-blended. Crude, and it is the one fabricated leg here. It is **not** load-bearing: the all-real basket `34/33/33 NAS/SP500/FTSE` (xSharpe +0.62) and `50/50 NAS+FTSE` (+0.57) are dominated by the same margin, so the conclusion holds with the proxy removed.
+
+**Summary table — tier 1 basket variants, VXN 23/24 deadband, 13bps/switch**
+
+| tier 1 holding | xSharpe (all) | xSharpe (2007+) | xSharpe (train) | xSharpe (test 2020+) | CAGR% 2007+ | maxDD% 2007+ | maxDD% test | sw/yr 2007+ |
+|---|---|---|---|---|---|---|---|---|
+| **100 NAS (deployed)** | **+0.76** | **+0.96** | **+1.06** | **+0.76** | **13.6** | **-14.9** | **-13.6** | **9.3** |
+| 80/10/10 NAS/WORLD/FTSE | +0.70 | +0.88 | +0.96 | +0.72 | 11.4 | -14.7 | -11.4 | 9.3 |
+| 60/20/20 NAS/WORLD/FTSE | +0.62 | +0.76 | +0.82 | +0.65 | 9.2 | -15.6 | -9.8 | 9.3 |
+| 50/50 NAS+WORLD | +0.61 | +0.78 | +0.83 | +0.68 | 9.4 | -15.0 | -10.0 | 9.3 |
+| 50/25/25 NAS/WORLD/FTSE | +0.56 | +0.68 | +0.73 | +0.60 | 8.1 | -16.1 | -9.0 | 9.3 |
+| **34/33/33 NAS/WORLD/FTSE (owner's split)** | +0.44 | +0.54 | +0.57 | +0.50 | 6.3 | **-16.9** | -7.9 | 9.3 |
+| 34/33/33 NAS/SP500/FTSE (no proxy) | +0.49 | +0.62 | +0.65 | +0.57 | 7.2 | -16.2 | -8.2 | 9.3 |
+| 50/50 NAS+FTSE (no proxy) | +0.49 | +0.57 | +0.61 | +0.50 | 6.8 | -17.2 | -8.7 | 9.3 |
+| 100 WORLD | +0.29 | +0.43 | +0.43 | +0.45 | 5.1 | -17.3 | -6.5 | 9.3 |
+| 100 SP500 | +0.43 | +0.67 | +0.68 | +0.67 | 7.9 | -14.8 | -11.1 | 9.3 |
+| 100 FTSE | -0.08 | -0.14 | -0.14 | -0.15 | -0.1 | -30.3 | -15.1 | 9.3 |
+| *control* 80/20 NAS+CASH | — | +0.96 | — | +0.76 | 11.3 | -12.3 | -10.9 | 7.4 |
+| *control* 65/35 NAS+CASH | — | +0.95 | — | +0.75 | 9.6 | -10.2 | -8.8 | 6.1 |
+| *control* 50/50 NAS+CASH | — | +0.94 | — | +0.75 | 7.8 | **-8.0** | -6.6 | 4.7 |
+
+**Verdict: REJECTED.** xSharpe falls monotonically with the Nasdaq weight in **every** window including the 2020+ holdout. Two independent reasons:
+
+1. **The owner's 34/33/33 split is strictly dominated by doing nothing.** 2007+: it gives *less* return (6.3% vs 13.6% CAGR) **and a deeper drawdown** (-16.9% vs -14.9%). Same in `all` (-16.9 vs -21.5 is the only window where it helps) and `train`. It buys drawdown only in the 2020+ window (-7.9% vs -13.6%), and pays a third of the CAGR for it.
+
+2. **Cash dilution dominates equity dilution at every risk level** (the project's standing benchmark rule — cash + incumbent, never a static equity blend). Want ~-16% DD? The incumbent already sits at -14.9% with double the CAGR. Want ~-10%? `65/35 NAS+CASH` gives -10.2% DD at 9.6% CAGR, xSharpe +0.95; no basket reaches -10% at all, and the closest (`50/50 NAS+WORLD`, -15.0%) returns the *same* 9.4% CAGR with a 50% deeper drawdown. Want ~-8%? `50/50 NAS+CASH`: -8.0% DD, 7.8% CAGR, +0.94 — versus the owner's basket at -16.9% DD and 6.3% CAGR. Cash blends also switch **half as often** (4.7/yr vs 9.3/yr), so they cost less and trade less notional.
+
+**Mechanism — why diversification fails here, despite the correlations looking good.** Daily correlation to Nasdaq is genuinely low (FTSE 0.38, WORLD 0.67) and *falls* in the tail (on the worst 5% of Nasdaq days, n=348: FTSE 0.11, WORLD 0.27). The diversification is real. It does not help because **the VXN gate already owns Nasdaq's tail risk** — it exits to cash exactly when Nasdaq vol spikes. FTSE and world equity drawdowns are not driven by VXN, so the gate does not protect them; adding them puts *ungated* risk into a tier whose whole job is to be gated. The extreme case proves it: `100 FTSE` under the VXN gate is xSharpe **-0.14** with -30.3% DD — the gate actively destroys value on an asset it was not calibrated for. xSharpe is near-flat across cash dilution (0.96/0.96/0.95/0.94) — cash moves you *along* the efficient ray; other equities move you *off* it.
+
+**Caveat on the correlations.** LSE-day vs US-day returns are non-synchronous, which deflates measured cross-correlation. The true diversification is likely *lower* than 0.38/0.67, making the result more adverse to the basket, not less.
+
+**Not tested / open.** Real VWRL.L (IBKR, 2012+) was not fetched — the proxy is shown above to be non-load-bearing, so it would not change the verdict. A basket in a *lower* tier (a gate calibrated to that asset's own vol index) is a different question and remains open.
+
+**Action: none.** `tier_allocation` config unchanged; tier 1 stays 100% EQGB.L. If the owner wants a shallower drawdown, the lever is the **Nasdaq/cash split**, not a multi-fund tier 1 — and that is a pot-sizing decision, not a strategy change.
+
+---
+
 ## 2026-09-29 — PLAN_EXIT_GENERALISATION.md: X0 panel review + X0b register reconciliation. **X0b PASSES, 0 drops.**
 
 **Workstream:** exit-generalisation plan (does the deployed VXN 23/24 rule's *exit* behave the same out of sample as in sample?). This entry covers X0 (panel) and X0b (data reconciliation). X1/X2 not yet run.

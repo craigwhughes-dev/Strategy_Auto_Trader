@@ -704,7 +704,7 @@ def write_app_status_snapshot(
         "interest_accrued": portfolio.interest_accrued,
         "markets": markets_status,
         "positions": positions_snapshot,
-        "allocation": allocation_mgr.app_status_dict() if allocation_mgr is not None else None,
+        "allocation": allocation_mgr.app_status_dict(daemon_state) if allocation_mgr is not None else None,
     }
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1448,10 +1448,15 @@ def process_cycle(
         if vix_current is not None or vxn_current is not None or data_lost:
             from datetime import date as _date
             today = _date.today()
+            vvix_band = update_vvix_band(
+                daemon_state, today,
+                allocation_mgr.vvix_edge_low, allocation_mgr.vvix_edge_high,
+                n_confirm=allocation_mgr.vvix_confirm_days, logger=logger,
+            )
             try:
                 # Determine active tier first (to know which prices we actually need).
                 # Quiet — the full tier breakdown is logged once, inside rebalance().
-                tier_signal = allocation_mgr.signal(today, vxn_current, vix_current, verbose=False)
+                tier_signal = allocation_mgr.signal(today, vxn_current, vix_current, vvix_band=vvix_band, verbose=False)
                 required_tickers = ["EQGB.L", "SPY", "ISF.L", "CSH2.L"]
 
                 # Skip price fetch if broker disconnected (avoids 4 ERROR lines per cycle).
@@ -1484,6 +1489,7 @@ def process_cycle(
                         current_price=current_prices,
                         available_cash=portfolio.available_cash,
                         positions={t: p.get("quantity", 0) for t, p in portfolio.positions.items()},
+                        vvix_band=vvix_band,
                         logger=logger,
                     )
                     from ..broker.symbols import normalize_fill_price
@@ -2412,6 +2418,85 @@ def check_nightly_reconciliation(
                     logger.error(f"Reconciliation: escalation alert email failed: {e}")
                 daemon_state["reconciliation_alert_sent"] = True
                 save_state(daemon_state)
+
+
+def update_vvix_band(
+    daemon_state: dict,
+    today,
+    edge_low: float,
+    edge_high: float,
+    n_confirm: int,
+    logger: logging.Logger,
+    *,
+    fetch_vvix: Callable | None = None,
+    save_state: Callable | None = None,
+) -> str:
+    """Today's confirmed VVIX band ("calm" | "base" | "stressed") for the tier allocator.
+
+    Runs at most once per calendar day (like `run_daily_reconciliation`) — VVIX is a daily close,
+    re-fetching it every ~5-min cycle would be pointless. Persists two counters in `daemon_state`
+    (`vvix_calm_streak_days`, `vvix_stressed_streak_days`) plus a `vvix_last_date` cursor, following
+    this file's existing hand-rolled counter pattern (see `reconciliation_consecutive_error_days`)
+    — there is no shared helper for this in the repo.
+
+    Streak rule, matching the research this was validated against (BACKTEST_LOG.md 2026-09-30
+    19:05): a day with VVIX < edge_low extends the calm streak and resets the stressed one; a day
+    with VVIX >= edge_high does the reverse; a day with VVIX in between resets BOTH streaks (same
+    as the research's per-day classification). A MISSING day (fetch failed / daemon was down) does
+    neither — it's skipped entirely, not treated as a mid-band day — because unlike the research's
+    complete daily series, a live gap means "unknown", not "unknown counts as not-extreme"; per
+    owner's explicit decision, a gap must not silently reset a streak that's still probably valid.
+    A gap over ~4 calendar days (covers a normal weekend without false-triggering) logs a warning,
+    since the confirmed band could be stale relative to what VVIX actually did during a long outage.
+
+    Returns "base" (no VVIX effect — reproduces the pre-VVIX rule) whenever neither streak has
+    reached `n_confirm`, including on every call before the first successful fetch.
+    """
+    if fetch_vvix is None:
+        from ..quant_hmm.sentiment import fetch_vvix_daily
+        fetch_vvix = fetch_vvix_daily
+    if save_state is None:
+        save_state = save_daemon_state
+
+    today_str = today.isoformat()
+    prior_date_str = daemon_state.get("vvix_last_date")
+
+    if prior_date_str != today_str:
+        df = fetch_vvix()
+        if df is None or df.empty:
+            logger.warning("VVIX: fetch failed — leaving calm/stressed streaks unchanged (gap, not a reset)")
+        else:
+            value = float(df["Close"].iloc[-1])
+            calm = daemon_state.get("vvix_calm_streak_days", 0)
+            stressed = daemon_state.get("vvix_stressed_streak_days", 0)
+            if value < edge_low:
+                calm, stressed = calm + 1, 0
+            elif value >= edge_high:
+                calm, stressed = 0, stressed + 1
+            else:
+                calm, stressed = 0, 0
+            daemon_state["vvix_calm_streak_days"] = calm
+            daemon_state["vvix_stressed_streak_days"] = stressed
+            daemon_state["vvix_last_date"] = today_str
+            daemon_state["vvix_last_value"] = value
+            if prior_date_str is not None:
+                from datetime import date as _date
+                gap_days = (today - _date.fromisoformat(prior_date_str)).days
+                if gap_days > 4:
+                    logger.warning(
+                        f"VVIX: {gap_days} calendar days since the last reading ({prior_date_str} -> "
+                        f"{today_str}) — confirmed band may be stale relative to what VVIX did in between."
+                    )
+            logger.info(f"VVIX: {value:.2f} (calm_streak={calm}, stressed_streak={stressed}, edges={edge_low:g}/{edge_high:g})")
+            save_state(daemon_state)
+
+    calm_streak = daemon_state.get("vvix_calm_streak_days", 0)
+    stressed_streak = daemon_state.get("vvix_stressed_streak_days", 0)
+    if calm_streak >= n_confirm:
+        return "calm"
+    if stressed_streak >= n_confirm:
+        return "stressed"
+    return "base"
 
 
 def process_manual_commands_wrapper(config: dict, portfolio: object, broker: object, logger: logging.Logger, daemon_state: dict) -> None:

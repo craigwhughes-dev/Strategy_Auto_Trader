@@ -4,7 +4,14 @@ Manages rebalancing between Nasdaq/SPY/ISF.L/CSH2.L based on VXN + VIX tiers. Th
 re-read every cycle from the latest COMPLETED hourly VIX/VXN bar (see index_feed.py), so a tier
 change can happen at any hourly boundary while the LSE is open.
 
-Tier 1 (VXN ≤ vxn_threshold to enter, held until VXN > vxn_exit_threshold): Nasdaq/EQGB.L (growth)
+Tier 1 (VXN ≤ gate to enter, held until VXN > exit gate): Nasdaq/EQGB.L (growth). The (enter, exit)
+    VXN pair is picked by the day's confirmed VVIX band (see live_daemon.py's `update_vvix_band`,
+    which owns the N-consecutive-day confirmation and is out of this class's scope — this class
+    only picks the pair once told which band applies): 'calm' -> (vxn_calm_enter, vxn_calm_exit)
+    (wider, more permissive), 'base' -> (vxn_threshold, vxn_exit_threshold) (the original rule,
+    unaffected by VVIX), 'stressed' -> (vxn_stressed_enter, vxn_stressed_exit) (narrower). A
+    daemon never passing `vvix_band` (or always passing "base") reproduces the pre-VVIX behavior
+    exactly — this is a strict superset, not a replacement.
 Tier 2 (VIX ≤ vix_tier1): SPY (balanced)
 Tier 3 (vix_tier1 < VIX ≤ vix_tier2): ISF.L (defensive)
 Tier 4 (otherwise): CSH2.L (money-market)
@@ -33,6 +40,8 @@ _log = logging.getLogger(__name__)
 _NUMBER_KEYS = frozenset({
     "vxn_threshold", "vxn_exit_threshold", "vix_tier1", "vix_tier2",
     "index_refresh_seconds", "index_max_outage_seconds", "commission_pct",
+    "vvix_edge_low", "vvix_edge_high", "vvix_confirm_days",
+    "vxn_calm_enter", "vxn_calm_exit", "vxn_stressed_enter", "vxn_stressed_exit",
 })
 _BOOL_KEYS = frozenset({"lower_tiers_enabled"})
 _CONFIG_KEYS = _NUMBER_KEYS | _BOOL_KEYS
@@ -62,6 +71,7 @@ class AllocationSignal:
     current_asset: str
     needs_rebalance: bool
     reason: str
+    vvix_band: str = "base"  # "calm" | "base" | "stressed" — which VXN pair tier 1 used
 
 
 class MultiTierAllocationManager:
@@ -83,21 +93,43 @@ class MultiTierAllocationManager:
         index_refresh_seconds: float = REFRESH_SECONDS,
         index_max_outage_seconds: float = MAX_OUTAGE_SECONDS,
         lower_tiers_enabled: bool = True,
+        vvix_edge_low: float = 76.0,
+        vvix_edge_high: float = 122.0,
+        vvix_confirm_days: float = 3.0,
+        vxn_calm_enter: float | None = None,
+        vxn_calm_exit: float | None = None,
+        vxn_stressed_enter: float | None = None,
+        vxn_stressed_exit: float | None = None,
     ):
         """Initialize allocation manager.
 
         Args:
-            vxn_threshold: VXN level to ENTER tier 1 (Nasdaq). VXN ≤ this → Nasdaq
+            vxn_threshold: VXN level to ENTER tier 1 (Nasdaq). VXN ≤ this → Nasdaq. This is also
+                the 'base' band's enter level (see vvix_* args below) — unaffected by VVIX.
             vix_tier1: VIX threshold for tier 2 (SPY). VIX ≤ this → SPY
             vix_tier2: VIX threshold for tier 3 (ISF.L). VIX ≤ this → ISF.L
             commission_pct: Commission per side as % of order value. IBKR UK Tiered is 0.05 (0.05%),
                 min GBP 1; UK ETFs pay no stamp duty or PTM levy, so this is the whole cost
             vxn_exit_threshold: deadband upper edge. While Nasdaq is HELD it stays tier 1 until
-                VXN > this. None (default) means no deadband: exit at vxn_threshold.
+                VXN > this. None (default) means no deadband: exit at vxn_threshold. Also the
+                'base' band's exit level.
             index_refresh_seconds: how often VIX/VXN hourly data is re-fetched
             index_max_outage_seconds: how long a failed fetch keeps the last good reading
             lower_tiers_enabled: when False the S&P (tier 2) and FTSE (tier 3) tiers never pass, so the
                 allocation is Nasdaq or cash only. Their VIX cuts stay configured for when it is switched on.
+            vvix_edge_low: VVIX level below which (once confirmed, see live_daemon.py) the 'calm'
+                band applies to tier 1's VXN pair. Only has an effect when `signal()`/`rebalance()`
+                are called with vvix_band != "base" — otherwise unused.
+            vvix_edge_high: VVIX level at/above which (once confirmed) the 'stressed' band applies.
+            vvix_confirm_days: consecutive daily VVIX readings past an edge required before the
+                calm/stressed band is considered confirmed (live_daemon.py owns the actual
+                counting; this class just stores the threshold for it to read).
+            vxn_calm_enter / vxn_calm_exit: tier 1's (enter, exit) VXN pair while the 'calm' VVIX
+                band is confirmed — wider than vxn_threshold/vxn_exit_threshold (more permissive).
+                None (default) falls back to vxn_threshold/vxn_exit_threshold unchanged, i.e. VVIX
+                has no effect unless these are explicitly configured.
+            vxn_stressed_enter / vxn_stressed_exit: tier 1's pair while 'stressed' is confirmed —
+                narrower than the base pair. Same None-means-no-effect default as the calm pair.
         """
         if vxn_exit_threshold is None:
             vxn_exit_threshold = vxn_threshold
@@ -107,12 +139,35 @@ class MultiTierAllocationManager:
             raise ValueError(f"vix_tier1 ({vix_tier1}) must be < vix_tier2 ({vix_tier2})")
         if commission_pct < 0:
             raise ValueError(f"commission_pct ({commission_pct}) must be >= 0")
+        if vvix_edge_high <= vvix_edge_low:
+            raise ValueError(f"vvix_edge_high ({vvix_edge_high}) must be > vvix_edge_low ({vvix_edge_low})")
+        if vvix_confirm_days < 1:
+            raise ValueError(f"vvix_confirm_days ({vvix_confirm_days}) must be >= 1")
+        if vxn_calm_enter is None:
+            vxn_calm_enter = vxn_threshold
+        if vxn_calm_exit is None:
+            vxn_calm_exit = vxn_exit_threshold
+        if vxn_calm_exit < vxn_calm_enter:
+            raise ValueError(f"vxn_calm_exit ({vxn_calm_exit}) must be >= vxn_calm_enter ({vxn_calm_enter})")
+        if vxn_stressed_enter is None:
+            vxn_stressed_enter = vxn_threshold
+        if vxn_stressed_exit is None:
+            vxn_stressed_exit = vxn_exit_threshold
+        if vxn_stressed_exit < vxn_stressed_enter:
+            raise ValueError(f"vxn_stressed_exit ({vxn_stressed_exit}) must be >= vxn_stressed_enter ({vxn_stressed_enter})")
         self.vxn_threshold = vxn_threshold
         self.vxn_exit_threshold = vxn_exit_threshold
         self.vix_tier1 = vix_tier1
         self.vix_tier2 = vix_tier2
         self.lower_tiers_enabled = lower_tiers_enabled
         self.commission_pct = commission_pct
+        self.vvix_edge_low = vvix_edge_low
+        self.vvix_edge_high = vvix_edge_high
+        self.vvix_confirm_days = vvix_confirm_days
+        self.vxn_calm_enter = vxn_calm_enter
+        self.vxn_calm_exit = vxn_calm_exit
+        self.vxn_stressed_enter = vxn_stressed_enter
+        self.vxn_stressed_exit = vxn_stressed_exit
         self.current_asset = "SPY"  # Default starting position
         self.current_price = None  # Snapshot of entry price for tracking
         self.last_rebalance_date = None
@@ -126,6 +181,7 @@ class MultiTierAllocationManager:
         # Last tier allocation info for app_status.json
         self._last_vix = None
         self._last_vxn = None
+        self._last_vvix_band = "base"
         self._last_tier_num = None
         self._last_target_asset = None  # Target asset selected by last signal
         self._last_action = None  # "HOLD" | "BUY" | "SELL"
@@ -157,21 +213,50 @@ class MultiTierAllocationManager:
     def thresholds_summary(self) -> str:
         lower = (f"S&P VIX<={self.vix_tier1:g}; FTSE VIX<={self.vix_tier2:g}" if self.lower_tiers_enabled
                  else "S&P/FTSE tiers OFF")
+        vvix_note = (
+            f"; VVIX band: calm {self.vxn_calm_enter:g}/{self.vxn_calm_exit:g}, "
+            f"base {self.vxn_threshold:g}/{self.vxn_exit_threshold:g}, "
+            f"stressed {self.vxn_stressed_enter:g}/{self.vxn_stressed_exit:g} "
+            f"(edges {self.vvix_edge_low:g}/{self.vvix_edge_high:g})"
+            if (self.vxn_calm_enter, self.vxn_calm_exit, self.vxn_stressed_enter, self.vxn_stressed_exit)
+            != (self.vxn_threshold, self.vxn_exit_threshold, self.vxn_threshold, self.vxn_exit_threshold)
+            else ""
+        )
         return (f"Nasdaq enter VXN<={self.vxn_threshold:g}, hold until VXN>{self.vxn_exit_threshold:g}; "
-                f"{lower}; else cash")
+                f"{lower}; else cash{vvix_note}")
 
     def _lower_tier_detail(self, vix: float | None, gate: float) -> str:
         if not self.lower_tiers_enabled:
             return "disabled by config (lower_tiers_enabled=false)"
         return f"VIX={vix:.2f} vs gate={gate}" if vix is not None else "VIX unavailable"
 
-    def _nasdaq_gate(self) -> float:
-        """VXN level tier 1 must satisfy right now: the wider exit edge while Nasdaq is already held
-        (deadband, so small wobbles around the entry level do not trade), else the entry level."""
-        return self.vxn_exit_threshold if self.current_asset == "EQGB.L" else self.vxn_threshold
+    def _nasdaq_pair(self, vvix_band: str) -> tuple[float, float]:
+        """(enter, exit) VXN pair for the given confirmed VVIX band. 'base' always reproduces the
+        plain vxn_threshold/vxn_exit_threshold rule, regardless of any vvix_* config — a daemon
+        that never passes a non-"base" band trades identically to before this feature existed."""
+        if vvix_band == "calm":
+            return self.vxn_calm_enter, self.vxn_calm_exit
+        if vvix_band == "stressed":
+            return self.vxn_stressed_enter, self.vxn_stressed_exit
+        if vvix_band != "base":
+            raise ValueError(f"unknown vvix_band {vvix_band!r}; expected 'calm', 'base', or 'stressed'")
+        return self.vxn_threshold, self.vxn_exit_threshold
+
+    def _nasdaq_gate(self, vvix_band: str = "base") -> float:
+        """VXN level tier 1 must satisfy right now, for the given confirmed VVIX band: the wider
+        exit edge while Nasdaq is already held (deadband, so small wobbles around the entry level
+        do not trade), else the entry level."""
+        enter_at, exit_above = self._nasdaq_pair(vvix_band)
+        return exit_above if self.current_asset == "EQGB.L" else enter_at
 
     def signal(
-        self, today: date, vxn: float | None, vix: float | None, logger=None, verbose: bool = True
+        self,
+        today: date,
+        vxn: float | None,
+        vix: float | None,
+        vvix_band: str = "base",
+        logger=None,
+        verbose: bool = True,
     ) -> AllocationSignal:
         """Compute daily allocation decision.
 
@@ -179,6 +264,11 @@ class MultiTierAllocationManager:
             today: Current date
             vxn: Daily VXN close (None if unavailable)
             vix: Daily VIX close (None if unavailable)
+            vvix_band: "calm" | "base" | "stressed" — today's confirmed VVIX regime, owned and
+                computed by the caller (live_daemon.py's `update_vvix_band`, which persists the
+                N-consecutive-day confirmation across restarts). This class does not fetch VVIX or
+                track confirmation state itself — it only picks the VXN pair for the band it's
+                told. Default "base" reproduces pre-VVIX behavior exactly.
             logger: Logger to use (if None, uses module logger)
             verbose: Log the full tier-by-tier breakdown at INFO level. Set False for
                 a quiet lookup (e.g. speculative pre-checks) so the breakdown appears
@@ -189,16 +279,20 @@ class MultiTierAllocationManager:
         """
         log = logger or _log
         log_level = log.info if verbose else log.debug
-        log_level(f"[{today}] Signal evaluation: VXN={vxn}, VIX={vix}, current_asset={self.current_asset}")
+        log_level(
+            f"[{today}] Signal evaluation: VXN={vxn}, VIX={vix}, vvix_band={vvix_band}, "
+            f"current_asset={self.current_asset}"
+        )
 
         # Evaluate every tier independently (each computes its own pass/fail + reason),
         # log the result, then pick the best (lowest-numbered) tier that passed.
-        nasdaq_gate = self._nasdaq_gate()
+        nasdaq_gate = self._nasdaq_gate(vvix_band)
         tiers = [
             (1, "EQGB.L", "Nasdaq", "VXN",
              vxn, nasdaq_gate,
              vxn is not None and vxn <= nasdaq_gate,
-             f"VXN={vxn:.2f} vs gate={nasdaq_gate:g} ({'hold' if self.current_asset == 'EQGB.L' else 'enter'})"
+             f"VXN={vxn:.2f} vs gate={nasdaq_gate:g} [{vvix_band}] "
+             f"({'hold' if self.current_asset == 'EQGB.L' else 'enter'})"
              if vxn is not None else "VXN unavailable"),
             (2, "SPY", "Balanced", "VIX",
              vix, self.vix_tier1,
@@ -233,6 +327,7 @@ class MultiTierAllocationManager:
         # Store tier info for app_status_dict
         self._last_vix = vix
         self._last_vxn = vxn
+        self._last_vvix_band = vvix_band
         self._last_tier_num = tier
         self._last_target_asset = target_asset
         self._last_action = action
@@ -246,6 +341,7 @@ class MultiTierAllocationManager:
             current_asset=self.current_asset,
             needs_rebalance=needs_rebalance,
             reason=reason,
+            vvix_band=vvix_band,
         )
 
     def rebalance(
@@ -256,6 +352,7 @@ class MultiTierAllocationManager:
         current_price: dict[str, float],
         available_cash: float,
         positions: dict[str, int],
+        vvix_band: str = "base",
         logger=None,
     ) -> list[AllocationOrder]:
         """Generate rebalance orders if target tier differs from current.
@@ -267,6 +364,7 @@ class MultiTierAllocationManager:
             current_price: Dict {ticker: price} for all four assets
             available_cash: Available cash to buy
             positions: Current positions {ticker: quantity}
+            vvix_band: "calm" | "base" | "stressed" — see `signal()`. Default "base" is a no-op.
             logger: Logger to use (if None, uses module logger)
 
         Returns:
@@ -283,7 +381,7 @@ class MultiTierAllocationManager:
         # Verbose tier breakdown logged here (not at any earlier speculative signal()
         # call) so it lands right next to the resulting order, not 10-20s earlier
         # across an unrelated price-fetch gap.
-        signal = self.signal(today, vxn, vix, logger=log)
+        signal = self.signal(today, vxn, vix, vvix_band=vvix_band, logger=log)
 
         # Generate orders if: rebalancing tiers OR bootstrapping (no positions + cash available)
         has_any_position = any(positions.values())
@@ -435,8 +533,16 @@ class MultiTierAllocationManager:
         US open this is the prior US session's last bar."""
         return self._vxn_feed.current(fetcher)
 
-    def app_status_dict(self) -> dict:
-        """Return current state for app_status.json."""
+    def app_status_dict(self, daemon_state: dict | None = None) -> dict:
+        """Return current state for app_status.json.
+
+        Args:
+            daemon_state: live_daemon's persisted state dict, read-only here, for the raw VVIX
+                reading and streak counters `update_vvix_band` writes there (this class only
+                tracks the confirmed band it was told, not VVIX itself). None (e.g. in tests that
+                construct this class standalone) omits the `vvix` block's daemon_state-sourced
+                fields rather than raising.
+        """
         tier_allocation = None
         if self._last_tier_num is not None:
             # Build tier breakdown for display
@@ -446,11 +552,12 @@ class MultiTierAllocationManager:
                     "asset": "EQGB.L",
                     "label": "Nasdaq",
                     "index": "VXN",
-                    "gate_value": self._nasdaq_gate(),
+                    "gate_value": self._nasdaq_gate(self._last_vvix_band),
                     "enter_gate_value": self.vxn_threshold,
                     "exit_gate_value": self.vxn_exit_threshold,
                     "current_value": self._last_vxn,
-                    "passes": self._last_vxn is not None and self._last_vxn <= self._nasdaq_gate(),
+                    "vvix_band": self._last_vvix_band,
+                    "passes": self._last_vxn is not None and self._last_vxn <= self._nasdaq_gate(self._last_vvix_band),
                 },
                 {
                     "tier_num": 2,
@@ -488,10 +595,21 @@ class MultiTierAllocationManager:
             tier_allocation = {
                 "vix_current": self._last_vix,
                 "vxn_current": self._last_vxn,
+                "vvix_band": self._last_vvix_band,
                 "tiers": tiers,
                 "selected_tier_num": self._last_tier_num,
                 "selected_asset": self._last_target_asset,
                 "action": self._last_action,
+                "vvix": {
+                    "current": (daemon_state or {}).get("vvix_last_value"),
+                    "band": self._last_vvix_band,
+                    "calm_streak_days": (daemon_state or {}).get("vvix_calm_streak_days", 0),
+                    "stressed_streak_days": (daemon_state or {}).get("vvix_stressed_streak_days", 0),
+                    "confirm_days": self.vvix_confirm_days,
+                    "edge_low": self.vvix_edge_low,
+                    "edge_high": self.vvix_edge_high,
+                    "last_date": (daemon_state or {}).get("vvix_last_date"),
+                },
             }
 
         return {

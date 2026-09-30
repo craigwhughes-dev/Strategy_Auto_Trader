@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 from zoneinfo import ZoneInfo
@@ -3465,3 +3465,85 @@ class TestCheckoutAttributionRealWorldShapes:
     def test_non_iterable_cmdline_does_not_raise(self):
         assert live_daemon._is_same_checkout(
             self._proc(cmdline=object(), denied=("exe", "cwd"))) is None
+
+
+class TestVvixBand:
+    """update_vvix_band — the VVIX calm/stressed streak confirmation for the tier allocator."""
+
+    def _df(self, close: float):
+        import pandas as pd
+        return pd.DataFrame({"Close": [close]})
+
+    def test_confirms_calm_after_n_consecutive_days_below_low_edge(self):
+        state = {}
+        for day, close in [(5, 70.0), (6, 71.0), (7, 72.0)]:
+            band = live_daemon.update_vvix_band(
+                state, date(2026, 1, day), 76.0, 122.0, 3, mock.Mock(),
+                fetch_vvix=lambda c=close: self._df(c), save_state=lambda s: None,
+            )
+        assert band == "calm"
+        assert state["vvix_calm_streak_days"] == 3
+        assert state["vvix_stressed_streak_days"] == 0
+
+    def test_stays_base_before_confirmation_threshold(self):
+        state = {}
+        band = live_daemon.update_vvix_band(
+            state, date(2026, 1, 5), 76.0, 122.0, 3, mock.Mock(),
+            fetch_vvix=lambda: self._df(70.0), save_state=lambda s: None,
+        )
+        assert band == "base"
+        band = live_daemon.update_vvix_band(
+            state, date(2026, 1, 6), 76.0, 122.0, 3, mock.Mock(),
+            fetch_vvix=lambda: self._df(70.0), save_state=lambda s: None,
+        )
+        assert band == "base"  # only 2 consecutive days, needs 3
+
+    def test_confirms_stressed_after_n_consecutive_days_at_or_above_high_edge(self):
+        state = {}
+        for day, close in [(5, 130.0), (6, 125.0), (7, 140.0)]:
+            band = live_daemon.update_vvix_band(
+                state, date(2026, 1, day), 76.0, 122.0, 3, mock.Mock(),
+                fetch_vvix=lambda c=close: self._df(c), save_state=lambda s: None,
+            )
+        assert band == "stressed"
+
+    def test_mid_range_reading_resets_both_streaks(self):
+        state = {"vvix_calm_streak_days": 2, "vvix_stressed_streak_days": 0, "vvix_last_date": "2026-01-06"}
+        band = live_daemon.update_vvix_band(
+            state, date(2026, 1, 7), 76.0, 122.0, 3, mock.Mock(),
+            fetch_vvix=lambda: self._df(95.0), save_state=lambda s: None,
+        )
+        assert band == "base"
+        assert state["vvix_calm_streak_days"] == 0
+        assert state["vvix_stressed_streak_days"] == 0
+
+    def test_missing_reading_does_not_reset_an_already_confirmed_streak(self):
+        state = {"vvix_calm_streak_days": 3, "vvix_stressed_streak_days": 0, "vvix_last_date": "2026-01-07"}
+        band = live_daemon.update_vvix_band(
+            state, date(2026, 1, 8), 76.0, 122.0, 3, mock.Mock(),
+            fetch_vvix=lambda: None, save_state=lambda s: None,
+        )
+        assert band == "calm"
+        assert state["vvix_calm_streak_days"] == 3  # untouched by the gap
+        assert state["vvix_last_date"] == "2026-01-07"  # cursor not advanced on a failed fetch
+
+    def test_same_day_call_does_not_refetch(self):
+        state = {"vvix_calm_streak_days": 1, "vvix_stressed_streak_days": 0, "vvix_last_date": "2026-01-05"}
+
+        def explode():
+            raise AssertionError("fetch_vvix should not be called again the same day")
+
+        band = live_daemon.update_vvix_band(
+            state, date(2026, 1, 5), 76.0, 122.0, 3, mock.Mock(),
+            fetch_vvix=explode, save_state=lambda s: None,
+        )
+        assert band == "base"  # streak=1, still below n_confirm=3
+
+    def test_long_gap_logs_a_warning(self):
+        state = {"vvix_calm_streak_days": 1, "vvix_stressed_streak_days": 0, "vvix_last_date": "2026-01-01"}
+        logger = mock.Mock()
+        live_daemon.update_vvix_band(
+            state, date(2026, 1, 10), 76.0, 122.0, 3, logger,
+            fetch_vvix=lambda: self._df(70.0), save_state=lambda s: None,
+        )
+        assert logger.warning.called

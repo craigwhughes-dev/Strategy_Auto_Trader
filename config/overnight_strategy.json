@@ -28,7 +28,7 @@
   "reconciliation_run_time": "21:30",
   "ibkr_data_reconcile": {
     "enabled": true,
-    "run_time": "01:00",
+    "run_time": "04:00",
     "lookback_days": 14,
     "client_id": 4
   },
@@ -72,7 +72,14 @@
     "vix_tier2": 17.5,
     "commission_pct": 0.05,
     "index_refresh_seconds": 300,
-    "index_max_outage_seconds": 14400
+    "index_max_outage_seconds": 14400,
+    "vvix_edge_low": 76,
+    "vvix_edge_high": 122,
+    "vvix_confirm_days": 3,
+    "vxn_calm_enter": 25,
+    "vxn_calm_exit": 26,
+    "vxn_stressed_enter": 21,
+    "vxn_stressed_exit": 22
   },
   "broker": {
     "host": "127.0.0.1",

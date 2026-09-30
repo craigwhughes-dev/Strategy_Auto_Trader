@@ -71,6 +71,87 @@ class TestDeadband:
             eng.tiers_vxn_deadband(np.array([20.0]), 26.0, 22.0)
 
 
+class TestVvixDeadband:
+    def test_vvix_above_threshold_forces_cash_even_when_vxn_says_nasdaq(self):
+        vxn = np.array([20.0, 20.0, 20.0])
+        vvix = np.array([20.0, 70.0, 70.0])
+        assert eng.tiers_vxn_vvix_deadband(vxn, vvix, 22.0, 26.0, 50.0).tolist() == [0, 3, 3]
+
+    def test_vvix_below_threshold_reopens_gate_and_vxn_deadband_decides(self):
+        vxn = np.array([20.0, 20.0, 20.0, 20.0])
+        vvix = np.array([20.0, 70.0, 40.0, 40.0])
+        assert eng.tiers_vxn_vvix_deadband(vxn, vvix, 22.0, 26.0, 50.0).tolist() == [0, 3, 0, 0]
+
+    def test_nan_vvix_does_not_force_cash(self):
+        vxn = np.array([20.0, 20.0])
+        vvix = np.array([20.0, np.nan])
+        assert eng.tiers_vxn_vvix_deadband(vxn, vvix, 22.0, 26.0, 50.0).tolist() == [0, 0]
+
+    def test_nan_vvix_does_not_reopen_a_closed_gate(self):
+        vxn = np.array([20.0, 20.0, 20.0])
+        vvix = np.array([70.0, np.nan, np.nan])
+        assert eng.tiers_vxn_vvix_deadband(vxn, vvix, 22.0, 26.0, 50.0).tolist() == [3, 3, 3]
+
+    def test_leading_nan_vvix_leaves_gate_open_so_vxn_deadband_alone_decides(self):
+        vxn = np.array([20.0, 30.0])
+        vvix = np.array([np.nan, np.nan])
+        assert eng.tiers_vxn_vvix_deadband(vxn, vvix, 22.0, 26.0, 50.0).tolist() == eng.tiers_vxn_deadband(vxn, 22.0, 26.0).tolist()
+
+
+class TestVvixBanded:
+    EDGES = (80.0, 102.0)
+    CALM, BASE, STRESSED = (25.0, 26.0), (23.0, 24.0), (21.0, 22.0)
+    PAIRS = (CALM, BASE, STRESSED)
+    BASE_BAND = 1
+
+    def test_band_selection_picks_the_right_pair_per_vvix_level(self):
+        vxn = np.array([24.5])
+        assert eng.tiers_vxn_vvix_banded(vxn, np.array([70.0]), self.EDGES, self.PAIRS, self.BASE_BAND).tolist() == [0]  # calm: 24.5<=25 enters
+        assert eng.tiers_vxn_vvix_banded(vxn, np.array([90.0]), self.EDGES, self.PAIRS, self.BASE_BAND).tolist() == [3]  # base: 24.5>23, stays cash
+        assert eng.tiers_vxn_vvix_banded(vxn, np.array([110.0]), self.EDGES, self.PAIRS, self.BASE_BAND).tolist() == [3]  # stressed: 24.5>21, stays cash
+
+    def test_nan_vvix_defaults_to_base_band(self):
+        vxn = np.array([20.0, 23.0, 26.0, 27.0, 25.0, 22.0, 26.0])
+        vvix = np.full(len(vxn), np.nan)
+        assert eng.tiers_vxn_vvix_banded(vxn, vvix, self.EDGES, self.PAIRS, self.BASE_BAND).tolist() == eng.tiers_vxn_deadband(vxn, 23.0, 24.0).tolist()
+
+    def test_both_legs_move_together_in_the_calm_band_exit_leg_loosened(self):
+        vxn = np.array([23.0, 25.0])
+        vvix = np.full(2, 70.0)  # calm band throughout
+        assert eng.tiers_vxn_vvix_banded(vxn, vvix, self.EDGES, self.PAIRS, self.BASE_BAND).tolist() == [0, 0]
+        assert eng.tiers_vxn_deadband(vxn, 23.0, 24.0).tolist() == [0, 3]  # base rule would have exited at bar 1
+
+    def test_both_legs_move_together_in_the_stressed_band_entry_leg_tightened(self):
+        vxn = np.array([22.0])
+        vvix = np.array([110.0])  # stressed band
+        assert eng.tiers_vxn_vvix_banded(vxn, vvix, self.EDGES, self.PAIRS, self.BASE_BAND).tolist() == [3]
+        assert eng.tiers_vxn_deadband(vxn, 23.0, 24.0).tolist() == [0]  # base rule would have entered
+
+    def test_persistent_deadband_still_holds_within_a_single_band(self):
+        vxn = np.array([19.0, 21.0, 22.0, 23.0, 21.5, 20.0, 23.0])
+        vvix = np.full(len(vxn), 110.0)  # stressed band throughout
+        assert eng.tiers_vxn_vvix_banded(vxn, vvix, self.EDGES, self.PAIRS, self.BASE_BAND).tolist() == eng.tiers_vxn_deadband(vxn, 21.0, 22.0).tolist()
+
+    def test_trivial_config_recovers_deployed_rule_exactly(self):
+        vxn = np.array([20.0, 25.0, 23.5, 26.0])
+        vvix = np.array([50.0, 90.0, 150.0, np.nan])
+        trivial_pairs = (self.BASE, self.BASE, self.BASE)
+        assert eng.tiers_vxn_vvix_banded(vxn, vvix, self.EDGES, trivial_pairs, self.BASE_BAND).tolist() == eng.tiers_vxn_deadband(vxn, 23.0, 24.0).tolist()
+
+    def test_mismatched_pairs_and_edges_length_rejected(self):
+        with pytest.raises(ValueError):
+            eng.tiers_vxn_vvix_banded(np.array([20.0]), np.array([90.0]), self.EDGES, (self.CALM, self.BASE), 0)
+
+    def test_out_of_range_base_band_rejected(self):
+        with pytest.raises(ValueError):
+            eng.tiers_vxn_vvix_banded(np.array([20.0]), np.array([90.0]), self.EDGES, self.PAIRS, 3)
+
+    def test_inverted_pair_in_any_band_rejected(self):
+        bad_pairs = (self.CALM, self.BASE, (22.0, 21.0))
+        with pytest.raises(ValueError):
+            eng.tiers_vxn_vvix_banded(np.array([20.0]), np.array([90.0]), self.EDGES, bad_pairs, self.BASE_BAND)
+
+
 class TestSimulate:
     def _run(self, tiers, log_ret, day_codes, fill="same_bar", cost=0.0):
         return eng.simulate(_inputs(log_ret, day_codes), np.array(tiers), fill, cost)
