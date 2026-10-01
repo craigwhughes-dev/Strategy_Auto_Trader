@@ -546,6 +546,7 @@ class MultiTierAllocationManager:
         tier_allocation = None
         if self._last_tier_num is not None:
             # Build tier breakdown for display
+            enter_at, exit_above = self._nasdaq_pair(self._last_vvix_band)
             tiers = [
                 {
                     "tier_num": 1,
@@ -553,8 +554,8 @@ class MultiTierAllocationManager:
                     "label": "Nasdaq",
                     "index": "VXN",
                     "gate_value": self._nasdaq_gate(self._last_vvix_band),
-                    "enter_gate_value": self.vxn_threshold,
-                    "exit_gate_value": self.vxn_exit_threshold,
+                    "enter_gate_value": enter_at,
+                    "exit_gate_value": exit_above,
                     "current_value": self._last_vxn,
                     "vvix_band": self._last_vvix_band,
                     "passes": self._last_vxn is not None and self._last_vxn <= self._nasdaq_gate(self._last_vvix_band),
@@ -609,6 +610,11 @@ class MultiTierAllocationManager:
                     "edge_low": self.vvix_edge_low,
                     "edge_high": self.vvix_edge_high,
                     "last_date": (daemon_state or {}).get("vvix_last_date"),
+                    "vxn_thresholds": {
+                        "calm": {"enter": self.vxn_calm_enter, "exit": self.vxn_calm_exit},
+                        "base": {"enter": self.vxn_threshold, "exit": self.vxn_exit_threshold},
+                        "stressed": {"enter": self.vxn_stressed_enter, "exit": self.vxn_stressed_exit},
+                    },
                 },
             }
 

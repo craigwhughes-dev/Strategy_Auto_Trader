@@ -108,6 +108,34 @@ class TestFromConfigVvixKeys:
         with pytest.raises(ValueError):
             MultiTierAllocationManager(vxn_calm_enter=26.0, vxn_calm_exit=25.0)
 
+
+class TestAppStatusDictBandAware:
+    """app_status_dict() must reflect the *active* confirmed band's enter/exit pair, not always
+    the base pair — regression guard for a bug where tier 1's enter_gate_value/exit_gate_value
+    were hardcoded to vxn_threshold/vxn_exit_threshold regardless of vvix_band."""
+
+    def test_tier1_enter_exit_follow_the_confirmed_band(self):
+        m = _mgr()
+        m.signal(date(2026, 1, 5), vxn=24.5, vix=None, vvix_band="calm", verbose=False)
+        tier1 = m.app_status_dict()["tier_allocation"]["tiers"][0]
+        assert (tier1["enter_gate_value"], tier1["exit_gate_value"]) == (25.0, 26.0)
+
+    def test_tier1_enter_exit_default_to_base_pair(self):
+        m = _mgr()
+        m.signal(date(2026, 1, 5), vxn=24.5, vix=None, verbose=False)
+        tier1 = m.app_status_dict()["tier_allocation"]["tiers"][0]
+        assert (tier1["enter_gate_value"], tier1["exit_gate_value"]) == (23.0, 24.0)
+
+    def test_vvix_block_exposes_all_three_bands(self):
+        m = _mgr()
+        m.signal(date(2026, 1, 5), vxn=24.5, vix=None, verbose=False)
+        thresholds = m.app_status_dict()["tier_allocation"]["vvix"]["vxn_thresholds"]
+        assert thresholds == {
+            "calm": {"enter": 25.0, "exit": 26.0},
+            "base": {"enter": 23.0, "exit": 24.0},
+            "stressed": {"enter": 21.0, "exit": 22.0},
+        }
+
     def test_inverted_stressed_pair_rejected(self):
         with pytest.raises(ValueError):
             MultiTierAllocationManager(vxn_stressed_enter=22.0, vxn_stressed_exit=21.0)
