@@ -1455,9 +1455,6 @@ def process_cycle(
                 n_confirm=allocation_mgr.vvix_confirm_days, logger=logger,
             )
             try:
-                # Determine active tier first (to know which prices we actually need).
-                # Quiet — the full tier breakdown is logged once, inside rebalance().
-                tier_signal = allocation_mgr.signal(today, vxn_current, vix_current, vvix_band=vvix_band, verbose=False)
                 required_tickers = ["EQGB.L", "VUSA", "ISF.L", "CSH2.L"]
 
                 # Skip price fetch if broker disconnected (avoids 4 ERROR lines per cycle).
@@ -1477,22 +1474,13 @@ def process_cycle(
                             logger.error(f"[{market_name}] Failed to fetch price for {ticker}: {_price_err}")
                             current_prices[ticker] = None
 
-                # Only require prices for active tier + current position (if switching)
-                required_prices = {tier_signal.target_asset}
-                if allocation_mgr.current_asset and allocation_mgr.current_asset != tier_signal.target_asset:
-                    required_prices.add(allocation_mgr.current_asset)
-                if allocation_mgr.min_hold_gbp > 0:
-                    # Disabled tiers are held at the minimum but must not block the enabled tiers' rebalance
-                    required_prices = set(allocation_mgr.enabled_assets())
+                # Disabled tiers are held at the minimum but must not block the enabled tiers' rebalance
+                required_prices = set(allocation_mgr.enabled_assets())
 
                 if all(current_prices.get(t) is not None for t in required_prices):
-                    if allocation_mgr.min_hold_gbp > 0:
-                        # Min-hold holds tier assets outside the ledger, so the broker is the source of truth
-                        alloc_cash = broker.get_available_cash()
-                        alloc_positions = broker.get_open_positions()
-                    else:
-                        alloc_cash = portfolio.available_cash
-                        alloc_positions = {t: p.get("quantity", 0) for t, p in portfolio.positions.items()}
+                    # Tier holdings live at the broker, not in the ledger, so the broker is the source of truth
+                    alloc_cash = allocation_mgr.spendable_cash(broker.get_available_cash())
+                    alloc_positions = broker.get_open_positions()
                     orders = allocation_mgr.rebalance(
                         today=today,
                         vxn=vxn_current,
@@ -1550,29 +1538,8 @@ def process_cycle(
                             fill_price=normalize_fill_price(order.ticker, fill.fill_price, quote_pence),
                             quantity=fill.quantity, timestamp=fill.timestamp,
                         )
-                        order_currency = "GBP" if order.ticker.endswith(".L") else "USD"
-                        # Min-hold tier positions live at the broker only; the ledger would double-count them
-                        if allocation_mgr.min_hold_gbp <= 0:
-                            if order.action == "BUY":
-                                portfolio.record_entry(
-                                    ticker=order.ticker,
-                                    fill=fill,
-                                    kelly_fraction=1.0,
-                                    stop_level=0.0,
-                                    target_level=0.0,
-                                    signal_price=current_prices.get(order.ticker) or 0.0,
-                                    market=market_name,
-                                    currency=order_currency,
-                                    stop_managed=False,
-                                )
-                            else:
-                                portfolio.record_exit(
-                                    ticker=order.ticker,
-                                    fill=fill,
-                                    signal_price=current_prices.get(order.ticker) or 0.0,
-                                    exit_type="strategy_exit",
-                                )
-                            portfolio.save()
+                        # Tier positions live at the broker only; the ledger would double-count them
+                        allocation_mgr.note_fill(order.action, fill.fill_price * fill.quantity)
                 else:
                     _missing = [t for t in required_prices if current_prices.get(t) is None]
                     logger.warning(f"[{market_name}] Allocation: missing required prices for {_missing} — skipping rebalance")
@@ -2569,6 +2536,34 @@ def process_manual_commands_wrapper(config: dict, portfolio: object, broker: obj
         logger.error(f"Error processing manual commands: {e}", exc_info=True)
 
 
+def _startup_tier_state(allocation_mgr, broker, logger: logging.Logger, currency: str, *, release: bool) -> None:
+    """Once per daemon start, after the broker is connected: adopt the held tier, then release cash.
+
+    Tier holdings live only at the broker, so the broker is the source of truth for both steps.
+    A failure in either step is logged and the daemon keeps going.
+    """
+    from ..allocation.allocation_manager import ASSET_TIERS
+    from ..broker.cash_pickup import release_uninvested_cash
+    from ..broker.symbols import sizing_price
+
+    prices = {}
+    for ticker in ASSET_TIERS:
+        try:
+            prices[ticker] = sizing_price(ticker, broker.get_last_price(ticker))
+        except Exception as e:
+            logger.error(f"Startup tier state: no price for {ticker}: {e}")
+    try:
+        allocation_mgr.adopt_held_tier(broker.get_open_positions(), prices, logger)
+    except Exception as e:
+        logger.error(f"Startup tier state: could not read held tier from broker: {e}")
+
+    if release:
+        try:
+            release_uninvested_cash(allocation_mgr, broker, logger, currency)
+        except Exception as e:
+            logger.error(f"Uninvested cash release failed (restart to retry): {e}")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main daemon loop."""
     import argparse
@@ -2747,16 +2742,8 @@ def main(argv: list[str] | None = None) -> int:
     currency = get_market_currency(primary_market, config)
     portfolio = PortfolioManager(capital_pot, state_path, currency=currency)
 
-    from ..allocation.allocation_manager import ASSET_TIERS, MultiTierAllocationManager
+    from ..allocation.allocation_manager import MultiTierAllocationManager
     allocation_mgr = MultiTierAllocationManager.from_config(config.get("tier_allocation"))
-    # current_asset is in-memory only — reseed it from the ledger so a restart
-    # doesn't forget which tier asset is actually held and attempt a spurious
-    # sell-phantom/rebuy-real rebalance against the wrong "current" asset.
-    held_tier_assets = [t for t in portfolio.positions if t in ASSET_TIERS]
-    if held_tier_assets:
-        if len(held_tier_assets) > 1:
-            logger.warning(f"Allocation: multiple tier assets held at startup {held_tier_assets}, using first")
-        allocation_mgr.current_asset = held_tier_assets[0]
     logger.info(f"Allocation manager initialized: tier_mode={args.tier_mode}, current_asset={allocation_mgr.current_asset}, "
                 f"thresholds: {allocation_mgr.thresholds_summary()}")
 
@@ -2774,6 +2761,7 @@ def main(argv: list[str] | None = None) -> int:
             logger.warning("Continuing anyway; will retry on first trade attempt")
 
     startup_reconciliation_done = False
+    startup_tier_state_done = False
     _recon_fail_count = 0
     _recon_first_fail_at = None
     _recon_unreachable_alerted = False
@@ -2818,6 +2806,12 @@ def main(argv: list[str] | None = None) -> int:
                 if not dry_run and (not startup_reconciliation_done or daemon_state.get("needs_reconciliation")):
                     if run_startup_reconciliation(daemon_state, portfolio, broker, logger):
                         startup_reconciliation_done = True
+                        if not startup_tier_state_done:
+                            startup_tier_state_done = True
+                            _startup_tier_state(
+                                allocation_mgr, broker, logger, currency,
+                                release=exec_cfg.get("pick_up_uninvested_cash", True),
+                            )
                         if _recon_fail_count > 0 and _recon_first_fail_at is not None:
                             elapsed = (datetime.now(timezone.utc) - _recon_first_fail_at).total_seconds()
                             logger.info(f"Broker reconnected after {elapsed:.0f}s ({_recon_fail_count} failed attempts)")

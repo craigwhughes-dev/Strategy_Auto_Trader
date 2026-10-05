@@ -50,15 +50,15 @@ _CONFIG_KEYS = _NUMBER_KEYS | _BOOL_KEYS
 
 TIER_ASSETS = {1: "EQGB.L", 2: "VUSA", 3: "ISF.L", 4: "CSH2.L"}
 ASSET_TIERS = {"EQGB.L": 1, "VUSA": 2, "ISF.L": 3, "CSH2.L": 4}
-# Smallest fractional trade the min-hold path places (2 dp, accepted by T212 for every mapped tier asset)
+# Smallest fractional trade the allocator places (2 dp, accepted by T212 for every mapped tier asset)
 MIN_TRADE_UNITS = 0.01
-# Share of allocatable cash the min-hold path leaves unspent, for ask-over-quote fills on market buys
+# Share of allocatable cash the allocator leaves unspent, for ask-over-quote fills on market buys
 MIN_HOLD_CASH_HEADROOM = 0.01
 
 
 @dataclass
 class AllocationOrder:
-    """Single buy/sell order for rebalancing. Fractional when `min_hold_gbp` is set (T212)."""
+    """Single buy/sell order for rebalancing. Fractional units (T212)."""
     ticker: str
     action: str  # "BUY" | "SELL"
     quantity: float
@@ -106,7 +106,7 @@ class MultiTierAllocationManager:
         vxn_calm_exit: float | None = None,
         vxn_stressed_enter: float | None = None,
         vxn_stressed_exit: float | None = None,
-        min_hold_gbp: float = 0.0,
+        min_hold_gbp: float = 10.0,
     ):
         """Initialize allocation manager.
 
@@ -137,11 +137,11 @@ class MultiTierAllocationManager:
                 has no effect unless these are explicitly configured.
             vxn_stressed_enter / vxn_stressed_exit: tier 1's pair while 'stressed' is confirmed —
                 narrower than the base pair. Same None-means-no-effect default as the calm pair.
-            min_hold_gbp: when > 0, every tier asset is held at this GBP value and the target takes the
-                rest (fractional units, see `_rebalance_min_hold`). 0 keeps the whole-share, all-in rule.
+            min_hold_gbp: every tier asset is held at this GBP value and the target takes the rest
+                (fractional units, see `_rebalance_tiers`). Must be > 0.
         """
-        if min_hold_gbp < 0:
-            raise ValueError(f"min_hold_gbp ({min_hold_gbp}) must be >= 0")
+        if min_hold_gbp <= 0:
+            raise ValueError(f"min_hold_gbp ({min_hold_gbp}) must be > 0")
         if vxn_exit_threshold is None:
             vxn_exit_threshold = vxn_threshold
         if vxn_exit_threshold < vxn_threshold:
@@ -185,6 +185,8 @@ class MultiTierAllocationManager:
         self.last_rebalance_date = None
         self._last_known_cash = None  # Track cash for detecting user deposits
         self._last_cash_check_time = None  # Timestamp of last cash baseline
+        # Min-hold only: broker cash the allocator may spend. None = all broker cash.
+        self.cash_budget: float | None = None
 
         # Timer-refreshed readers (not a once-a-day cache): latest completed hourly bar
         self._vix_feed = IndexFeed("VIX", index_refresh_seconds, index_max_outage_seconds)
@@ -395,94 +397,49 @@ class MultiTierAllocationManager:
         # across an unrelated price-fetch gap.
         signal = self.signal(today, vxn, vix, vvix_band=vvix_band, logger=log)
 
-        if self.min_hold_gbp > 0:
-            return self._rebalance_min_hold(today, signal, current_price, allocatable_cash, positions, log)
-
-        # Generate orders if: rebalancing tiers OR bootstrapping (no positions + cash available)
-        has_any_position = any(positions.values())
-        needs_action = signal.needs_rebalance or (not has_any_position and allocatable_cash > 0)
-
-        if not needs_action:
-            log.debug(f"[{today}] Allocation: {signal.reason} (no action)")
-            return []
-
-        orders = []
-
-        # Sell current asset if we hold any
-        current_qty = positions.get(signal.current_asset, 0)
-        if current_qty > 0:
-            sell_price = current_price.get(signal.current_asset, 0)
-            if sell_price > 0:
-                orders.append(
-                    AllocationOrder(
-                        ticker=signal.current_asset,
-                        action="SELL",
-                        quantity=current_qty,
-                        limit_price=None,
-                        reason=f"Rebalance: exit {signal.current_asset} (was tier {ASSET_TIERS.get(signal.current_asset, 0)})",
-                    )
-                )
-                proceeds = current_qty * sell_price * (1 - self.commission_pct / 100)
-                allocatable_cash += proceeds
-                log.info(
-                    f"[{today}] Allocation SELL {current_qty} {signal.current_asset} @ {sell_price:.2f} "
-                    f"(proceeds ~{proceeds:.2f}, comm {self.commission_pct}%)"
-                )
-
-        # Buy target asset with allocatable cash
-        target_price = current_price.get(signal.target_asset, 0)
-        _log.info(f"[{today}]   target={signal.target_asset}, price={target_price:.2f}")
-
-        if target_price > 0:
-            # Buy as many whole shares as we can afford (after commission)
-            cost_per_share = target_price * (1 + self.commission_pct / 100)
-            buy_qty = int(allocatable_cash / cost_per_share)
-
-            if buy_qty > 0:
-                orders.append(
-                    AllocationOrder(
-                        ticker=signal.target_asset,
-                        action="BUY",
-                        quantity=buy_qty,
-                        limit_price=None,
-                        reason=f"Rebalance: enter {signal.target_asset} (tier {signal.tier}), VIX={'n/a' if vix is None else f'{vix:.1f}'}",
-                    )
-                )
-                cost = buy_qty * target_price * (1 + self.commission_pct / 100)
-                log.info(
-                    f"[{today}]   BUY {buy_qty} shares @ {target_price:.2f} "
-                    f"(total cost ~{cost:.2f}, incl {self.commission_pct}% commission)"
-                )
-            else:
-                log.warning(
-                    f"[{today}]   Insufficient cash: have {allocatable_cash:.2f}, "
-                    f"need ≥{cost_per_share:.2f}/share to buy even 1"
-                )
-        else:
-            log.error(f"[{today}]   Target price invalid for {signal.target_asset}: {target_price}")
-
-        # Update internal state
-        if orders:
-            self.current_asset = signal.target_asset
-            self.current_price = target_price
-            self.last_rebalance_date = today
-            action_type = "bootstrap" if not has_any_position else "rebalance"
-            log.info(f"[{today}] Allocation {action_type}: {signal.reason}")
-            # Update action for app_status_dict
-            if len(orders) > 1:  # SELL + BUY
-                self._last_action = "REBALANCE"
-            elif orders[0].action == "SELL":
-                self._last_action = "SELL"
-            elif orders[0].action == "BUY":
-                self._last_action = "BUY"
-
-        return orders
+        return self._rebalance_tiers(today, signal, current_price, allocatable_cash, positions, log)
 
     def enabled_assets(self) -> list[str]:
         """Tier assets the strategy trades. The S&P and FTSE tiers are off unless lower_tiers_enabled."""
         return [a for a, tier in ASSET_TIERS.items() if self.lower_tiers_enabled or tier in (1, 4)]
 
-    def _rebalance_min_hold(
+    def adopt_held_tier(self, positions: dict[str, float], prices: dict[str, float | None], log=None) -> None:
+        """Set current_asset to the tier holding the most value, as the broker reports it.
+
+        Min-hold keeps every enabled tier at the minimum, so several tiers are held at once. The
+        target holds the rest, so it is the largest. If a held tier has no price, the value
+        cannot be compared, so current_asset is left unchanged.
+        """
+        log = log or _log
+        held = {a: float(positions.get(a) or 0) for a in ASSET_TIERS if float(positions.get(a) or 0) > 0}
+        if not held:
+            return
+        unpriced = [a for a in held if not prices.get(a) or prices[a] <= 0]
+        if unpriced:
+            log.warning(f"Allocation: held tier(s) {unpriced} unpriced at startup — current_asset left at {self.current_asset}")
+            return
+        values = {a: units * prices[a] for a, units in held.items()}
+        self.current_asset = max(values, key=values.get)
+        log.info(f"Allocation: adopted held tier {self.current_asset} (value £{values[self.current_asset]:.2f}) from broker")
+
+    def release_cash(self, amount: float) -> None:
+        """Set the cash the min-hold allocator may spend, until the next release (daily start)."""
+        self.cash_budget = max(0.0, amount)
+
+    def spendable_cash(self, broker_cash: float) -> float:
+        """Broker cash capped at the released budget. Cash that landed after the release waits."""
+        if self.cash_budget is None:
+            return broker_cash
+        return min(broker_cash, self.cash_budget)
+
+    def note_fill(self, action: str, value: float) -> None:
+        """Track a min-hold fill against the budget: buys spend it, sells replenish it."""
+        if self.cash_budget is None:
+            return
+        net = value * (1 - self.commission_pct / 100)
+        self.cash_budget = max(0.0, self.cash_budget + (net if action == "SELL" else -value * (1 + self.commission_pct / 100)))
+
+    def _rebalance_tiers(
         self,
         today: date,
         signal: AllocationSignal,
@@ -491,7 +448,7 @@ class MultiTierAllocationManager:
         positions: dict[str, float],
         log,
     ) -> list[AllocationOrder]:
-        """Minimum-hold rebalance (T212 path): every tier asset is held at `min_hold_gbp`, the target takes the rest.
+        """Rebalance tier assets: every tier asset is held at `min_hold_gbp`, the target takes the rest.
 
         On a tier change the other assets are trimmed or topped to the minimum. Otherwise they keep any
         value above it, and only the shortfall below it is bought. Either way the target takes what the

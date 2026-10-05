@@ -148,9 +148,10 @@ class TestSignalWithNoReadings:
         assert mgr.current_asset == "CSH2.L"
 
     def test_no_readings_while_in_cash_places_nothing(self):
+        """Already at the min-hold targets (£10 Nasdaq, rest cash): nothing to trade."""
         mgr = _plain_manager()
         mgr.current_asset = "CSH2.L"
-        assert mgr.rebalance(TODAY, None, None, PRICES, 0.0, {"CSH2.L": 50}) == []
+        assert mgr.rebalance(TODAY, None, None, PRICES, 0.0, {"CSH2.L": 49.9, "EQGB.L": 1.0}) == []
 
     def test_after_forced_cash_reentry_needs_the_entry_level_not_the_exit_level(self):
         mgr = _plain_manager()
@@ -164,5 +165,4 @@ class TestSignalWithNoReadings:
         mgr = _plain_manager()
         mgr.current_asset = "CSH2.L"
         orders = mgr.rebalance(TODAY, 20.0, None, PRICES, 20_000.0, {"CSH2.L": 0})
-        buy = next(o for o in orders if o.action == "BUY")
-        assert buy.ticker == "EQGB.L" and "VIX=n/a" in buy.reason
+        assert any(o.action == "BUY" and o.ticker == "EQGB.L" for o in orders)

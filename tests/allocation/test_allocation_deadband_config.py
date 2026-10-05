@@ -224,12 +224,16 @@ class TestCommission:
         assert MultiTierAllocationManager.from_config(section).commission_pct == 0.05
 
     def test_rebalance_sizing_uses_the_configured_commission(self):
-        """At 0.05% a GBP 20,000 rotation buys ~1,999 shares at 10.00; at the old 0.1% it left ~GBP 20 more idle."""
+        """The target's buy is sized on cost incl. commission, so at 0.05% it spends more of the budget than at 0.1%."""
         mgr = MultiTierAllocationManager(vxn_threshold=23.0, vxn_exit_threshold=24.0, lower_tiers_enabled=False)
         mgr.current_asset = "CSH2.L"
         orders = mgr.rebalance(TODAY, 20.0, 30.0, {"EQGB.L": 10.0, "CSH2.L": 100.0}, 20_000.0, {"CSH2.L": 0})
-        buy = next(o for o in orders if o.action == "BUY")
-        assert buy.ticker == "EQGB.L"
-        assert buy.quantity == int(20_000.0 / (10.0 * 1.0005))
-        old = int(20_000.0 / (10.0 * 1.001))
-        assert buy.quantity > old
+        buy = next(o for o in orders if o.action == "BUY" and o.ticker == "EQGB.L")
+        spent = buy.quantity * 10.0 * 1.0005
+        assert spent <= 20_000.0 * 0.99
+        assert spent > 20_000.0 * 0.99 - 20.0
+        cheaper_budget = MultiTierAllocationManager(vxn_threshold=23.0, vxn_exit_threshold=24.0, lower_tiers_enabled=False, commission_pct=0.1)
+        cheaper_budget.current_asset = "CSH2.L"
+        dearer = next(o for o in cheaper_budget.rebalance(TODAY, 20.0, 30.0, {"EQGB.L": 10.0, "CSH2.L": 100.0}, 20_000.0, {"CSH2.L": 0})
+                      if o.action == "BUY" and o.ticker == "EQGB.L")
+        assert dearer.quantity < buy.quantity

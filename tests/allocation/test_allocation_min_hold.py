@@ -137,5 +137,9 @@ class TestConfig:
         m = MultiTierAllocationManager.from_config({"min_hold_gbp": 10, "lower_tiers_enabled": False})
         assert m.min_hold_gbp == 10.0
 
-    def test_default_is_zero_so_whole_share_rule_is_unchanged(self):
-        assert MultiTierAllocationManager().min_hold_gbp == 0.0
+    def test_default_is_10(self):
+        assert MultiTierAllocationManager().min_hold_gbp == 10.0
+
+    def test_zero_minimum_rejected(self):
+        with pytest.raises(ValueError, match="min_hold_gbp"):
+            MultiTierAllocationManager(min_hold_gbp=0.0)
