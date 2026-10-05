@@ -2542,12 +2542,11 @@ def _startup_tier_state(allocation_mgr, broker, logger: logging.Logger, currency
     Tier holdings live only at the broker, so the broker is the source of truth for both steps.
     A failure in either step is logged and the daemon keeps going.
     """
-    from ..allocation.allocation_manager import ASSET_TIERS
     from ..broker.cash_pickup import release_uninvested_cash
     from ..broker.symbols import sizing_price
 
     prices = {}
-    for ticker in ASSET_TIERS:
+    for ticker in allocation_mgr.enabled_assets():
         try:
             prices[ticker] = sizing_price(ticker, broker.get_last_price(ticker))
         except Exception as e:

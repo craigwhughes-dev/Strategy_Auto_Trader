@@ -404,14 +404,15 @@ class MultiTierAllocationManager:
         return [a for a, tier in ASSET_TIERS.items() if self.lower_tiers_enabled or tier in (1, 4)]
 
     def adopt_held_tier(self, positions: dict[str, float], prices: dict[str, float | None], log=None) -> None:
-        """Set current_asset to the tier holding the most value, as the broker reports it.
+        """Set current_asset to the enabled tier holding the most value, as the broker reports it.
 
         Min-hold keeps every enabled tier at the minimum, so several tiers are held at once. The
-        target holds the rest, so it is the largest. If a held tier has no price, the value
-        cannot be compared, so current_asset is left unchanged.
+        target holds the rest, so it is the largest. Disabled tiers are ignored entirely. If an
+        enabled held tier has no price, the value cannot be compared, so current_asset is left unchanged.
         """
         log = log or _log
-        held = {a: float(positions.get(a) or 0) for a in ASSET_TIERS if float(positions.get(a) or 0) > 0}
+        enabled = self.enabled_assets()
+        held = {a: float(positions.get(a) or 0) for a in enabled if float(positions.get(a) or 0) > 0}
         if not held:
             return
         unpriced = [a for a in held if not prices.get(a) or prices[a] <= 0]

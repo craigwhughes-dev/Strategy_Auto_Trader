@@ -36,7 +36,20 @@ class TestAdoptHeldTier:
         mgr.adopt_held_tier({"EQGB.L": 1_500.0, "CSH2.L": 0.1}, {"EQGB.L": None, "CSH2.L": 100.0}, LOG)
         assert mgr.current_asset == before
 
+    def test_unpriced_disabled_tier_does_not_block_adoption(self):
+        mgr = _mgr()
+        # VUSA (tier 2) is disabled with no price; it must not stop Nasdaq being adopted
+        mgr.adopt_held_tier({"EQGB.L": 1_500.0, "CSH2.L": 0.1, "VUSA": 0.1}, {"EQGB.L": 10.0, "CSH2.L": 100.0}, LOG)
+        assert mgr.current_asset == "EQGB.L"
+
+    def test_disabled_tier_held_value_is_ignored(self):
+        mgr = _mgr()
+        # VUSA (disabled) holds more value than the enabled tiers; it must not be adopted
+        mgr.adopt_held_tier({"EQGB.L": 2.0, "CSH2.L": 0.1, "VUSA": 500.0}, PRICES, LOG)
+        assert mgr.current_asset == "EQGB.L"
+
     def test_ignores_non_tier_positions(self):
         mgr = _mgr()
+        mgr.current_asset = "CSH2.L"
         mgr.adopt_held_tier({"AAPL": 500.0, "ISF.L": 2.0}, PRICES, LOG)
-        assert mgr.current_asset == "ISF.L"
+        assert mgr.current_asset == "CSH2.L"
