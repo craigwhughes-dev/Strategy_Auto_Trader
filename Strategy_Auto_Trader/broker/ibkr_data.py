@@ -99,6 +99,21 @@ def _save_cache(ticker: str, df: pd.DataFrame, cache_dir: Path | None = None) ->
     atomic_write_csv(_cache_path(ticker, cache_dir), df)
 
 
+def _merge_fresh(cached: pd.DataFrame | None, new_df: pd.DataFrame) -> pd.DataFrame | None:
+    """Cache plus new bars. A new bar at an existing timestamp replaces the cached one, so a
+    last bar cached while still forming is refreshed on the next fetch."""
+    if cached is None:
+        return new_df
+    if new_df.empty:
+        return cached
+    return pd.concat([cached[~cached.index.isin(new_df.index)], new_df]).sort_index()
+
+
+def _changed(cached: pd.DataFrame | None, merged: pd.DataFrame) -> bool:
+    """Skip the atomic rewrite when the merge changed nothing."""
+    return cached is None or not merged.equals(cached)
+
+
 def _resample_30min_aligned(df: pd.DataFrame | None) -> pd.DataFrame | None:
     """Resample raw IBKR bars to :30-aligned 60-min windows matching yfinance convention.
 
@@ -208,7 +223,9 @@ class IBKRDataClient:
         """Page backward from now through reqHistoricalData.
 
         stop_at (incremental gap-fill): page only until a page's oldest bar
-        reaches stop_at, then return just the bars strictly newer than it —
+        reaches stop_at, then return the bars from stop_at onward — stop_at itself
+        is included so the cached last bar is re-fetched (it may have been cached
+        while still forming) and _merge_fresh replaces it —
         a multi-day gap (e.g. daemon downtime) is simply more pages through
         this same loop, no special-casing.
 
@@ -256,7 +273,7 @@ class IBKRDataClient:
             "close": "Close", "volume": "Volume",
         })[["Open", "High", "Low", "Close", "Volume"]]
         if stop_at is not None:
-            out = out[out.index > stop_at]
+            out = out[out.index >= stop_at]
         return out
 
     def _qualify(self, ticker: str, contract) -> bool:
@@ -330,15 +347,11 @@ class IBKRDataClient:
             if owns_connection:
                 self.disconnect()
 
-        if cached is not None:
-            merged = pd.concat([cached, new_df]) if not new_df.empty else cached
-            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-        else:
-            merged = new_df
+        merged = _merge_fresh(cached, new_df)
 
         if merged.empty:
             return _resample_30min_aligned(_truncate_to_period(cached, period))
-        if use_cache and not new_df.empty:
+        if use_cache and _changed(cached, merged):
             _save_cache(ticker, merged)
         return _resample_30min_aligned(_truncate_to_period(merged, period))
 
@@ -381,15 +394,11 @@ class IBKRDataClient:
             if owns_connection:
                 self.disconnect()
 
-        if cached is not None:
-            merged = pd.concat([cached, new_df]) if not new_df.empty else cached
-            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-        else:
-            merged = new_df
+        merged = _merge_fresh(cached, new_df)
 
         if merged.empty:
             return _truncate_to_period(cached, period)
-        if use_cache and not new_df.empty:
+        if use_cache and _changed(cached, merged):
             _save_cache(ticker, merged, CACHE_DIR_DAILY)
         return _truncate_to_period(merged, period)
 
@@ -432,15 +441,11 @@ class IBKRDataClient:
             if owns_connection:
                 self.disconnect()
 
-        if cached is not None:
-            merged = pd.concat([cached, new_df]) if not new_df.empty else cached
-            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-        else:
-            merged = new_df
+        merged = _merge_fresh(cached, new_df)
 
         if merged.empty:
             return cached
-        if not new_df.empty:
+        if _changed(cached, merged):
             _save_cache(cache_key, merged, CACHE_DIR_DAILY)
         return merged
 
@@ -485,15 +490,11 @@ class IBKRDataClient:
             if owns_connection:
                 self.disconnect()
 
-        if cached is not None:
-            merged = pd.concat([cached, new_df]) if not new_df.empty else cached
-            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-        else:
-            merged = new_df
+        merged = _merge_fresh(cached, new_df)
 
         if merged.empty:
             return shape(cached) if cached is not None else None
-        if not new_df.empty:
+        if _changed(cached, merged):
             _save_cache(cache_key, merged, CACHE_DIR)
         return shape(merged)
 

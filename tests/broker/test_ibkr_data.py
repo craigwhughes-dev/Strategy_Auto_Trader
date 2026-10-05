@@ -271,14 +271,14 @@ class TestFetchHourly:
         monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
         idx = pd.date_range("2026-01-01", periods=5, freq="h", tz="UTC")
         cached = pd.DataFrame(
-            {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 100}, index=idx)
+            {"Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.5, "Volume": 1000}, index=idx)
         ibkr_data._save_cache("AAPL", cached)
         mtime_before = ibkr_data._cache_path("AAPL").stat().st_mtime_ns
 
         client = IBKRDataClient()
         client._ib = MagicMock()
-        # Page's only bar is exactly the cached last bar — filtered out by
-        # the stop_at > comparison, so nothing new survives.
+        # Page's only bar is the cached last bar with identical values: re-fetched,
+        # merged, and found unchanged, so the cache is not rewritten.
         client._ib.reqHistoricalData.side_effect = [_make_page(idx[-1].to_pydatetime(), 1)]
 
         out = client.fetch_hourly("AAPL", period="730d", use_cache=True)
@@ -618,3 +618,40 @@ class TestFetchIndexHourlyAlignment:
         relabelled = client.fetch_index_hourly("VIX", "CBOE", historical_only=True)
         assert latest_completed_close(raw, now)[0] == 17.05          # the 13:30 bar, ended 14:00
         assert latest_completed_close(relabelled, now)[0] == 17.15   # would wrongly return the forming bar
+
+
+class TestLastBarRefresh:
+    def test_cached_last_bar_is_replaced_by_refetched_value(self, monkeypatch, tmp_path):
+        """A last bar cached while still forming must be replaced by the fresh value, not kept."""
+        pytest.importorskip("ib_async")
+        from unittest.mock import MagicMock
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR", tmp_path)
+        idx = pd.date_range("2026-01-01", periods=5, freq="h", tz="UTC")
+        cached = pd.DataFrame(
+            {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 100}, index=idx)
+        ibkr_data._save_cache("AAPL", cached)
+
+        client = IBKRDataClient()
+        client._ib = MagicMock()
+        client._ib.reqHistoricalData.side_effect = [_make_page(idx[-1].to_pydatetime(), 1)]
+
+        client.fetch_hourly("AAPL", period="730d", use_cache=True)
+
+        stored = ibkr_data._load_cache("AAPL")
+        assert len(stored) == 5
+        assert stored["Close"].iloc[-1] == pytest.approx(100.5)
+        assert stored["Close"].iloc[:-1].tolist() == [1.0, 1.0, 1.0, 1.0]
+
+    def test_merge_fresh_keeps_cache_when_no_new_bars(self):
+        idx = pd.date_range("2026-01-01", periods=3, freq="h", tz="UTC")
+        cached = pd.DataFrame({"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 1}, index=idx)
+        merged = ibkr_data._merge_fresh(cached, pd.DataFrame())
+        assert merged is cached
+        assert not ibkr_data._changed(cached, merged)
+
+    def test_merge_fresh_without_cache_returns_new_bars(self):
+        idx = pd.date_range("2026-01-01", periods=2, freq="h", tz="UTC")
+        new = pd.DataFrame({"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 1}, index=idx)
+        merged = ibkr_data._merge_fresh(None, new)
+        assert merged is new
+        assert ibkr_data._changed(None, merged)
