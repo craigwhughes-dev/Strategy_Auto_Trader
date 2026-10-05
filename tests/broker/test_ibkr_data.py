@@ -655,3 +655,61 @@ class TestLastBarRefresh:
         merged = ibkr_data._merge_fresh(None, new)
         assert merged is new
         assert ibkr_data._changed(None, merged)
+
+
+class TestIndexCacheOwner:
+    """The shared INDEX_* cache has one writer: live, or paper only while live is down."""
+
+    LIVE = {"host": "127.0.0.1", "port": 4001, "client_id": 2}
+    PAPER = {"host": "127.0.0.1", "port": 4002, "client_id": 1}
+
+    def test_live_profile_uses_live_gateway_and_own_client_id(self):
+        client = ibkr_data.index_data_client(broker=self.LIVE, live_listening=lambda: True)
+        assert (client._port, client._client_id) == (4001, 2 + ibkr_data.INDEX_CLIENT_ID_OFFSET)
+
+    def test_live_profile_writes_even_when_live_listening(self):
+        client = ibkr_data.index_data_client(broker=self.LIVE, live_listening=lambda: True)
+        assert client._index_cache_writer() is True
+
+    def test_paper_profile_yields_to_live_gateway(self):
+        client = ibkr_data.index_data_client(broker=self.PAPER, live_listening=lambda: True)
+        assert client._port == 4002
+        assert client._index_cache_writer() is False
+
+    def test_paper_profile_writes_when_live_gateway_down(self):
+        client = ibkr_data.index_data_client(broker=self.PAPER, live_listening=lambda: False)
+        assert client._index_cache_writer() is True
+
+    def test_paper_writer_decision_is_rechecked_each_call(self):
+        state = {"up": False}
+        client = ibkr_data.index_data_client(broker=self.PAPER, live_listening=lambda: state["up"])
+        assert client._index_cache_writer() is True
+        state["up"] = True
+        assert client._index_cache_writer() is False
+
+    def test_fetch_daily_does_not_write_index_cache_when_not_owner(self, monkeypatch, tmp_path):
+        pytest.importorskip("ib_async")
+        from unittest.mock import MagicMock
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR_DAILY", tmp_path)
+        client = IBKRDataClient(index_cache_writer=lambda: False)
+        client._ib = MagicMock()
+        start = datetime.now(timezone.utc) - timedelta(days=3)
+        client._ib.reqHistoricalData.side_effect = [_make_page(start, 3), []]
+
+        out = client.fetch_index_daily("VVIX", "CBOE", "USD")
+
+        assert out is not None and not out.empty
+        assert not ibkr_data._cache_path("INDEX_VVIX", tmp_path).exists()
+
+    def test_fetch_daily_writes_index_cache_when_owner(self, monkeypatch, tmp_path):
+        pytest.importorskip("ib_async")
+        from unittest.mock import MagicMock
+        monkeypatch.setattr(ibkr_data, "CACHE_DIR_DAILY", tmp_path)
+        client = IBKRDataClient(index_cache_writer=lambda: True)
+        client._ib = MagicMock()
+        start = datetime.now(timezone.utc) - timedelta(days=3)
+        client._ib.reqHistoricalData.side_effect = [_make_page(start, 3), []]
+
+        client.fetch_index_daily("VVIX", "CBOE", "USD")
+
+        assert ibkr_data._cache_path("INDEX_VVIX", tmp_path).exists()

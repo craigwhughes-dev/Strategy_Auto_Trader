@@ -247,7 +247,7 @@ class TestRawIndexHourly:
         frame = pd.DataFrame({"Close": [16.0]}, index=pd.DatetimeIndex(["2026-09-16 14:00"], tz="UTC"))
         client = mock.Mock()
         client.fetch_index_hourly.return_value = frame
-        monkeypatch.setattr(ibkr_data, "IBKRDataClient", lambda client_id: client)
+        monkeypatch.setattr(ibkr_data, "index_data_client", lambda: client)
         assert getattr(sentiment, func)() is frame
         client.fetch_index_hourly.assert_called_once_with(symbol, "CBOE", "USD", historical_only=False, aligned=aligned)
 
@@ -256,7 +256,7 @@ class TestRawIndexHourly:
         from Strategy_Auto_Trader.quant_hmm import sentiment
         client = mock.Mock()
         client.fetch_index_hourly.return_value = None
-        monkeypatch.setattr(ibkr_data, "IBKRDataClient", lambda client_id: client)
+        monkeypatch.setattr(ibkr_data, "index_data_client", lambda: client)
         assert sentiment.fetch_vix_hourly_raw() is None
         client.fetch_index_hourly.side_effect = ConnectionError("gateway down")
         assert sentiment.fetch_vxn_hourly_raw() is None

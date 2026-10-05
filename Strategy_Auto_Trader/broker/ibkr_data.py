@@ -25,7 +25,10 @@ covered or a page returns no further/older bars.
 
 from __future__ import annotations
 
+import json
 import logging
+import socket
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -164,11 +167,13 @@ class IBKRDataClient:
         port: int = 4002,
         client_id: int = 2,
         connect_timeout: float = 30.0,
+        index_cache_writer: Callable[[], bool] = lambda: True,
     ) -> None:
         self._host = host
         self._port = port
         self._client_id = client_id
         self._connect_timeout = connect_timeout
+        self._index_cache_writer = index_cache_writer
         self._ib = None
 
     def connect(self) -> bool:
@@ -445,7 +450,7 @@ class IBKRDataClient:
 
         if merged.empty:
             return cached
-        if _changed(cached, merged):
+        if self._index_cache_writer() and _changed(cached, merged):
             _save_cache(cache_key, merged, CACHE_DIR_DAILY)
         return merged
 
@@ -494,7 +499,7 @@ class IBKRDataClient:
 
         if merged.empty:
             return shape(cached) if cached is not None else None
-        if _changed(cached, merged):
+        if self._index_cache_writer() and _changed(cached, merged):
             _save_cache(cache_key, merged, CACHE_DIR)
         return shape(merged)
 
@@ -579,3 +584,41 @@ def reconcile_recent_bars(
         _save_cache(ticker, updated)
 
     return {"ticker": ticker, "checked": len(common), "corrected": len(diffs), "diffs": diffs}
+
+
+LIVE_GATEWAY_PORT = 4001
+# Index bars run over the broker's gateway, so they take an id clear of the broker's client id.
+INDEX_CLIENT_ID_OFFSET = 100
+
+
+def live_gateway_listening(host: str = "127.0.0.1", port: int = LIVE_GATEWAY_PORT, timeout: float = 1.0) -> bool:
+    with socket.socket() as sock:
+        sock.settimeout(timeout)
+        return sock.connect_ex((host, port)) == 0
+
+
+def _active_broker_config() -> dict:
+    from ..core.profiles import resolve_profile
+    with resolve_profile().config_path.open(encoding="utf-8") as fh:
+        return json.load(fh).get("broker", {})
+
+
+def index_data_client(
+    broker: dict | None = None,
+    live_listening: Callable[[], bool] = live_gateway_listening,
+) -> IBKRDataClient:
+    """Index-bar client on the active profile's own gateway.
+
+    The shared INDEX_* cache has one writer: the live gateway. Any other profile writes it only
+    while the live gateway is down, so paper bars cannot overwrite live ones.
+    """
+    if broker is None:
+        broker = _active_broker_config()
+    port = int(broker.get("port", 4002))
+    writes_live = port == LIVE_GATEWAY_PORT
+    return IBKRDataClient(
+        host=broker.get("host", "127.0.0.1"),
+        port=port,
+        client_id=int(broker.get("client_id", 1)) + INDEX_CLIENT_ID_OFFSET,
+        index_cache_writer=lambda: writes_live or not live_listening(),
+    )

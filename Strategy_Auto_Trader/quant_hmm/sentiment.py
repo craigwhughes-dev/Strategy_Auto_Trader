@@ -137,8 +137,8 @@ def vix_regime() -> dict:
     }
 
     try:
-        from ..broker.ibkr_data import IBKRDataClient
-        vix_df = IBKRDataClient(client_id=2).fetch_index_daily("VIX", "CBOE", "USD")
+        from ..broker.ibkr_data import index_data_client
+        vix_df = index_data_client().fetch_index_daily("VIX", "CBOE", "USD")
         if vix_df is None or vix_df.empty:
             return result
 
@@ -177,8 +177,8 @@ def vix_regime() -> dict:
 
 def _fetch_index_hourly(symbol: str, aligned: bool) -> pd.DataFrame | None:
     try:
-        from ..broker.ibkr_data import IBKRDataClient
-        df = IBKRDataClient(client_id=2).fetch_index_hourly(symbol, "CBOE", "USD", historical_only=False, aligned=aligned)
+        from ..broker.ibkr_data import index_data_client
+        df = index_data_client().fetch_index_hourly(symbol, "CBOE", "USD", historical_only=False, aligned=aligned)
         if df is None or df.empty:
             return None
         return df
@@ -218,8 +218,8 @@ def fetch_vvix_daily() -> pd.DataFrame | None:
     real values) — contrary to research/index_history.py's untested assumption that this account has
     no VVIX index-data subscription; that assumption was wrong for VVIX specifically."""
     try:
-        from ..broker.ibkr_data import IBKRDataClient
-        df = IBKRDataClient(client_id=2).fetch_index_daily("VVIX", "CBOE", "USD")
+        from ..broker.ibkr_data import index_data_client
+        df = index_data_client().fetch_index_daily("VVIX", "CBOE", "USD")
         if df is None or df.empty:
             return None
         return df

@@ -89,13 +89,13 @@ def fetch_daily_ibkr(ticker: str, period: str = "max",
                                         historical_only=historical_only)
 
 
-def fetch_vix_ibkr(client_id: int = 2, historical_only: bool = False) -> pd.DataFrame | None:
+def fetch_vix_ibkr(historical_only: bool = False) -> pd.DataFrame | None:
     """Fetch VIX daily OHLCV from IBKR (Index VIX/CBOE/USD), incremental cache.
 
     historical_only=True skips the live gap-fill — use in live_sim backtests
     to avoid competing with the daemon for IBKR's pacing limit."""
-    from ..broker.ibkr_data import IBKRDataClient
-    return IBKRDataClient(client_id=client_id).fetch_index_daily(
+    from ..broker.ibkr_data import index_data_client
+    return index_data_client().fetch_index_daily(
         "VIX", "CBOE", "USD", historical_only=historical_only
     )
 
