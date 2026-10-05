@@ -30,7 +30,40 @@ GATEWAY_MSGS = [
 @pytest.mark.parametrize("msg", GATEWAY_MSGS)
 @pytest.mark.parametrize("level", [logging.WARNING, logging.ERROR, logging.CRITICAL])
 def test_gateway_records_dropped_inside_window(msg, level):
-    assert _filter_at(2).filter(_record(level, msg)) is False
+    f = _filter_at(2)
+    assert f.filter(_record(level, msg)) is True  # first of the night: transition line
+    assert f.filter(_record(level, msg)) is False  # per-retry repeats dropped
+
+
+def test_first_gateway_record_becomes_info_transition_line():
+    f = _filter_at(2, 15)
+    rec = _record(logging.WARNING, GATEWAY_MSGS[1])
+    assert f.filter(rec) is True
+    assert rec.levelno == logging.INFO
+    assert rec.getMessage().startswith("Gateway connectivity failing")
+    assert "First seen 02:15" in rec.getMessage()
+    assert GATEWAY_MSGS[1] in rec.getMessage()
+
+
+def test_transition_line_announced_once_per_night():
+    clock = {"now": datetime(2026, 9, 21, 2, 0)}
+    f = _OvernightGatewayFilter(now_fn=lambda: clock["now"])
+    assert f.filter(_record(logging.WARNING, GATEWAY_MSGS[0])) is True
+    clock["now"] = datetime(2026, 9, 22, 2, 0)
+    rec = _record(logging.WARNING, GATEWAY_MSGS[0])
+    assert f.filter(rec) is True
+    assert rec.levelno == logging.INFO
+
+
+def test_shared_filter_across_handlers_announces_once():
+    """One filter instance is installed on every handler; the same record
+    reaches each, so the second handler must see the already-downgraded line."""
+    f = _filter_at(2)
+    rec = _record(logging.WARNING, GATEWAY_MSGS[0])
+    assert f.filter(rec) is True
+    assert f.filter(rec) is True  # second handler, same record: passes as INFO
+    assert rec.levelno == logging.INFO
+    assert f.filter(_record(logging.WARNING, GATEWAY_MSGS[0])) is False
 
 
 @pytest.mark.parametrize("hour,minute,dropped", [
@@ -41,7 +74,9 @@ def test_gateway_records_dropped_inside_window(msg, level):
     (12, 0, False),
 ])
 def test_window_boundaries(hour, minute, dropped):
-    keep = _filter_at(hour, minute).filter(_record(logging.ERROR, GATEWAY_MSGS[0]))
+    f = _filter_at(hour, minute)
+    f.filter(_record(logging.ERROR, GATEWAY_MSGS[0]))  # consume the transition slot
+    keep = f.filter(_record(logging.ERROR, GATEWAY_MSGS[0]))
     assert keep is (not dropped)
 
 

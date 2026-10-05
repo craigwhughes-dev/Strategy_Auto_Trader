@@ -25,7 +25,7 @@ if (-not (Test-Path $LogDir)) {
 $cutoff = (Get-Date).AddDays(-$Days)
 $pattern = 'ERROR|WARN|WARNING|Traceback|Exception'
 
-$files = Get-ChildItem -Path $LogDir -Filter *.log -File |
+$files = Get-ChildItem -Path $LogDir -Filter *.log -File -Recurse |
     Where-Object { $_.LastWriteTime -ge $cutoff }
 
 if (-not $files) {
@@ -33,10 +33,15 @@ if (-not $files) {
     exit 0
 }
 
+# Digits are masked so one recurring message (retry counters, timestamps,
+# port numbers) collapses to a single signature.
 $results = foreach ($file in $files) {
+    $relPath = $file.FullName.Substring((Resolve-Path $LogDir).Path.Length + 1)
     Select-String -Path $file.FullName -Pattern $pattern -CaseSensitive:$false |
         Where-Object { $_.Line -notmatch 'NativeCommandError|FullyQualifiedErrorId\s*:\s*NativeCommandError|CategoryInfo.*NativeCommandError' } |
-        Select-Object @{n='File';e={$file.Name}}, LineNumber, @{n='Text';e={$_.Line.Trim()}}
+        Select-Object @{n='File';e={$relPath}}, LineNumber,
+            @{n='Text';e={$_.Line.Trim()}},
+            @{n='Signature';e={ ($_.Line.Trim() -replace '\d+(\.\d+)?', '#') }}
 }
 
 if (-not $results) {
@@ -44,5 +49,16 @@ if (-not $results) {
     exit 0
 }
 
-$results | Format-Table -AutoSize -Wrap
-Write-Host "`n$($results.Count) match(es) across $($files | Group-Object { $_.Name } | Measure-Object).Count file(s)."
+$summary = $results | Group-Object File, Signature | ForEach-Object {
+    $first = $_.Group[0]
+    $last = $_.Group[-1]
+    [pscustomobject]@{
+        Count  = $_.Count
+        File   = $first.File
+        Lines  = "$($first.LineNumber)-$($last.LineNumber)"
+        Sample = $first.Text.Substring(0, [Math]::Min(160, $first.Text.Length))
+    }
+} | Sort-Object Count -Descending
+
+$summary | Format-Table -AutoSize -Wrap
+Write-Host "`n$($results.Count) match(es) in $(@($summary).Count) distinct message(s) across $(@($files | Group-Object Name).Count) file(s)."

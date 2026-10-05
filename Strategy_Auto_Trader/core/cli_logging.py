@@ -91,22 +91,38 @@ _QUIET_END_HOUR = 4  # exclusive
 class _OvernightGatewayFilter(logging.Filter):
     """Drop WARNING+ gateway-connectivity records between 00:00 and 04:00 London time.
 
-    Suppressed records are dropped, not downgraded: a WARNING would still be
-    written to the file and picked up by LogSentinel. Anything still failing
-    after 04:00 logs normally. `now_fn` is injectable so tests need no clock.
+    Per-retry records are dropped so they don't page on an expected overnight
+    outage. The first matching record each night is kept as one INFO line
+    stating when the failures were first seen, so the outage start stays in
+    the file. Anything still failing after 04:00 logs normally. `now_fn` is
+    injectable so tests need no clock.
     """
 
     def __init__(self, now_fn: Callable[[], datetime] | None = None):
         super().__init__()
         self._now_fn = now_fn or (lambda: datetime.now(_QUIET_TZ))
+        self._announced_day = None
 
     def filter(self, record: logging.LogRecord) -> bool:
         if record.levelno < logging.WARNING:
             return True
-        if not _QUIET_START_HOUR <= self._now_fn().hour < _QUIET_END_HOUR:
+        now = self._now_fn()
+        if not _QUIET_START_HOUR <= now.hour < _QUIET_END_HOUR:
             return True
         msg = record.getMessage()
-        return not any(p in msg for p in _GATEWAY_DOWN_PATTERNS)
+        if not any(p in msg for p in _GATEWAY_DOWN_PATTERNS):
+            return True
+        if self._announced_day == now.date():
+            return False
+        self._announced_day = now.date()
+        record.levelno = logging.INFO
+        record.levelname = "INFO"
+        record.msg = (
+            f"Gateway connectivity failing; per-retry warnings suppressed until "
+            f"{_QUIET_END_HOUR:02d}:00. First seen {now:%H:%M}: {msg}"
+        )
+        record.args = None
+        return True
 
 
 def install_overnight_gateway_filter(*handlers: logging.Handler) -> None:
