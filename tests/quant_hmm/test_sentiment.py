@@ -239,7 +239,6 @@ class TestRawIndexHourly:
 
     @pytest.mark.parametrize("func,symbol,aligned", [
         ("fetch_vix_hourly", "VIX", True), ("fetch_vxn_hourly", "VXN", True),
-        ("fetch_vix_hourly_raw", "VIX", False), ("fetch_vxn_hourly_raw", "VXN", False),
     ])
     def test_alignment_flag_and_symbol(self, monkeypatch, func, symbol, aligned):
         from Strategy_Auto_Trader.broker import ibkr_data
@@ -257,9 +256,40 @@ class TestRawIndexHourly:
         client = mock.Mock()
         client.fetch_index_hourly.return_value = None
         monkeypatch.setattr(ibkr_data, "index_data_client", lambda: client)
-        assert sentiment.fetch_vix_hourly_raw() is None
+        assert sentiment.fetch_vxn_hourly() is None
         client.fetch_index_hourly.side_effect = ConnectionError("gateway down")
-        assert sentiment.fetch_vxn_hourly_raw() is None
+        assert sentiment.fetch_vxn_hourly() is None
+
+
+class TestCboeVolFeeds:
+    """VIX and VXN (hourly) and VVIX (daily) for the tier allocator come from CBOE, not IBKR, so the
+    allocator keeps working with IB Gateway down."""
+
+    @pytest.mark.parametrize("func,symbol", [("fetch_vix_hourly_raw", "VIX"), ("fetch_vxn_hourly_raw", "VXN")])
+    def test_hourly_raw_reads_cboe_index_bars(self, monkeypatch, func, symbol):
+        from Strategy_Auto_Trader.allocation import cboe_intraday
+        from Strategy_Auto_Trader.quant_hmm import sentiment
+        frame = pd.DataFrame({"Close": [16.0]}, index=pd.DatetimeIndex(["2026-09-16 14:00"], tz="UTC"))
+        seen = []
+        monkeypatch.setattr(cboe_intraday, "fetch_cboe_index_hourly", lambda s: (seen.append(s), frame)[1])
+        assert getattr(sentiment, func)() is frame
+        assert seen == [symbol]
+
+    @pytest.mark.parametrize("func", ["fetch_vix_hourly_raw", "fetch_vxn_hourly_raw"])
+    def test_hourly_raw_none_when_cboe_has_nothing(self, monkeypatch, func):
+        from Strategy_Auto_Trader.allocation import cboe_intraday
+        from Strategy_Auto_Trader.quant_hmm import sentiment
+        monkeypatch.setattr(cboe_intraday, "fetch_cboe_index_hourly", lambda s: None)
+        assert getattr(sentiment, func)() is None
+
+    def test_vvix_daily_reads_cboe_settlement_close(self, monkeypatch):
+        from Strategy_Auto_Trader.allocation import cboe_intraday
+        from Strategy_Auto_Trader.quant_hmm import sentiment
+        frame = pd.DataFrame({"Close": [95.5]}, index=pd.DatetimeIndex(["2026-10-02"]))
+        seen = []
+        monkeypatch.setattr(cboe_intraday, "fetch_cboe_daily_close", lambda symbol: (seen.append(symbol), frame)[1])
+        assert sentiment.fetch_vvix_daily() is frame
+        assert seen == ["VVIX"]
 
 
 def test_daemon_tier_block_feeds_the_allocator_raw_bars():

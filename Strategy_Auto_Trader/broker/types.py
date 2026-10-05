@@ -5,6 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+class AmbiguousOrderError(RuntimeError):
+    """An order errored without a clear rejection, so it may have been placed. Any matching open order was
+    cancelled; holdings must be re-read from the broker before acting on this ticker again."""
+
+
+class InsufficientFundsError(RuntimeError):
+    """The broker refused a buy for lack of free cash. Market buys can fill above the quote, so a smaller
+    retry can succeed."""
+
+
 @dataclass
 class OrderRequest:
     ticker: str

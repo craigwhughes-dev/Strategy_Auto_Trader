@@ -1,6 +1,6 @@
 """Multi-tier allocation manager for live daemon.
 
-Manages rebalancing between Nasdaq/SPY/ISF.L/CSH2.L based on VXN + VIX tiers. The signal is
+Manages rebalancing between Nasdaq/VUSA/ISF.L/CSH2.L based on VXN + VIX tiers. The signal is
 re-read every cycle from the latest COMPLETED hourly VIX/VXN bar (see index_feed.py), so a tier
 change can happen at any hourly boundary while the LSE is open.
 
@@ -12,7 +12,7 @@ Tier 1 (VXN ≤ gate to enter, held until VXN > exit gate): Nasdaq/EQGB.L (growt
     unaffected by VVIX), 'stressed' -> (vxn_stressed_enter, vxn_stressed_exit) (narrower). A
     daemon never passing `vvix_band` (or always passing "base") reproduces the pre-VVIX behavior
     exactly — this is a strict superset, not a replacement.
-Tier 2 (VIX ≤ vix_tier1): SPY (balanced)
+Tier 2 (VIX ≤ vix_tier1): VUSA (balanced)
 Tier 3 (vix_tier1 < VIX ≤ vix_tier2): ISF.L (defensive)
 Tier 4 (otherwise): CSH2.L (money-market)
 
@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 import logging
+import math
 import time
 
 import pandas as pd
@@ -42,20 +43,25 @@ _NUMBER_KEYS = frozenset({
     "index_refresh_seconds", "index_max_outage_seconds", "commission_pct",
     "vvix_edge_low", "vvix_edge_high", "vvix_confirm_days",
     "vxn_calm_enter", "vxn_calm_exit", "vxn_stressed_enter", "vxn_stressed_exit",
+    "min_hold_gbp",
 })
 _BOOL_KEYS = frozenset({"lower_tiers_enabled"})
 _CONFIG_KEYS = _NUMBER_KEYS | _BOOL_KEYS
 
-TIER_ASSETS = {1: "EQGB.L", 2: "SPY", 3: "ISF.L", 4: "CSH2.L"}
-ASSET_TIERS = {"EQGB.L": 1, "SPY": 2, "ISF.L": 3, "CSH2.L": 4}
+TIER_ASSETS = {1: "EQGB.L", 2: "VUSA", 3: "ISF.L", 4: "CSH2.L"}
+ASSET_TIERS = {"EQGB.L": 1, "VUSA": 2, "ISF.L": 3, "CSH2.L": 4}
+# Smallest fractional trade the min-hold path places (2 dp, accepted by T212 for every mapped tier asset)
+MIN_TRADE_UNITS = 0.01
+# Share of allocatable cash the min-hold path leaves unspent, for ask-over-quote fills on market buys
+MIN_HOLD_CASH_HEADROOM = 0.01
 
 
 @dataclass
 class AllocationOrder:
-    """Single buy/sell order for rebalancing."""
+    """Single buy/sell order for rebalancing. Fractional when `min_hold_gbp` is set (T212)."""
     ticker: str
     action: str  # "BUY" | "SELL"
-    quantity: int
+    quantity: float
     limit_price: float | None = None
     reason: str = ""
 
@@ -78,7 +84,7 @@ class MultiTierAllocationManager:
     """Manage daily 4-tier allocation rebalances with VXN + VIX gating.
 
     Tier 1: Nasdaq/EQGB.L (VXN ≤ vxn_threshold)
-    Tier 2: SPY (VIX ≤ vix_tier1)
+    Tier 2: VUSA (VIX ≤ vix_tier1)
     Tier 3: ISF.L (vix_tier1 < VIX ≤ vix_tier2)
     Tier 4: CSH2.L (defensive, always available)
     """
@@ -100,13 +106,14 @@ class MultiTierAllocationManager:
         vxn_calm_exit: float | None = None,
         vxn_stressed_enter: float | None = None,
         vxn_stressed_exit: float | None = None,
+        min_hold_gbp: float = 0.0,
     ):
         """Initialize allocation manager.
 
         Args:
             vxn_threshold: VXN level to ENTER tier 1 (Nasdaq). VXN ≤ this → Nasdaq. This is also
                 the 'base' band's enter level (see vvix_* args below) — unaffected by VVIX.
-            vix_tier1: VIX threshold for tier 2 (SPY). VIX ≤ this → SPY
+            vix_tier1: VIX threshold for tier 2 (VUSA). VIX ≤ this → VUSA
             vix_tier2: VIX threshold for tier 3 (ISF.L). VIX ≤ this → ISF.L
             commission_pct: Commission per side as % of order value. IBKR UK Tiered is 0.05 (0.05%),
                 min GBP 1; UK ETFs pay no stamp duty or PTM levy, so this is the whole cost
@@ -130,7 +137,11 @@ class MultiTierAllocationManager:
                 has no effect unless these are explicitly configured.
             vxn_stressed_enter / vxn_stressed_exit: tier 1's pair while 'stressed' is confirmed —
                 narrower than the base pair. Same None-means-no-effect default as the calm pair.
+            min_hold_gbp: when > 0, every tier asset is held at this GBP value and the target takes the
+                rest (fractional units, see `_rebalance_min_hold`). 0 keeps the whole-share, all-in rule.
         """
+        if min_hold_gbp < 0:
+            raise ValueError(f"min_hold_gbp ({min_hold_gbp}) must be >= 0")
         if vxn_exit_threshold is None:
             vxn_exit_threshold = vxn_threshold
         if vxn_exit_threshold < vxn_threshold:
@@ -168,7 +179,8 @@ class MultiTierAllocationManager:
         self.vxn_calm_exit = vxn_calm_exit
         self.vxn_stressed_enter = vxn_stressed_enter
         self.vxn_stressed_exit = vxn_stressed_exit
-        self.current_asset = "SPY"  # Default starting position
+        self.min_hold_gbp = min_hold_gbp
+        self.current_asset = "VUSA"  # Default starting position
         self.current_price = None  # Snapshot of entry price for tracking
         self.last_rebalance_date = None
         self._last_known_cash = None  # Track cash for detecting user deposits
@@ -294,7 +306,7 @@ class MultiTierAllocationManager:
              f"VXN={vxn:.2f} vs gate={nasdaq_gate:g} [{vvix_band}] "
              f"({'hold' if self.current_asset == 'EQGB.L' else 'enter'})"
              if vxn is not None else "VXN unavailable"),
-            (2, "SPY", "Balanced", "VIX",
+            (2, "VUSA", "Balanced", "VIX",
              vix, self.vix_tier1,
              self.lower_tiers_enabled and vix is not None and vix <= self.vix_tier1,
              self._lower_tier_detail(vix, self.vix_tier1)),
@@ -383,6 +395,9 @@ class MultiTierAllocationManager:
         # across an unrelated price-fetch gap.
         signal = self.signal(today, vxn, vix, vvix_band=vvix_band, logger=log)
 
+        if self.min_hold_gbp > 0:
+            return self._rebalance_min_hold(today, signal, current_price, allocatable_cash, positions, log)
+
         # Generate orders if: rebalancing tiers OR bootstrapping (no positions + cash available)
         has_any_position = any(positions.values())
         needs_action = signal.needs_rebalance or (not has_any_position and allocatable_cash > 0)
@@ -461,6 +476,94 @@ class MultiTierAllocationManager:
             elif orders[0].action == "BUY":
                 self._last_action = "BUY"
 
+        return orders
+
+    def enabled_assets(self) -> list[str]:
+        """Tier assets the strategy trades. The S&P and FTSE tiers are off unless lower_tiers_enabled."""
+        return [a for a, tier in ASSET_TIERS.items() if self.lower_tiers_enabled or tier in (1, 4)]
+
+    def _rebalance_min_hold(
+        self,
+        today: date,
+        signal: AllocationSignal,
+        current_price: dict[str, float],
+        allocatable_cash: float,
+        positions: dict[str, float],
+        log,
+    ) -> list[AllocationOrder]:
+        """Minimum-hold rebalance (T212 path): every tier asset is held at `min_hold_gbp`, the target takes the rest.
+
+        On a tier change the other assets are trimmed or topped to the minimum. Otherwise they keep any
+        value above it, and only the shortfall below it is bought. Either way the target takes what the
+        others leave, so spare cash is invested and daily price drift does not trade.
+        Quantities are rounded to 2 dp, which T212 accepts for every mapped tier asset. Sells come
+        before buys so the cash they free funds the buys.
+        """
+        enabled = self.enabled_assets()
+        missing = [a for a in enabled if not current_price.get(a) or current_price[a] <= 0]
+        if missing:
+            log.warning(f"[{today}] min-hold rebalance: no price for enabled {missing} — skipping")
+            return []
+
+        # A disabled tier with no price is left out entirely: it can neither block nor be traded
+        priced = [a for a in ASSET_TIERS if current_price.get(a) and current_price[a] > 0]
+        held_units = {a: float(positions.get(a, 0) or 0) for a in priced}
+        held_value = {a: held_units[a] * current_price[a] for a in priced}
+        total_value = allocatable_cash + sum(held_value.values())
+        target = signal.target_asset
+        others = [a for a in priced if a != target]
+
+        # Enabled others sit at the minimum on a tier change. Disabled tiers are only ever topped up to the
+        # minimum, never trimmed. Otherwise others keep any value above it. The target takes what the others
+        # leave, so spare cash is invested without trading on price drift.
+        desired = {}
+        for a in others:
+            if a in enabled and signal.needs_rebalance:
+                desired[a] = self.min_hold_gbp
+            else:
+                desired[a] = max(held_value[a], self.min_hold_gbp)
+        desired[target] = max(total_value - sum(desired.values()), 0.0)
+
+        trades = {}
+        for asset in priced:
+            units = round((desired[asset] - held_value[asset]) / current_price[asset], 2)
+            if abs(units) >= MIN_TRADE_UNITS:
+                trades[asset] = units
+
+        orders: list[AllocationOrder] = []
+        # Market buys fill at the ask, above the quoted price, and T212 rejects a buy that exceeds free cash
+        budget = allocatable_cash * (1 - MIN_HOLD_CASH_HEADROOM)
+        for asset, units in trades.items():
+            if units < 0 and asset in enabled:  # disabled tiers are never trimmed
+                orders.append(AllocationOrder(
+                    ticker=asset, action="SELL", quantity=-units, limit_price=None,
+                    reason=f"Min-hold: trim {asset} to £{self.min_hold_gbp:g}",
+                ))
+                budget += -units * current_price[asset] * (1 - self.commission_pct / 100)
+
+        # Minimum top-ups first, target last, so the target cannot spend the cash the minimums need
+        buy_order = sorted(trades, key=lambda a: a == target)
+        for asset in buy_order:
+            units = trades[asset]
+            if units <= 0:
+                continue
+            unit_cost = current_price[asset] * (1 + self.commission_pct / 100)
+            affordable = math.floor(min(units, budget / unit_cost) * 100) / 100
+            if affordable < MIN_TRADE_UNITS:
+                log.warning(f"[{today}]   Insufficient cash for {asset}: budget {budget:.2f}, need {units * unit_cost:.2f}")
+                continue
+            orders.append(AllocationOrder(
+                ticker=asset, action="BUY", quantity=affordable, limit_price=None,
+                reason=f"Min-hold: {'enter' if asset == target else 'top up'} {asset} (tier {ASSET_TIERS[asset]})",
+            ))
+            budget -= affordable * unit_cost
+
+        if orders:
+            self.current_asset = target
+            self.current_price = current_price[target]
+            self.last_rebalance_date = today
+            self._last_action = "REBALANCE" if len(orders) > 1 else orders[0].action
+            log.info(f"[{today}] Min-hold rebalance: {signal.reason}; orders={[(o.action, o.ticker, o.quantity) for o in orders]}")
         return orders
 
     def _filter_cash_for_allocation(self, current_cash: float) -> float:
@@ -562,7 +665,7 @@ class MultiTierAllocationManager:
                 },
                 {
                     "tier_num": 2,
-                    "asset": "SPY",
+                    "asset": "VUSA",
                     "label": "Balanced" + ("" if self.lower_tiers_enabled else " (disabled)"),
                     "index": "VIX",
                     "gate_value": self.vix_tier1,

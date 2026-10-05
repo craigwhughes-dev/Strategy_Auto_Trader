@@ -324,7 +324,46 @@ def test_ibkr_data_reconciliation_error_does_not_mark_date_done():
             config, daemon_state, logger, run_reconcile=run_mock, save_state=lambda s: None)
     assert "last_ibkr_data_reconcile_date" not in daemon_state
     assert "last_ibkr_reconcile_fail_ts" in daemon_state
+    assert logger.warning.called
+    assert not logger.error.called
+
+
+def test_ibkr_data_reconciliation_errors_on_final_attempt():
+    """Attempt 3 exhausts the day's budget: log at ERROR, not WARNING."""
+    daemon_state = {"ibkr_reconcile_fail_date": "2026-07-06", "ibkr_reconcile_fail_count": 2,
+                    "ibkr_reconcile_first_fail_ts": 0}
+    run_mock = mock.Mock(side_effect=RuntimeError("ibkr_reconcile exited 1"))
+    logger = mock.Mock()
+    config = {"overnight_timezone": "Europe/London",
+              "ibkr_data_reconcile": {"enabled": True, "run_time": "04:00"}}
+    with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 7, 6, 4, 0, tzinfo=ZoneInfo("Europe/London"))
+        live_daemon.check_ibkr_data_reconciliation(
+            config, daemon_state, logger, run_reconcile=run_mock, save_state=lambda s: None)
+    assert daemon_state["ibkr_reconcile_fail_count"] == 3
     assert logger.error.called
+    assert "giving up for today" in logger.error.call_args.args[0]
+
+
+def test_ibkr_data_reconciliation_runs_late_in_day_after_run_time():
+    """A gateway back at 15:00 must still get the day's reconcile, not wait
+    for the next morning's run time."""
+    daemon_state = {}
+    run_mock, _ = _ibkr_reconcile(daemon_state, at_hour=15, at_minute=30)
+    assert run_mock.called
+
+
+def test_ibkr_data_reconciliation_default_run_time_is_0400():
+    """Default matches the live config (04:00), so an unset run_time can't
+    silently move the window."""
+    daemon_state = {}
+    config = {"overnight_timezone": "Europe/London", "ibkr_data_reconcile": {"enabled": True}}
+    run_mock = mock.Mock()
+    with mock.patch("Strategy_Auto_Trader.markov_cli.live_daemon.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 7, 6, 3, 59, tzinfo=ZoneInfo("Europe/London"))
+        live_daemon.check_ibkr_data_reconciliation(
+            config, daemon_state, mock.Mock(), run_reconcile=run_mock, save_state=lambda s: None)
+    assert not run_mock.called
 
 
 def test_ibkr_data_reconciliation_backs_off_after_failure():

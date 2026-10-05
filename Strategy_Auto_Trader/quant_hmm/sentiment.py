@@ -199,32 +199,27 @@ def fetch_vxn_hourly(period: str = "730d") -> pd.DataFrame | None:
     return _fetch_index_hourly("VXN", aligned=True)
 
 
-def fetch_vix_hourly_raw() -> pd.DataFrame | None:
-    """Hourly VIX with RAW IBKR bar-start stamps — for the tier allocator's completed-bar reading."""
-    return _fetch_index_hourly("VIX", aligned=False)
-
-
 def fetch_vxn_hourly_raw() -> pd.DataFrame | None:
-    """Hourly VXN with RAW IBKR bar-start stamps — for the tier allocator's completed-bar reading."""
-    return _fetch_index_hourly("VXN", aligned=False)
+    """Hourly VXN from CBOE's intraday feed (allocation/cboe_intraday.py), bar-start stamped — for the
+    tier allocator's completed-bar reading. Replaced IBKR so the Nasdaq gate no longer needs IB Gateway."""
+    from ..allocation.cboe_intraday import fetch_cboe_index_hourly
+    return fetch_cboe_index_hourly("VXN")
+
+
+def fetch_vix_hourly_raw() -> pd.DataFrame | None:
+    """Hourly VIX from CBOE's intraday feed, bar-start stamped — for the tier allocator's completed-bar reading."""
+    from ..allocation.cboe_intraday import fetch_cboe_index_hourly
+    return fetch_cboe_index_hourly("VIX")
 
 
 def fetch_vvix_daily() -> pd.DataFrame | None:
-    """Daily VVIX (Cboe vol-of-VIX) close from IBKR — for the tier allocator's VVIX-band
+    """Daily VVIX previous-session close from CBOE's quote feed — for the tier allocator's VVIX-band
     confirmation (live_daemon.py's `update_vvix_band`). Daily only, deliberately: the confirmation
     mechanism is a day-counter by design (matches the research it was validated against), and VVIX
-    moves slowly enough that hourly resolution buys nothing — unlike VIX/VXN there is no
-    `_hourly_raw` variant of this function. Confirmed working against IBKR 2026-09-30 (10yr history,
-    real values) — contrary to research/index_history.py's untested assumption that this account has
-    no VVIX index-data subscription; that assumption was wrong for VVIX specifically."""
-    try:
-        from ..broker.ibkr_data import index_data_client
-        df = index_data_client().fetch_index_daily("VVIX", "CBOE", "USD")
-        if df is None or df.empty:
-            return None
-        return df
-    except Exception:
-        return None
+    moves slowly enough that hourly resolution buys nothing. Previously read from IBKR, which confirmed
+    VVIX history was available there (2026-09-30)."""
+    from ..allocation.cboe_intraday import fetch_cboe_daily_close
+    return fetch_cboe_daily_close("VVIX")
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import subprocess
 import sys
@@ -1419,7 +1420,7 @@ def process_cycle(
         )
 
     # Multi-tier allocation rebalance — runs once per cycle, after main signal execution.
-    # 4-tier rebalance: Nasdaq/EQGB.L (VXN), SPY (VIX≤15), ISF.L (15<VIX≤17.5), CSH2.L (VIX>17.5).
+    # 4-tier rebalance: Nasdaq/EQGB.L (VXN), VUSA (VIX≤15), ISF.L (15<VIX≤17.5), CSH2.L (VIX>17.5).
     if allocation_mgr is not None:
         # RAW bar-start stamps, not the :30-relabelled frames: IndexFeed decides whether a bar has ended from its stamp.
         from ..quant_hmm.sentiment import fetch_vix_hourly_raw as _fetch_vix_hourly, fetch_vxn_hourly_raw as _fetch_vxn_hourly
@@ -1457,7 +1458,7 @@ def process_cycle(
                 # Determine active tier first (to know which prices we actually need).
                 # Quiet — the full tier breakdown is logged once, inside rebalance().
                 tier_signal = allocation_mgr.signal(today, vxn_current, vix_current, vvix_band=vvix_band, verbose=False)
-                required_tickers = ["EQGB.L", "SPY", "ISF.L", "CSH2.L"]
+                required_tickers = ["EQGB.L", "VUSA", "ISF.L", "CSH2.L"]
 
                 # Skip price fetch if broker disconnected (avoids 4 ERROR lines per cycle).
                 if not broker.is_connected():
@@ -1480,15 +1481,25 @@ def process_cycle(
                 required_prices = {tier_signal.target_asset}
                 if allocation_mgr.current_asset and allocation_mgr.current_asset != tier_signal.target_asset:
                     required_prices.add(allocation_mgr.current_asset)
+                if allocation_mgr.min_hold_gbp > 0:
+                    # Disabled tiers are held at the minimum but must not block the enabled tiers' rebalance
+                    required_prices = set(allocation_mgr.enabled_assets())
 
                 if all(current_prices.get(t) is not None for t in required_prices):
+                    if allocation_mgr.min_hold_gbp > 0:
+                        # Min-hold holds tier assets outside the ledger, so the broker is the source of truth
+                        alloc_cash = broker.get_available_cash()
+                        alloc_positions = broker.get_open_positions()
+                    else:
+                        alloc_cash = portfolio.available_cash
+                        alloc_positions = {t: p.get("quantity", 0) for t, p in portfolio.positions.items()}
                     orders = allocation_mgr.rebalance(
                         today=today,
                         vxn=vxn_current,
                         vix=vix_current,
                         current_price=current_prices,
-                        available_cash=portfolio.available_cash,
-                        positions={t: p.get("quantity", 0) for t, p in portfolio.positions.items()},
+                        available_cash=alloc_cash,
+                        positions=alloc_positions,
                         vvix_band=vvix_band,
                         logger=logger,
                     )
@@ -1526,7 +1537,7 @@ def process_cycle(
                                 f"{order.action} {order.quantity} {order.ticker} to next open"
                             )
                             continue
-                        fill = broker.place_order(order)
+                        fill = _place_allocation_order(broker, order, logger, market_name)
                         if fill is None:
                             logger.warning(
                                 f"[{market_name}] Allocation order not filled: "
@@ -1540,26 +1551,28 @@ def process_cycle(
                             quantity=fill.quantity, timestamp=fill.timestamp,
                         )
                         order_currency = "GBP" if order.ticker.endswith(".L") else "USD"
-                        if order.action == "BUY":
-                            portfolio.record_entry(
-                                ticker=order.ticker,
-                                fill=fill,
-                                kelly_fraction=1.0,
-                                stop_level=0.0,
-                                target_level=0.0,
-                                signal_price=current_prices.get(order.ticker) or 0.0,
-                                market=market_name,
-                                currency=order_currency,
-                                stop_managed=False,
-                            )
-                        else:
-                            portfolio.record_exit(
-                                ticker=order.ticker,
-                                fill=fill,
-                                signal_price=current_prices.get(order.ticker) or 0.0,
-                                exit_type="strategy_exit",
-                            )
-                        portfolio.save()
+                        # Min-hold tier positions live at the broker only; the ledger would double-count them
+                        if allocation_mgr.min_hold_gbp <= 0:
+                            if order.action == "BUY":
+                                portfolio.record_entry(
+                                    ticker=order.ticker,
+                                    fill=fill,
+                                    kelly_fraction=1.0,
+                                    stop_level=0.0,
+                                    target_level=0.0,
+                                    signal_price=current_prices.get(order.ticker) or 0.0,
+                                    market=market_name,
+                                    currency=order_currency,
+                                    stop_managed=False,
+                                )
+                            else:
+                                portfolio.record_exit(
+                                    ticker=order.ticker,
+                                    fill=fill,
+                                    signal_price=current_prices.get(order.ticker) or 0.0,
+                                    exit_type="strategy_exit",
+                                )
+                            portfolio.save()
                 else:
                     _missing = [t for t in required_prices if current_prices.get(t) is None]
                     logger.warning(f"[{market_name}] Allocation: missing required prices for {_missing} — skipping rebalance")
@@ -1581,6 +1594,52 @@ def process_cycle(
                 f"{len(skipped_budget)} skipped (budget), {n_timeouts} timeout(s), "
                 f"{cursor_summary}, {elapsed:.0f}s elapsed")
     return len(processed)
+
+
+# A rejected buy is retried at this share of its size, up to this many times
+_ALLOCATION_BUY_SHRINK = 0.97
+_ALLOCATION_BUY_MAX_SHRINKS = 3
+
+
+def _is_broker_rejection(error: Exception) -> bool:
+    """True when T212 refused the order outright (HTTP 400), so it was not placed and a retry cannot double it.
+
+    Timeouts and network errors are not rejections: the order may have been placed.
+    """
+    from ..broker.types import InsufficientFundsError
+    return isinstance(error, InsufficientFundsError) or " failed: 400 " in str(error)
+
+
+def _place_allocation_order(broker, order, logger, market_name):
+    """Place one tier-allocation order and return its fill, or None.
+
+    A buy rejected for free cash, or a sell rejected outright, is retried smaller. A market buy can fill
+    above the quote, so its size can exceed the cash held. A sell retreats as far as it can, since a part-sold
+    position still reduces exposure. Anything else skips this order only, so one tier's error cannot stop
+    the others.
+    """
+    from dataclasses import replace
+    from ..allocation.allocation_manager import MIN_TRADE_UNITS
+    from ..broker.types import InsufficientFundsError
+
+    quantity = order.quantity
+    for attempt in range(_ALLOCATION_BUY_MAX_SHRINKS + 1):
+        try:
+            return broker.place_order(replace(order, quantity=quantity))
+        except Exception as e:
+            retryable = (
+                (order.action == "BUY" and isinstance(e, InsufficientFundsError))
+                or (order.action == "SELL" and _is_broker_rejection(e))
+            )
+            if not retryable or attempt == _ALLOCATION_BUY_MAX_SHRINKS:
+                logger.error(f"[{market_name}] Allocation {order.action} {order.ticker} {quantity} failed: {e}")
+                return None
+            quantity = math.floor(quantity * _ALLOCATION_BUY_SHRINK * 100) / 100
+            if quantity < MIN_TRADE_UNITS:
+                logger.error(f"[{market_name}] Allocation {order.action} {order.ticker} rejected, too small to retry")
+                return None
+            logger.warning(f"[{market_name}] Allocation {order.action} {order.ticker} rejected — retrying {quantity}")
+    return None
 
 
 def check_overnight_screening(
@@ -1706,7 +1765,7 @@ def check_ibkr_data_reconciliation(
 
     tz = ZoneInfo(config.get("overnight_timezone", "Europe/London"))
     now = datetime.now(tz)
-    run_time_str = cfg.get("run_time", "01:00")
+    run_time_str = cfg.get("run_time", "04:00")
     run_hour, run_minute = map(int, run_time_str.split(":"))
 
     today = now.date().isoformat()
@@ -1718,7 +1777,9 @@ def check_ibkr_data_reconciliation(
     if fail_count >= 3:
         return
 
-    if now.hour == run_hour and now.minute >= run_minute:
+    # Open from run_time to end of day: a gateway that returns late still gets
+    # a run. The per-day fail count and the 3-attempt cap bound the retries.
+    if (now.hour, now.minute) >= (run_hour, run_minute):
         logger.info(
             "Running IBKR data reconciliation (attempt %d/3, last_success=%s)...",
             fail_count + 1,
@@ -1738,19 +1799,19 @@ def check_ibkr_data_reconciliation(
                 if fail_date == today else now_ts
             )
             outage_min = int((now_ts - first_fail_ts) / 60)
-            logger.error(
-                f"Error in IBKR data reconciliation (unreachable for ~{outage_min}m so far): {e}"
-            )
+            first_fail_at = datetime.fromtimestamp(first_fail_ts, tz).strftime("%H:%M")
             new_fail_count = fail_count + 1
+            # WARNING while retries remain, ERROR once the day's budget is spent.
+            log_error = logger.error if new_fail_count >= 3 else logger.warning
+            log_error(
+                f"Error in IBKR data reconciliation (first failure today at {first_fail_at}, "
+                f"~{outage_min}m ago): {e}"
+                + (" — giving up for today" if new_fail_count >= 3 else "")
+            )
             daemon_state["last_ibkr_reconcile_fail_ts"] = now_ts
             daemon_state["ibkr_reconcile_first_fail_ts"] = first_fail_ts
             daemon_state["ibkr_reconcile_fail_date"] = today
             daemon_state["ibkr_reconcile_fail_count"] = new_fail_count
-            if new_fail_count >= 3:
-                logger.warning(
-                    "IBKR data reconciliation giving up for today after %d failures",
-                    new_fail_count,
-                )
             save_state(daemon_state)
 
 
@@ -2622,31 +2683,59 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("Using NullBroker (dry run mode)")
         broker = NullBroker(prices={})
     else:
-        from ..broker.ibkr_adapter import IBKRAdapter
         broker_cfg = config.get("broker", {})
         real_money = bool(exec_cfg.get("real_money", False))
-        expected_account = broker_cfg.get("expected_account")
-        if expected_account is None:
-            logger.critical(
-                "broker.expected_account is not set and dry_run is false — "
-                "refusing to place orders against an unverified account")
-            release_process_lock(logger)
-            return 1
-        broker_client_id = int(broker_cfg.get("client_id", 1))
-        if check_profile_collisions(broker_client_id, expected_account, logger):
-            release_process_lock(logger)
-            return 1
-        record_daemon_identity(broker_client_id, expected_account, logger)
-        broker = IBKRAdapter(
-            host=broker_cfg.get("host", "127.0.0.1"),
-            port=broker_cfg.get("port", 7497),
-            client_id=broker_client_id,
-            expected_account=expected_account,
-            allow_live_account=real_money,
-        )
-        mode = "REAL MONEY" if real_money else "paper"
-        logger.warning(f"Using IBKRAdapter ({mode}) at "
-                       f"{broker._host}:{broker._port} account={expected_account}")
+        provider = broker_cfg.get("provider", "ibkr")
+
+        if provider == "t212":
+            from ..broker.t212_adapter import T212Adapter, T212AccountMismatchError
+            t212_cfg = broker_cfg.get("t212", {})
+            api_key = os.environ.get("T212_API_KEY")
+            api_secret = os.environ.get("T212_API_SECRET")
+            if not api_key or not api_secret:
+                logger.critical(
+                    "broker.provider is 't212' but T212_API_KEY/T212_API_SECRET "
+                    "are not set in the environment — refusing to place orders")
+                release_process_lock(logger)
+                return 1
+            try:
+                broker = T212Adapter(
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    environment=t212_cfg.get("environment", "demo"),
+                    allow_live_account=real_money,
+                )
+            except T212AccountMismatchError as e:
+                logger.critical(str(e))
+                release_process_lock(logger)
+                return 1
+            mode = "REAL MONEY" if real_money else "demo"
+            logger.warning(f"Using T212Adapter ({mode}) env={broker._environment} "
+                           f"— UNVERIFIED against a live T212 account, see t212_adapter.py banner")
+        else:
+            from ..broker.ibkr_adapter import IBKRAdapter
+            expected_account = broker_cfg.get("expected_account")
+            if expected_account is None:
+                logger.critical(
+                    "broker.expected_account is not set and dry_run is false — "
+                    "refusing to place orders against an unverified account")
+                release_process_lock(logger)
+                return 1
+            broker_client_id = int(broker_cfg.get("client_id", 1))
+            if check_profile_collisions(broker_client_id, expected_account, logger):
+                release_process_lock(logger)
+                return 1
+            record_daemon_identity(broker_client_id, expected_account, logger)
+            broker = IBKRAdapter(
+                host=broker_cfg.get("host", "127.0.0.1"),
+                port=broker_cfg.get("port", 7497),
+                client_id=broker_client_id,
+                expected_account=expected_account,
+                allow_live_account=real_money,
+            )
+            mode = "REAL MONEY" if real_money else "paper"
+            logger.warning(f"Using IBKRAdapter ({mode}) at "
+                           f"{broker._host}:{broker._port} account={expected_account}")
 
     # Set up portfolio
     from ..broker.portfolio import PortfolioManager

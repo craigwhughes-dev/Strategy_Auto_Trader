@@ -79,9 +79,14 @@
     "vxn_calm_enter": 25,
     "vxn_calm_exit": 26,
     "vxn_stressed_enter": 21,
-    "vxn_stressed_exit": 22
+    "vxn_stressed_exit": 22,
+    "min_hold_gbp": 10
   },
   "broker": {
+    "provider": "t212",
+    "t212": {
+      "environment": "demo"
+    },
     "host": "127.0.0.1",
     "port": 4002,
     "client_id": 1,
