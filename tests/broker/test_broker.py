@@ -78,6 +78,7 @@ class TestBroker:
 
     def test_portfolio_same_ticker_blocks_open(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
         pm = PortfolioManager(20_000, tmp_path / "state.json")
         fill = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-01T00:00:00+00:00")
@@ -100,6 +101,7 @@ class TestBroker:
         assert pm.trade_log[-1]["pl"] == pytest.approx(296.85)  # gross minus IBKR commission both legs
 
     def test_portfolio_save_and_reload(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
         path = tmp_path / "state.json"
@@ -1160,6 +1162,7 @@ class TestBroker:
 
     def test_bva_can_open_duplicate_ticker_in_positions(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
         pm = PortfolioManager(20_000, tmp_path / "state.json")
         fill = FillResult("AAPL", "BUY", 195.0, 10, "2026-07-01T00:00:00+00:00")
@@ -1400,6 +1403,7 @@ class TestBroker:
     def test_portfolio_record_entry_with_market_currency(self, tmp_path):
         """record_entry stores market and currency fields."""
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
         pm = PortfolioManager(20_000, tmp_path / "state.json")
         fill = FillResult("LLOY.L", "BUY", 450.0, 10, "2026-07-01T00:00:00+00:00")
@@ -1412,6 +1416,7 @@ class TestBroker:
 
     def test_portfolio_record_entry_cost_value_computed(self, tmp_path):
         """record_entry computes cost_value from fill_price and quantity."""
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
         pm = PortfolioManager(20_000, tmp_path / "state.json")
@@ -1437,6 +1442,7 @@ class TestBroker:
     def test_record_entry_stores_entry_cost_uk_ticker_includes_stamp_duty(self, tmp_path):
         """UK ticker BUY adds 0.5% stamp duty on top of the tiered commission."""
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
         pm = PortfolioManager(20_000, tmp_path / "state.json")
         fill = FillResult("LLOY.L", "BUY", 450.0, 10, "2026-07-01T00:00:00+00:00")
@@ -1448,6 +1454,7 @@ class TestBroker:
     def test_record_entry_uk_etf_pays_commission_only(self, tmp_path):
         """The real 2026-09-17 ISF.L tier fill (1,902 @ 10.512) was booked at 110.97 (commission 9.97 +
         phantom stamp duty 99.97 + PTM 1.00). UCITS ETFs are exempt from both, so only ~10 is due."""
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
         pm = PortfolioManager(20_000, tmp_path / "state.json")
@@ -1490,6 +1497,7 @@ class TestBroker:
     def test_portfolio_record_entry_empty_market_currency_allowed(self, tmp_path):
         """record_entry works with empty market/currency (for backward compat)."""
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
         pm = PortfolioManager(20_000, tmp_path / "state.json")
         fill = FillResult("SPY", "BUY", 500.0, 4, "2026-07-01T00:00:00+00:00")
@@ -1502,6 +1510,7 @@ class TestBroker:
 
     def test_portfolio_save_and_reload_preserves_market_currency(self, tmp_path):
         """Positions with market/currency round-trip through save/load."""
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         from Strategy_Auto_Trader.broker.types import FillResult
         path = tmp_path / "state.json"
@@ -1791,3 +1800,108 @@ class TestSlippageBps:
         # AAPL position should still be open, MSFT should be closed
         assert "AAPL" in portfolio.positions
         assert "MSFT" not in portfolio.positions
+
+
+class TestFractionalLedger:
+    def test_fractional_entry_stored_at_five_decimal_places(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.types import FillResult
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
+        fill = FillResult(ticker="EQGB.L", action="BUY", fill_price=590.903, quantity=1.8234567891, timestamp="")
+        pm.record_entry("EQGB.L", fill, 1.0, 0.0, 0.0)
+        assert pm.positions["EQGB.L"]["quantity"] == pytest.approx(1.82346)
+        assert pm.positions["EQGB.L"]["cost_value"] == pytest.approx(590.903 * 1.82346)
+
+    def test_fractional_quantity_survives_save_and_reload(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        from Strategy_Auto_Trader.broker.types import FillResult
+        path = tmp_path / "state.json"
+        pm = PortfolioManager(20_000, path)
+        pm.record_entry("EQGB.L", FillResult(ticker="EQGB.L", action="BUY", fill_price=590.9, quantity=27.017, timestamp=""), 1.0, 0.0, 0.0)
+        pm.save()
+        assert PortfolioManager(20_000, path).positions["EQGB.L"]["quantity"] == pytest.approx(27.017)
+
+
+class TestTierLedger:
+    """Min-hold fills and broker sync keep tier positions in the ledger equal to the broker's holdings."""
+
+    @staticmethod
+    def _fill(price, qty, action="BUY"):
+        from Strategy_Auto_Trader.broker.types import FillResult
+        return FillResult(ticker="EQGB.L", action=action, fill_price=price, quantity=qty, timestamp="")
+
+    def test_buy_opens_stop_free_position(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
+        pm.record_tier_fill("EQGB.L", self._fill(590.0, 25.17), "BUY", "ftse", "GBP")
+        pos = pm.positions["EQGB.L"]
+        assert pos["quantity"] == pytest.approx(25.17)
+        assert pos["stop_managed"] is False
+
+    def test_top_up_keeps_average_cost(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
+        pm.record_tier_fill("EQGB.L", self._fill(100.0, 10.0), "BUY", "ftse", "GBP")
+        pm.record_tier_fill("EQGB.L", self._fill(200.0, 10.0), "BUY", "ftse", "GBP")
+        pos = pm.positions["EQGB.L"]
+        assert pos["quantity"] == pytest.approx(20.0)
+        assert pos["fill_price"] == pytest.approx(150.0)
+        assert pos["cost_value"] == pytest.approx(3000.0)
+
+    def test_partial_sell_reduces_and_logs_pl(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
+        pm.record_tier_fill("EQGB.L", self._fill(100.0, 10.0), "BUY", "ftse", "GBP")
+        pm.record_tier_fill("EQGB.L", self._fill(120.0, 4.0), "SELL", "ftse", "GBP")
+        assert pm.positions["EQGB.L"]["quantity"] == pytest.approx(6.0)
+        assert pm.positions["EQGB.L"]["cost_value"] == pytest.approx(600.0)
+        assert pm.trade_log[-1]["action"] == "SELL"
+        assert 78.0 < pm.trade_log[-1]["pl"] < 80.0  # 4 × £20 gross, less entry and exit costs
+
+    def test_full_sell_closes_position(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
+        pm.record_tier_fill("EQGB.L", self._fill(100.0, 10.0), "BUY", "ftse", "GBP")
+        pm.record_tier_fill("EQGB.L", self._fill(100.0, 10.0), "SELL", "ftse", "GBP")
+        assert "EQGB.L" not in pm.positions
+
+    def test_sell_without_ledger_position_is_ignored(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
+        pm.record_tier_fill("EQGB.L", self._fill(100.0, 1.0), "SELL", "ftse", "GBP")
+        assert pm.positions == {} and pm.trade_log == []
+
+    def test_sync_adopts_broker_holding_at_current_price(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
+        notes = pm.sync_tier_positions({"EQGB.L": 27.017}, {"EQGB.L": 590.9}, ["EQGB.L"], "ftse", "GBP")
+        assert pm.positions["EQGB.L"]["quantity"] == pytest.approx(27.017)
+        assert pm.positions["EQGB.L"]["fill_price"] == pytest.approx(590.9)
+        assert len(notes) == 1 and "adopted" in notes[0]
+
+    def test_sync_corrects_drift_and_removes_closed(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
+        pm.record_tier_fill("EQGB.L", self._fill(100.0, 10.0), "BUY", "ftse", "GBP")   # unconfirmed fill
+        pm.record_tier_fill("VUSA", _buy_fill("VUSA", 50.0, 2.0), "BUY", "ftse", "GBP")
+        notes = pm.sync_tier_positions({"EQGB.L": 10.5, "VUSA": 0.0}, {}, ["EQGB.L", "VUSA"], "ftse", "GBP")
+        assert pm.positions["EQGB.L"]["quantity"] == pytest.approx(10.5)
+        assert "VUSA" not in pm.positions
+        assert len(notes) == 2
+
+    def test_sync_no_change_is_silent(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
+        pm.record_tier_fill("EQGB.L", self._fill(100.0, 10.0), "BUY", "ftse", "GBP")
+        assert pm.sync_tier_positions({"EQGB.L": 10.0}, {}, ["EQGB.L"], "ftse", "GBP") == []
+
+    def test_sync_without_price_does_not_adopt(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
+        notes = pm.sync_tier_positions({"ISF.L": 0.98}, {"ISF.L": None}, ["ISF.L"], "ftse", "GBP")
+        assert "ISF.L" not in pm.positions and "no price" in notes[0]
+
+
+def _buy_fill(ticker, price, qty):
+    from Strategy_Auto_Trader.broker.types import FillResult
+    return FillResult(ticker=ticker, action="BUY", fill_price=price, quantity=qty, timestamp="")

@@ -87,3 +87,30 @@ class TestReconcilePositions:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+
+class TestFractionalQuantities:
+    """Tier holdings are fractional (e.g. EQGB.L 27.017); the ledger keeps 5 dp and must not truncate."""
+
+    def test_fractional_match_is_clean(self):
+        internal = {"EQGB.L": {"quantity": 27.017}}
+        assert reconcile_positions(internal, {"EQGB.L": 27.017}) == []
+
+    def test_fractional_mismatch_is_flagged_not_truncated(self):
+        # Truncation to 27 would have called this a match
+        internal = {"EQGB.L": {"quantity": 27.017}}
+        assert len(reconcile_positions(internal, {"EQGB.L": 27.0})) == 1
+
+    def test_sub_precision_float_noise_is_clean(self):
+        # 0.1 + 0.2 != 0.3 in float; both sides round to 5 dp
+        internal = {"EQGB.L": {"quantity": 0.1 + 0.2}}
+        assert reconcile_positions(internal, {"EQGB.L": 0.3}) == []
+
+    def test_difference_below_precision_is_clean(self):
+        internal = {"EQGB.L": {"quantity": 27.017}}
+        assert reconcile_positions(internal, {"EQGB.L": 27.017 + 1e-7}) == []
+
+    def test_difference_at_precision_is_flagged(self):
+        internal = {"EQGB.L": {"quantity": 27.017}}
+        assert len(reconcile_positions(internal, {"EQGB.L": 27.01701})) == 1

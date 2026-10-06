@@ -288,3 +288,140 @@ class TestSymbolMap:
     def test_yfinance_ticker_from_t212_raises_when_unmapped(self):
         with pytest.raises(KeyError, match="reverse lookup"):
             t212_symbols.yfinance_ticker_from_t212("UNKNOWN_EQ", SYMBOL_MAP)
+
+
+class TestOrderLogging:
+    def test_free_cash_refusal_logs_t212_reason(self, monkeypatch, caplog):
+        from Strategy_Auto_Trader.broker.types import InsufficientFundsError
+        adapter = make_adapter()
+        rejected = RuntimeError('T212 POST /api/v0/equity/orders/market failed: 400 {"type":"/api-errors/insufficient-free-for-stocks-buy"}')
+        monkeypatch.setattr(adapter, "_request", FakeRequest([rejected]))
+        with caplog.at_level("INFO", logger="Strategy_Auto_Trader.broker.t212_adapter"), pytest.raises(InsufficientFundsError):
+            adapter.place_order(OrderRequest("AAPL", "BUY", 10))
+        assert "T212 refused BUY AAPL qty=10" in caplog.text
+        assert "insufficient-free-for-stocks-buy" in caplog.text
+
+    def test_accepted_and_filled_orders_are_logged(self, monkeypatch, caplog):
+        adapter = make_adapter()
+        monkeypatch.setattr(adapter, "_request", FakeRequest([{"id": 42}, {"status": "FILLED", "fillPrice": 195.5}]))
+        with caplog.at_level("INFO", logger="Strategy_Auto_Trader.broker.t212_adapter"):
+            adapter.place_order(OrderRequest("AAPL", "BUY", 10))
+        assert "T212 accepted BUY AAPL qty=10 as order 42" in caplog.text
+        assert "T212 filled order 42 BUY AAPL qty=10 at 195.5" in caplog.text
+
+    def test_ambiguous_order_with_no_open_match_logs_resolution(self, monkeypatch, caplog):
+        from Strategy_Auto_Trader.broker.types import AmbiguousOrderError
+        adapter = make_adapter()
+        fake = FakeRequest([TimeoutError("timed out"), [{"id": 4, "ticker": "AAPL_US_EQ", "side": "SELL"}]])
+        monkeypatch.setattr(adapter, "_request", fake)
+        with caplog.at_level("INFO", logger="Strategy_Auto_Trader.broker.t212_adapter"), pytest.raises(AmbiguousOrderError):
+            adapter.place_order(OrderRequest("AAPL", "BUY", 10))
+        assert "No open BUY AAPL order after ambiguous error" in caplog.text
+
+
+class TestRateLimitRetry:
+    """_request retries T212 429s; _send is the only place urlopen is called."""
+
+    @staticmethod
+    def _http_error(code, body='{"code":"BusinessException","context":{"type":"TooManyRequests"}}', retry_after=None):
+        import email.message
+        import io
+        import urllib.error
+        headers = email.message.Message()
+        if retry_after is not None:
+            headers["Retry-After"] = retry_after
+        return urllib.error.HTTPError("https://demo.trading212.com/x", code, "err", headers, io.BytesIO(body.encode()))
+
+    @staticmethod
+    def _urlopen_script(monkeypatch, outcomes):
+        """Replace urlopen with scripted outcomes: HTTPError instances raise, anything else is a 200 body."""
+        import io
+        import Strategy_Auto_Trader.broker.t212_adapter as mod
+        calls = []
+
+        class Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake(req, timeout):
+            calls.append(req.full_url)
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return Resp(outcome)
+
+        monkeypatch.setattr(mod.urllib.request, "urlopen", fake)
+        return calls
+
+    def test_429_honours_retry_after_then_succeeds(self, monkeypatch, caplog):
+        sleeps = []
+        adapter = make_adapter(sleep=sleeps.append)
+        calls = self._urlopen_script(monkeypatch, [self._http_error(429, retry_after="7"), b'{"ok": true}'])
+        with caplog.at_level("WARNING", logger="Strategy_Auto_Trader.broker.t212_adapter"):
+            assert adapter._request("GET", "/api/v0/equity/account/summary") == {"ok": True}
+        assert sleeps == [7.0]
+        assert len(calls) == 2
+        assert "rate limited (429), retry 1/4 in 7.0s" in caplog.text
+
+    def test_429_without_retry_after_backs_off_exponentially(self, monkeypatch):
+        sleeps = []
+        adapter = make_adapter(sleep=sleeps.append)
+        self._urlopen_script(monkeypatch, [self._http_error(429)] * 3 + [b'{}'])
+        adapter._request("GET", "/api/v0/equity/orders")
+        assert sleeps == [5.0, 10.0, 20.0]
+
+    def test_retry_after_capped_at_max_wait(self, monkeypatch):
+        from Strategy_Auto_Trader.broker.t212_adapter import RATE_LIMIT_MAX_WAIT_SECONDS
+        sleeps = []
+        adapter = make_adapter(sleep=sleeps.append)
+        self._urlopen_script(monkeypatch, [self._http_error(429, retry_after="600"), b'{}'])
+        adapter._request("GET", "/api/v0/equity/orders")
+        assert sleeps == [RATE_LIMIT_MAX_WAIT_SECONDS]
+
+    def test_non_numeric_retry_after_falls_back_to_backoff(self, monkeypatch):
+        sleeps = []
+        adapter = make_adapter(sleep=sleeps.append)
+        self._urlopen_script(monkeypatch, [self._http_error(429, retry_after="Wed, 21 Oct 2026 07:28:00 GMT"), b'{}'])
+        adapter._request("GET", "/api/v0/equity/orders")
+        assert sleeps == [5.0]
+
+    def test_persistent_429_raises_after_retries_with_429_in_message(self, monkeypatch):
+        from Strategy_Auto_Trader.broker.t212_adapter import RATE_LIMIT_RETRIES
+        sleeps = []
+        adapter = make_adapter(sleep=sleeps.append)
+        calls = self._urlopen_script(monkeypatch, [self._http_error(429)] * (RATE_LIMIT_RETRIES + 1))
+        with pytest.raises(RuntimeError, match=r"failed: 429 "):
+            adapter._request("GET", "/api/v0/equity/account/summary")
+        assert len(calls) == RATE_LIMIT_RETRIES + 1
+        assert len(sleeps) == RATE_LIMIT_RETRIES
+
+    def test_other_http_errors_are_not_retried(self, monkeypatch):
+        sleeps = []
+        adapter = make_adapter(sleep=sleeps.append)
+        calls = self._urlopen_script(monkeypatch, [self._http_error(400, body='{"type":"/api-errors/quantity-precision-mismatch"}')])
+        with pytest.raises(RuntimeError, match="failed: 400"):
+            adapter._request("POST", "/api/v0/equity/orders/market", {"ticker": "X", "quantity": 1})
+        assert len(calls) == 1
+        assert sleeps == []
+
+    def test_market_order_survives_429_on_post(self, monkeypatch):
+        sleeps = []
+        adapter = make_adapter(sleep=sleeps.append)
+        self._urlopen_script(monkeypatch, [
+            self._http_error(429, retry_after="1"),                 # POST refused by quota, not processed
+            b'{"id": 77}',                                          # POST accepted on retry
+            b'{"status": "FILLED", "fillPrice": 195.5}',            # poll
+        ])
+        fill = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
+        assert fill is not None and fill.fill_price == pytest.approx(195.5)
+        assert sleeps == [5.0]
+
+    def test_retry_after_zero_still_waits_backoff(self, monkeypatch):
+        sleeps = []
+        adapter = make_adapter(sleep=sleeps.append)
+        self._urlopen_script(monkeypatch, [self._http_error(429, retry_after="0"), self._http_error(429, retry_after="0"), b'{}'])
+        adapter._request("GET", "/api/v0/equity/orders")
+        assert sleeps == [5.0, 10.0]

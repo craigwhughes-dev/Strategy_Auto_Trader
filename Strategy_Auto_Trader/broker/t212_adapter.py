@@ -37,6 +37,7 @@ import logging
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 from .t212_symbols import load_symbol_map, t212_ticker, yfinance_ticker_from_t212
@@ -64,6 +65,31 @@ _FILLED_STATUS = "FILLED"
 
 # Held-position prices are re-read at most this often; the daemon asks for prices every cycle (~60s)
 POSITION_PRICE_TTL_SECONDS = 30.0
+
+# T212 answers 429 "TooManyRequests" when the daemon's reads outpace its quota. Retries are capped so a
+# sustained limit surfaces as an error rather than stalling a cycle.
+RATE_LIMIT_RETRIES = 4
+RATE_LIMIT_BACKOFF_SECONDS = 5.0
+RATE_LIMIT_MAX_WAIT_SECONDS = 30.0
+
+
+class RateLimitedError(RuntimeError):
+    """T212 429. `retry_after` is the server's Retry-After in seconds, or None when it sent none."""
+
+    def __init__(self, message: str, retry_after: float | None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Retry-After as seconds. HTTP-date form is not used by T212, so anything non-numeric reads as absent."""
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return None
+
 
 # T212's error type for a buy that exceeds free cash, as it appears in the RuntimeError text
 _INSUFFICIENT_FREE_CASH = "insufficient-free-for-stocks-buy"
@@ -94,6 +120,7 @@ class T212Adapter:
         allow_live_account: bool = False,
         timeout: float = 30.0,
         symbol_map: dict[str, str] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if environment not in ("demo", "live"):
             raise ValueError(f"environment must be 'demo' or 'live', got {environment!r}")
@@ -108,6 +135,7 @@ class T212Adapter:
             f"{api_key}:{api_secret}".encode("utf-8")
         ).decode("ascii")
         self._timeout = timeout
+        self._sleep = sleep
         self._symbol_map = symbol_map if symbol_map is not None else load_symbol_map()
         self._connected = False
         self._prices: dict[str, float] = {}
@@ -124,7 +152,25 @@ class T212Adapter:
         self._prices.update(prices)
 
     def _request(self, method: str, path: str, body: dict | None = None):
-        """Issue one REST call, raising RuntimeError with T212's own message on failure."""
+        """Issue one REST call, raising RuntimeError with T212's own message on failure.
+
+        A 429 is retried after Retry-After (or exponential backoff) — it is a quota refusal, so the
+        call is not processed and a retry cannot double an order. Other failures are raised at once.
+        """
+        for attempt in range(RATE_LIMIT_RETRIES + 1):
+            try:
+                return self._send(method, path, body)
+            except RateLimitedError as e:
+                if attempt == RATE_LIMIT_RETRIES:
+                    raise
+                wait = self._rate_limit_wait(e.retry_after, attempt)
+                logger.warning(f"T212 {method} {path} rate limited (429), retry "
+                               f"{attempt + 1}/{RATE_LIMIT_RETRIES} in {wait:.1f}s")
+                self._sleep(wait)
+        raise AssertionError("unreachable: retry loop always returns or raises")
+
+    def _send(self, method: str, path: str, body: dict | None = None):
+        """One HTTP round trip, no retry."""
         url = self._base_url + path
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, method=method)
@@ -137,9 +183,23 @@ class T212Adapter:
                 return json.loads(raw) if raw else None
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"T212 {method} {path} failed: {e.code} {detail}") from e
+            message = f"T212 {method} {path} failed: {e.code} {detail}"
+            if e.code == 429:
+                retry_after = _parse_retry_after(e.headers.get("Retry-After") if e.headers else None)
+                raise RateLimitedError(message, retry_after=retry_after) from e
+            raise RuntimeError(message) from e
         except urllib.error.URLError as e:
             raise ConnectionError(f"T212 {method} {path} unreachable: {e.reason}") from e
+
+    def _rate_limit_wait(self, retry_after: float | None, attempt: int) -> float:
+        """Seconds to wait before retry `attempt`: doubling backoff, or Retry-After if larger.
+
+        A Retry-After of 0 must not mean "retry now": the limit is still in force, and immediate retries
+        just get refused again.
+        """
+        backoff = RATE_LIMIT_BACKOFF_SECONDS * (2 ** attempt)
+        base = backoff if retry_after is None else max(retry_after, backoff)
+        return min(base, RATE_LIMIT_MAX_WAIT_SECONDS)
 
     def connect(self) -> None:
         """Verify credentials against GET /api/v0/equity/account/info."""
@@ -228,6 +288,8 @@ class T212Adapter:
             return self._place_market_order(req)
         except RuntimeError as e:
             if " failed: 400 " in str(e) or isinstance(e, InsufficientFundsError):
+                # Logged here, not only by the caller, so T212's refusal reason survives the retry loop
+                logger.warning(f"T212 refused {req.action} {req.ticker} qty={req.quantity}: {e}")
                 raise  # T212 refused the order outright, so nothing was placed
             self._reconcile_unconfirmed(req, e)
             raise AmbiguousOrderError(f"{req.action} {req.ticker} state unknown after: {e}") from e
@@ -248,9 +310,11 @@ class T212Adapter:
             logger.error(f"Order state unknown for {req.action} {req.ticker} ({cause}); could not list open orders ({e}) "
                          f"— check T212 before trading this ticker")
             return
-        for order in open_orders:
-            if order.get("ticker") != code or order.get("side") != req.action:
-                continue
+        matched = [o for o in open_orders if o.get("ticker") == code and o.get("side") == req.action]
+        if not matched:
+            logger.info(f"No open {req.action} {req.ticker} order after ambiguous error ({cause}): "
+                        f"already filled or never placed; next position read decides")
+        for order in matched:
             try:
                 self._request("DELETE", f"/api/v0/equity/orders/{order['id']}")
                 logger.warning(f"Cancelled open {req.action} {req.ticker} order {order['id']} left by an ambiguous error ({cause})")
@@ -273,11 +337,15 @@ class T212Adapter:
         if order_id is None:
             logger.warning(f"T212 market order for {req.ticker} accepted but no id returned: {resp}")
             return None
+        logger.info(f"T212 accepted {req.action} {req.ticker} qty={req.quantity} as order {order_id}")
 
         deadline = time.monotonic() + self._timeout
         order = self._poll_order(order_id, deadline)
         status = order.get("status")
 
+        if status == _FILLED_STATUS:
+            logger.info(f"T212 filled order {order_id} {req.action} {req.ticker} qty={req.quantity} "
+                        f"at {order.get('fillPrice') or order.get('averagePrice')}")
         if status != _FILLED_STATUS:
             if status not in _TERMINAL_NON_FILL_STATUSES:
                 # Still working at the deadline — cancel it ourselves rather

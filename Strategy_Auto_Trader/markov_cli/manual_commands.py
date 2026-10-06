@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..allocation.allocation_manager import MIN_TRADE_UNITS
 from ..broker.symbols import PENCE_PER_POUND, normalize_fill_price
 from ..broker.types import FillResult, OrderRequest
 from ..core.atomic_io import atomic_write_json
@@ -268,6 +270,30 @@ def _execute_sell(
         return False, None, str(e)
 
 
+def _sell_tier_holding(
+    portfolio: object,
+    broker: object,
+    ticker: str,
+    pos: dict,
+    logger: logging.Logger,
+) -> FillResult | None | bool:
+    """Sell a min-hold tier holding in full, at the 2 dp precision the allocator trades in.
+
+    Returns the FillResult; None if the order was not filled; False if nothing sellable (a remainder
+    below the minimum trade stays in the ledger, since T212 cannot take it).
+    """
+    quantity = math.floor(pos["quantity"] * 100) / 100
+    if quantity < MIN_TRADE_UNITS:
+        logger.info(f"{ticker}: {pos['quantity']} held is below the minimum sellable size — left in place")
+        return False
+    fill = _place_order_with_retry(broker, OrderRequest(ticker, "SELL", quantity), logger)
+    if fill is None:
+        return None
+    fill = _normalize_sell_fill(ticker, fill, pos)
+    portfolio.record_tier_fill(ticker, fill, "SELL", pos.get("market", ""), pos.get("currency", ""))
+    return fill
+
+
 def _execute_sell_all(
     portfolio: object,
     broker: object,
@@ -322,6 +348,13 @@ def _execute_sell_all(
                     logger.warning(f"{ticker}: error cancelling protective stop: {e}")
 
             pos = dict(portfolio.positions[ticker])
+            if pos.get("stop_managed") is False:
+                sold = _sell_tier_holding(portfolio, broker, ticker, pos, logger)
+                if sold is None:
+                    errors.append(f"{ticker}: order not filled")
+                elif sold is not False:
+                    fills.append(sold)
+                continue
             fill = _place_order_with_retry(broker, OrderRequest(ticker, "SELL", qty), logger)
             if fill is None:
                 errors.append(f"{ticker}: order not filled")

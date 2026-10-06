@@ -7,6 +7,13 @@ matching the internal positions dict key space directly.
 
 from __future__ import annotations
 
+from .types import QUANTITY_DECIMALS, round_quantity
+
+
+def _fmt_qty(quantity: float) -> str:
+    """5 dp without trailing zeros, so 5.0 reads as 5 and 27.017 as 27.017 (discrepancy text is compared for alert dedup)."""
+    return f"{quantity:.{QUANTITY_DECIMALS}f}".rstrip("0").rstrip(".")
+
 
 def reconcile_positions(
     internal_positions: dict[str, dict],
@@ -21,7 +28,7 @@ def reconcile_positions(
     expected: dict[str, dict] = {}
     for ticker, pos in internal_positions.items():
         entry = expected.setdefault(ticker, {"quantity": 0})
-        entry["quantity"] += int(pos.get("quantity", 0))
+        entry["quantity"] = round_quantity(entry["quantity"] + pos.get("quantity", 0))
 
     discrepancies: list[str] = []
     for ticker in sorted(expected):
@@ -29,13 +36,13 @@ def reconcile_positions(
         held = broker_positions.get(ticker)
         if held is None:
             discrepancies.append(
-                f"{ticker}: internal state shows {exp['quantity']} shares, "
+                f"{ticker}: internal state shows {_fmt_qty(exp['quantity'])} shares, "
                 f"broker shows no position"
             )
-        elif held != exp["quantity"]:
+        elif round_quantity(held) != exp["quantity"]:
             discrepancies.append(
-                f"{ticker}: internal state shows {exp['quantity']} shares, "
-                f"broker shows {held}"
+                f"{ticker}: internal state shows {_fmt_qty(exp['quantity'])} shares, "
+                f"broker shows {_fmt_qty(round_quantity(held))}"
             )
 
     for ticker in sorted(broker_positions):
@@ -66,7 +73,7 @@ def check_stop_fills_for_missing_positions(
     expected: dict[str, dict] = {}
     for ticker, pos in internal_positions.items():
         entry = expected.setdefault(ticker, {"quantity": 0, "pos": pos})
-        entry["quantity"] += int(pos.get("quantity", 0))
+        entry["quantity"] = round_quantity(entry["quantity"] + pos.get("quantity", 0))
 
     # Fetch open stops once at the start; if this fails, return empty (cannot safely resolve).
     try:
@@ -117,7 +124,7 @@ def check_stop_fills_for_missing_positions(
             from .types import FillResult
             estimated_fill = FillResult(
                 ticker=ticker, action="SELL", fill_price=stop_price,
-                quantity=int(pos.get("quantity", 0)),
+                quantity=round_quantity(pos.get("quantity", 0)),
                 timestamp="",
             )
             portfolio.record_exit(ticker, estimated_fill, exit_type="reconciled_stop_loss")

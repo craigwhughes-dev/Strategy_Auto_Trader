@@ -4,6 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# T212 holds fractional shares; 5 dp covers its precision without float noise in sums
+QUANTITY_DECIMALS = 5
+
+
+def round_quantity(quantity: float) -> float:
+    """Quantity rounded to the ledger's precision, so equal holdings compare equal."""
+    return round(float(quantity), QUANTITY_DECIMALS)
+
 
 class AmbiguousOrderError(RuntimeError):
     """An order errored without a clear rejection, so it may have been placed. Any matching open order was
@@ -19,7 +27,7 @@ class InsufficientFundsError(RuntimeError):
 class OrderRequest:
     ticker: str
     action: str       # "BUY" | "SELL"
-    quantity: int
+    quantity: float
     order_type: str = "MKT"
 
 
@@ -28,7 +36,7 @@ class FillResult:
     ticker: str
     action: str
     fill_price: float
-    quantity: int
+    quantity: float
     timestamp: str    # ISO-8601 UTC
 
 
@@ -36,7 +44,7 @@ class FillResult:
 class PositionRecord:
     entry_date: str
     fill_price: float
-    quantity: int
+    quantity: float
     kelly_fraction: float
     stop_level: float
     target_level: float
@@ -45,7 +53,7 @@ class PositionRecord:
 @dataclass
 class StopOrderRequest:
     ticker: str
-    quantity: int
+    quantity: float
     stop_price: float
 
 
@@ -59,7 +67,7 @@ class StopOrderResult:
 @dataclass
 class OpenOrderInfo:
     ticker: str
-    quantity: int
+    quantity: float
     stop_price: float
     perm_id: int
 
@@ -74,7 +82,7 @@ class PendingCancelEvent:
     the alert threshold — fires once, not every cycle)."""
     ticker: str
     action: str
-    quantity: int
+    quantity: float
     outcome: str
     fill: FillResult | None = None
     elapsed_minutes: float = 0.0

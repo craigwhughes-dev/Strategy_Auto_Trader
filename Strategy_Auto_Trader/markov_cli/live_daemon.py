@@ -109,6 +109,8 @@ def setup_logging() -> logging.Logger:
     # Suppress ib_async/ib_insync internal Trade/Fill repr spam.
     logging.getLogger("ib_async").setLevel(logging.WARNING)
     logging.getLogger("ib_insync").setLevel(logging.WARNING)
+    # Root is WARNING, so without this the adapter's INFO lines (order accepted / filled) are dropped
+    logging.getLogger("Strategy_Auto_Trader.broker.t212_adapter").setLevel(logging.INFO)
 
     handler = _DailyFileHandler()
     handler.setFormatter(logging.Formatter(
@@ -1481,6 +1483,14 @@ def process_cycle(
                     # Tier holdings live at the broker, not in the ledger, so the broker is the source of truth
                     alloc_cash = allocation_mgr.spendable_cash(broker.get_available_cash())
                     alloc_positions = broker.get_open_positions()
+                    # Ledger follows the broker for tier holdings before anything is placed against them
+                    from ..allocation.allocation_manager import ASSET_TIERS
+                    tier_notes = portfolio.sync_tier_positions(
+                        alloc_positions, current_prices, list(ASSET_TIERS), market_name, "GBP")
+                    for note in tier_notes:
+                        logger.warning(f"[{market_name}] Tier ledger corrected: {note}")
+                    if tier_notes:
+                        portfolio.save()
                     orders = allocation_mgr.rebalance(
                         today=today,
                         vxn=vxn_current,
@@ -1538,8 +1548,9 @@ def process_cycle(
                             fill_price=normalize_fill_price(order.ticker, fill.fill_price, quote_pence),
                             quantity=fill.quantity, timestamp=fill.timestamp,
                         )
-                        # Tier positions live at the broker only; the ledger would double-count them
                         allocation_mgr.note_fill(order.action, fill.fill_price * fill.quantity)
+                        portfolio.record_tier_fill(order.ticker, fill, order.action, market_name, "GBP")
+                        portfolio.save()
                 else:
                     _missing = [t for t in required_prices if current_prices.get(t) is None]
                     logger.warning(f"[{market_name}] Allocation: missing required prices for {_missing} — skipping rebalance")
@@ -1605,7 +1616,7 @@ def _place_allocation_order(broker, order, logger, market_name):
             if quantity < MIN_TRADE_UNITS:
                 logger.error(f"[{market_name}] Allocation {order.action} {order.ticker} rejected, too small to retry")
                 return None
-            logger.warning(f"[{market_name}] Allocation {order.action} {order.ticker} rejected — retrying {quantity}")
+            logger.warning(f"[{market_name}] Allocation {order.action} {order.ticker} rejected ({e}) — retrying {quantity}")
     return None
 
 

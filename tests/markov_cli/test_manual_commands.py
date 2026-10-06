@@ -1105,3 +1105,43 @@ def test_process_manual_commands_daemon_state_default_empty():
     finally:
         import shutil
         shutil.rmtree(commands_dir, ignore_errors=True)
+
+
+def _tier_position(portfolio, ticker, qty, price=590.0):
+    """Min-hold holding as the daemon's sync or fill path records it."""
+    from Strategy_Auto_Trader.broker.types import FillResult as _FR
+    portfolio.record_tier_fill(ticker, _FR(ticker, "BUY", price, qty, ""), "BUY", "ftse", "GBP")
+
+
+def test_sell_all_sells_tier_holding_at_two_dp(fake_portfolio, fake_broker):
+    """Tier holdings are sold in 2 dp; the sub-cent remainder stays in the ledger."""
+    _tier_position(fake_portfolio, "EQGB.L", 27.017)
+    success, fills, _ = _execute_sell_all(fake_portfolio, fake_broker, mock.Mock())
+    assert success
+    assert fake_broker.orders[0].quantity == pytest.approx(27.01)
+    assert fills[0].ticker == "EQGB.L"
+    assert fake_portfolio.positions["EQGB.L"]["quantity"] == pytest.approx(0.007)
+
+
+def test_sell_all_closes_tier_holding_when_whole_to_two_dp(fake_portfolio, fake_broker):
+    _tier_position(fake_portfolio, "EQGB.L", 25.17)
+    success, _, _ = _execute_sell_all(fake_portfolio, fake_broker, mock.Mock())
+    assert success
+    assert "EQGB.L" not in fake_portfolio.positions
+
+
+def test_sell_all_leaves_sub_minimum_tier_dust(fake_portfolio, fake_broker):
+    _tier_position(fake_portfolio, "ISF.L", 0.005)
+    success, fills, summary = _execute_sell_all(fake_portfolio, fake_broker, mock.Mock())
+    assert fake_broker.orders == []
+    assert fills == []
+    assert fake_portfolio.positions["ISF.L"]["quantity"] == pytest.approx(0.005)
+
+
+def test_sell_all_tier_unfilled_reports_error_and_keeps_position(fake_portfolio, fake_broker):
+    _tier_position(fake_portfolio, "EQGB.L", 10.0)
+    fake_broker.place_order = mock.Mock(return_value=None)
+    success, fills, summary = _execute_sell_all(fake_portfolio, fake_broker, mock.Mock())
+    assert not success
+    assert "EQGB.L: order not filled" in summary
+    assert fake_portfolio.positions["EQGB.L"]["quantity"] == pytest.approx(10.0)

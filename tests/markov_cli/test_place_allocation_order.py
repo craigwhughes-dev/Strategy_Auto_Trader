@@ -75,3 +75,10 @@ def test_retry_stops_when_shrunk_quantity_falls_below_minimum():
     broker = ScriptedBroker([InsufficientFundsError("no cash")] * 4)
     assert _place_allocation_order(broker, _buy(0.01), LOG, "ftse") is None
     assert broker.quantities == [0.01]
+
+
+def test_retry_warning_includes_broker_reason(caplog):
+    broker = ScriptedBroker([InsufficientFundsError("insufficient-free-for-stocks-buy"), FILL])
+    with caplog.at_level("WARNING", logger="test_place_allocation_order"):
+        _place_allocation_order(broker, _buy(), LOG, "ftse")
+    assert "rejected (insufficient-free-for-stocks-buy) — retrying 26.07" in caplog.text

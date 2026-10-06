@@ -510,6 +510,8 @@ class MultiTierAllocationManager:
             if affordable < MIN_TRADE_UNITS:
                 log.warning(f"[{today}]   Insufficient cash for {asset}: budget {budget:.2f}, need {units * unit_cost:.2f}")
                 continue
+            log.info(f"[{today}]   BUY sizing {asset}: qty={affordable} price={current_price[asset]:.4f} "
+                     f"unit_cost={unit_cost:.4f} desired={desired[asset]:.2f} budget={budget:.2f}")
             orders.append(AllocationOrder(
                 ticker=asset, action="BUY", quantity=affordable, limit_price=None,
                 reason=f"Min-hold: {'enter' if asset == target else 'top up'} {asset} (tier {ASSET_TIERS[asset]})",
