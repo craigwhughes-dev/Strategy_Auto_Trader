@@ -67,10 +67,35 @@ def build_portfolio(config: dict):
 
 
 def build_broker(config: dict):
-    """IBKRAdapter for this profile, with the account guard applied."""
-    from ..broker.ibkr_adapter import IBKRAdapter
+    """The broker this profile trades through, with the account guard applied."""
     broker_cfg = config.get("broker", {})
-    exec_cfg = config.get("execution", {})
+    real_money = bool(config.get("execution", {}).get("real_money", False))
+    if broker_cfg.get("provider", "ibkr") == "t212":
+        return _build_t212_broker(broker_cfg, real_money)
+    return _build_ibkr_broker(broker_cfg, real_money)
+
+
+def _build_t212_broker(broker_cfg: dict, real_money: bool):
+    """Same credentials and account guard as the daemon, so a flatten reaches the account the daemon trades."""
+    import os
+    from ..broker.t212_adapter import T212AccountMismatchError, T212Adapter
+    api_key = os.environ.get("T212_API_KEY")
+    api_secret = os.environ.get("T212_API_SECRET")
+    if not api_key or not api_secret:
+        raise SystemExit("broker.provider is 't212' but T212_API_KEY/T212_API_SECRET are not set")
+    try:
+        return T212Adapter(
+            api_key=api_key,
+            api_secret=api_secret,
+            environment=broker_cfg.get("t212", {}).get("environment", "demo"),
+            allow_live_account=real_money,
+        )
+    except T212AccountMismatchError as e:
+        raise SystemExit(str(e))
+
+
+def _build_ibkr_broker(broker_cfg: dict, real_money: bool):
+    from ..broker.ibkr_adapter import IBKRAdapter
     expected_account = broker_cfg.get("expected_account")
     if expected_account is None:
         raise SystemExit(
@@ -83,11 +108,24 @@ def build_broker(config: dict):
         # half-dead session, and a clash would drop whichever connects second.
         client_id=int(broker_cfg.get("panic_client_id", 11)),
         expected_account=expected_account,
-        allow_live_account=bool(exec_cfg.get("real_money", False)),
+        allow_live_account=real_money,
     )
 
 
-def describe_plan(portfolio, broker_positions: dict[str, int] | None) -> str:
+def pause_buying_in_daemon_state() -> None:
+    """Set paused_by_user in the profile's daemon state, so a restarted daemon will not re-buy the tier.
+
+    Written to the file rather than queued as a command: the daemon is normally down during a panic
+    flatten, so nothing would process a queued command.
+    """
+    from .live_daemon import load_daemon_state, save_daemon_state
+    state = load_daemon_state()
+    state["paused_by_user"] = True
+    save_daemon_state(state)
+    logger.warning("Buying paused in daemon state (paused_by_user=true); resume it before buying is wanted again")
+
+
+def describe_plan(portfolio, broker_positions: dict[str, int] | None, min_hold_gbp: float | None = None) -> str:
     """Human-readable account of what a flatten would and would not touch."""
     lines = [f"Profile: {PROFILE.name}",
              f"Ledger:  {PROFILE.execution_state_path}"]
@@ -96,6 +134,10 @@ def describe_plan(portfolio, broker_positions: dict[str, int] | None) -> str:
     else:
         lines.append(f"Would SELL {len(portfolio.positions)} managed position(s) at market:")
         for ticker, pos in sorted(portfolio.positions.items()):
+            if pos.get("stop_managed") is False and min_hold_gbp is not None:
+                lines.append(f"  {ticker}: {pos.get('quantity')} tier holding, sold down to £{min_hold_gbp:g} "
+                             f"minimum hold")
+                continue
             lines.append(f"  {ticker}: {pos.get('quantity')} @ entry "
                          f"{pos.get('fill_price')}")
     if broker_positions:
@@ -137,7 +179,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.yes:
         logger.warning("PREVIEW ONLY — no orders will be sent. Re-run with --yes to act.")
         logger.info(describe_plan(portfolio, None))
+        logger.info("With --yes, buying is also paused in the daemon state so a restarted daemon will not re-buy.")
         return 0
+
+    pause_buying_in_daemon_state()
 
     if not portfolio.positions:
         logger.info(f"No managed positions in profile {PROFILE.name!r} — nothing to do.")
@@ -151,10 +196,11 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as e:
             logger.warning(f"Could not read broker positions: {e}")
             broker_positions = None
-        logger.warning(describe_plan(portfolio, broker_positions))
+        min_hold_gbp = (config.get("tier_allocation") or {}).get("min_hold_gbp", 10.0)
+        logger.warning(describe_plan(portfolio, broker_positions, min_hold_gbp))
 
         from .manual_commands import _execute_sell_all
-        success, fills, summary = _execute_sell_all(portfolio, broker, logger)
+        success, fills, summary = _execute_sell_all(portfolio, broker, logger, min_hold_gbp=min_hold_gbp)
         portfolio.save()
     finally:
         try:

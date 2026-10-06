@@ -7,7 +7,7 @@ You now have a fully-automated, continuously-running paper trading daemon that:
 ✅ Screens tickers overnight by volatility character  
 ✅ Runs hourly market cycles during FTSE (08:00-16:30) and S&P500 (09:30-16:00) hours  
 ✅ Prioritizes open positions (checked every hour) and round-robins through remaining candidates  
-✅ Enforces daily buy/sell limits across one shared IBKR paper account, cash-gated position sizing  
+✅ Enforces daily buy/sell limits across one shared broker account, cash-gated position sizing  
 ✅ Survives crashes with automatic Task Scheduler restart  
 
 ## Files You Need
@@ -171,7 +171,7 @@ execute, so the ledger and the broker stay in step. `SELL_ALL` is requeued while
 any holding's market is closed and expires after 24h. Buying stays paused until
 `manual_control unpause`. **If the daemon is not running, nothing happens.**
 
-`panic_flatten` talks to IBKR directly on its own client id. It previews and
+`panic_flatten` talks to the profile's broker directly (T212, or IBKR on its own client id). It previews and
 sends nothing without `--yes`, refuses to run while a daemon for the profile is
 detectably alive (`--force` overrides), and sells only positions in that
 profile's own ledger — holdings the broker reports that this system never opened
@@ -193,7 +193,7 @@ All settings in `config/overnight_strategy.json`:
 | `execution.real_money` | false | Permission to trade a non-paper account (see Account safety) |
 | `broker.expected_account` | — | Required when `dry_run` is false; verified on every connect |
 | `broker.client_id` | 1 | Must be unique per profile |
-| `broker.panic_client_id` | 11 | Client id used by `panic_flatten` |
+| `broker.panic_client_id` | 11 | IBKR only: client id used by `panic_flatten` |
 
 ## How It Works
 

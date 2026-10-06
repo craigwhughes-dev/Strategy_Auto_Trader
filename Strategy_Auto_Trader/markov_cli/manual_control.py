@@ -5,7 +5,7 @@ active profile's state/commands/pending/, identical in shape to what
 CommandManager.cs writes. Pure filesystem write, no network/process dependency.
 
 `flatten` needs the daemon alive to act on the queued command. When the daemon
-itself is down, use markov_cli.panic_flatten, which talks to IBKR directly.
+itself is down, use markov_cli.panic_flatten, which talks to the profile's broker directly.
 """
 from __future__ import annotations
 

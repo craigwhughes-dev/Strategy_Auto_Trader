@@ -276,15 +276,25 @@ def _sell_tier_holding(
     ticker: str,
     pos: dict,
     logger: logging.Logger,
+    min_hold_gbp: float | None,
 ) -> FillResult | None | bool:
-    """Sell a min-hold tier holding in full, at the 2 dp precision the allocator trades in.
+    """Sell a min-hold tier holding, at the 2 dp precision the allocator trades in.
 
-    Returns the FillResult; None if the order was not filled; False if nothing sellable (a remainder
-    below the minimum trade stays in the ledger, since T212 cannot take it).
+    min_hold_gbp: value left in the tier (the allocator's minimum hold); None sells everything.
+    Returns the FillResult; None if the order was not filled; False if nothing is sellable above
+    the minimum hold (or the remainder is below the minimum trade T212 accepts).
     """
-    quantity = math.floor(pos["quantity"] * 100) / 100
+    if min_hold_gbp is None:
+        sellable = pos["quantity"]
+    else:
+        from ..broker.symbols import sizing_price
+        price = sizing_price(ticker, broker.get_last_price(ticker))
+        if price <= 0:
+            raise RuntimeError(f"no usable price for {ticker}; cannot work out the minimum hold")
+        sellable = pos["quantity"] - min_hold_gbp / price
+    quantity = math.floor(sellable * 100) / 100 if sellable > 0 else 0.0
     if quantity < MIN_TRADE_UNITS:
-        logger.info(f"{ticker}: {pos['quantity']} held is below the minimum sellable size — left in place")
+        logger.info(f"{ticker}: {pos['quantity']} held, at or below the minimum hold — left in place")
         return False
     fill = _place_order_with_retry(broker, OrderRequest(ticker, "SELL", quantity), logger)
     if fill is None:
@@ -298,8 +308,12 @@ def _execute_sell_all(
     portfolio: object,
     broker: object,
     logger: logging.Logger,
+    min_hold_gbp: float | None = None,
 ) -> tuple[bool, list[FillResult], str]:
     """Execute SELL orders for all open positions.
+
+    min_hold_gbp: tier holdings are sold down to this value and keep it (the allocator's minimum hold);
+    None sells every position in full.
 
     Returns (success, fill_results, summary_or_error_msg).
     """
@@ -309,7 +323,9 @@ def _execute_sell_all(
     fills: list[FillResult] = []
     errors: list[str] = []
 
-    for ticker in list(portfolio.positions.keys()):
+    # Largest book value first, so the biggest exposure is cut before anything can fail part-way through
+    by_size = sorted(portfolio.positions, key=lambda t: portfolio.positions[t].get("cost_value", 0.0), reverse=True)
+    for ticker in by_size:
         try:
             qty = portfolio.positions[ticker]["quantity"]
 
@@ -349,7 +365,7 @@ def _execute_sell_all(
 
             pos = dict(portfolio.positions[ticker])
             if pos.get("stop_managed") is False:
-                sold = _sell_tier_holding(portfolio, broker, ticker, pos, logger)
+                sold = _sell_tier_holding(portfolio, broker, ticker, pos, logger, min_hold_gbp)
                 if sold is None:
                     errors.append(f"{ticker}: order not filled")
                 elif sold is not False:
@@ -610,7 +626,8 @@ def process_manual_commands(
                 continue
 
             # Execute SELL_ALL
-            success, fills, summary = _execute_sell_all(portfolio, broker, logger)
+            min_hold_gbp = (config.get("tier_allocation") or {}).get("min_hold_gbp", 10.0)
+            success, fills, summary = _execute_sell_all(portfolio, broker, logger, min_hold_gbp=min_hold_gbp)
             if success:
                 logger.info(f"  Command {cmd_id}: SELL_ALL completed, {len(fills)} position(s) closed")
                 _write_result(

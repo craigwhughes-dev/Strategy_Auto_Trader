@@ -1145,3 +1145,64 @@ def test_sell_all_tier_unfilled_reports_error_and_keeps_position(fake_portfolio,
     assert not success
     assert "EQGB.L: order not filled" in summary
     assert fake_portfolio.positions["EQGB.L"]["quantity"] == pytest.approx(10.0)
+
+
+def _priced(fake_broker, raw_pence: float | Exception):
+    """Broker stub quoting a held position as T212 does: LSE prices in pence (59090.3p = £590.90)."""
+    def get_last_price(ticker):
+        if isinstance(raw_pence, Exception):
+            raise raw_pence
+        return raw_pence
+    fake_broker.get_last_price = get_last_price
+    return fake_broker
+
+
+def test_sell_all_tier_keeps_min_hold(fake_portfolio, fake_broker):
+    """With a £10 minimum hold, a tier holding is sold down to £10 of value, not to zero."""
+    _tier_position(fake_portfolio, "EQGB.L", 27.017)
+    _priced(fake_broker, 59090.3)
+    success, fills, _ = _execute_sell_all(fake_portfolio, fake_broker, mock.Mock(), min_hold_gbp=10.0)
+    assert success
+    assert fake_broker.orders[0].quantity == pytest.approx(27.00)
+    assert fake_portfolio.positions["EQGB.L"]["quantity"] == pytest.approx(0.017)
+
+
+def test_sell_all_tier_already_at_min_hold_is_left_alone(fake_portfolio, fake_broker):
+    _tier_position(fake_portfolio, "ISF.L", 0.017)
+    _priced(fake_broker, 59090.3)
+    success, fills, _ = _execute_sell_all(fake_portfolio, fake_broker, mock.Mock(), min_hold_gbp=10.0)
+    assert success and fills == []
+    assert fake_broker.orders == []
+    assert fake_portfolio.positions["ISF.L"]["quantity"] == pytest.approx(0.017)
+
+
+def test_sell_all_tier_without_price_errors_and_keeps_position(fake_portfolio, fake_broker):
+    """No price means the minimum cannot be worked out, so nothing is sold."""
+    _tier_position(fake_portfolio, "EQGB.L", 27.017)
+    _priced(fake_broker, RuntimeError("no quote"))
+    success, fills, summary = _execute_sell_all(fake_portfolio, fake_broker, mock.Mock(), min_hold_gbp=10.0)
+    assert not success
+    assert fake_broker.orders == []
+    assert "EQGB.L" in summary
+    assert fake_portfolio.positions["EQGB.L"]["quantity"] == pytest.approx(27.017)
+
+
+def test_sell_all_without_min_hold_sells_tier_to_two_dp_remainder(fake_portfolio, fake_broker):
+    """No floor: everything sellable at 2 dp goes; the sub-cent remainder stays (T212 cannot take it)."""
+    _tier_position(fake_portfolio, "EQGB.L", 27.017)
+    success, _, _ = _execute_sell_all(fake_portfolio, fake_broker, mock.Mock())
+    assert success
+    assert fake_broker.orders[0].quantity == pytest.approx(27.01)
+    assert fake_portfolio.positions["EQGB.L"]["quantity"] == pytest.approx(0.007)
+
+
+def test_execute_sell_all_orders_largest_holding_first(fake_portfolio, fake_broker):
+    small = FillResult("BP.L", "BUY", 50.0, 5, datetime.now(timezone.utc).isoformat())    # £250
+    large = FillResult("AZN.L", "BUY", 100.0, 10, datetime.now(timezone.utc).isoformat())  # £1,000
+    fake_portfolio.record_entry("BP.L", small, 0.10, 45.0, 60.0)
+    fake_portfolio.record_entry("AZN.L", large, 0.10, 95.0, 115.0)
+
+    success, fills, _ = _execute_sell_all(fake_portfolio, fake_broker, mock.Mock())
+
+    assert success
+    assert [o.ticker for o in fake_broker.orders] == ["AZN.L", "BP.L"]
