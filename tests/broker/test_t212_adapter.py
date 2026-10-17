@@ -119,6 +119,67 @@ class TestPlaceOrder:
         assert adapter._pending_cancels[0]["order_id"] == 9
 
 
+class TestCheckPendingCancels:
+    def _record(self, order_id=9, **overrides):
+        import time
+        record = {
+            "order_id": order_id, "ticker": "AAPL", "action": "BUY",
+            "quantity": 1, "requested_at": time.monotonic(), "alerted": False,
+        }
+        record.update(overrides)
+        return record
+
+    def test_404_lookup_resolves_as_cancelled_not_retried_forever(self, monkeypatch):
+        """Order vanishing from T212 (404) means it's gone, not unreachable —
+        must resolve and stop polling, not retry every cycle indefinitely."""
+        adapter = make_adapter()
+        adapter._pending_cancels = [self._record()]
+        fake = FakeRequest([RuntimeError("T212 GET /api/v0/equity/orders/9 failed: 404 {}")])
+        monkeypatch.setattr(adapter, "_request", fake)
+
+        events = adapter.check_pending_cancels()
+
+        assert len(events) == 1
+        assert events[0].outcome == "cancelled"
+        assert events[0].ticker == "AAPL"
+        assert adapter._pending_cancels == []
+
+    def test_non_404_lookup_failure_keeps_retrying(self, monkeypatch):
+        adapter = make_adapter()
+        adapter._pending_cancels = [self._record()]
+        fake = FakeRequest([RuntimeError("T212 GET /api/v0/equity/orders/9 failed: 500 {}")])
+        monkeypatch.setattr(adapter, "_request", fake)
+
+        events = adapter.check_pending_cancels()
+
+        assert events == []
+        assert len(adapter._pending_cancels) == 1
+
+    def test_filled_lookup_resolves_as_filled(self, monkeypatch):
+        adapter = make_adapter()
+        adapter._pending_cancels = [self._record()]
+        fake = FakeRequest([{"status": "FILLED", "fillPrice": 195.5}])
+        monkeypatch.setattr(adapter, "_request", fake)
+
+        events = adapter.check_pending_cancels()
+
+        assert len(events) == 1
+        assert events[0].outcome == "filled"
+        assert events[0].fill.fill_price == pytest.approx(195.5)
+        assert adapter._pending_cancels == []
+
+    def test_still_working_keeps_retrying(self, monkeypatch):
+        adapter = make_adapter()
+        adapter._pending_cancels = [self._record()]
+        fake = FakeRequest([{"status": "WORKING"}])
+        monkeypatch.setattr(adapter, "_request", fake)
+
+        events = adapter.check_pending_cancels()
+
+        assert events == []
+        assert len(adapter._pending_cancels) == 1
+
+
 class TestPositionsAndOrders:
     def test_get_open_positions_maps_back_to_yfinance_ticker(self, monkeypatch):
         adapter = make_adapter()

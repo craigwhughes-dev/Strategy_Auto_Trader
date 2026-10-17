@@ -493,6 +493,18 @@ class T212Adapter:
         for record in self._pending_cancels:
             try:
                 order = self._request("GET", f"/api/v0/equity/orders/{record['order_id']}")
+            except RuntimeError as e:
+                if " failed: 404 " in str(e):
+                    # Order no longer exists at T212 — it was cancelled (or
+                    # expunged after cancelling); nothing left to poll for.
+                    events.append(PendingCancelEvent(
+                        ticker=record["ticker"], action=record["action"],
+                        quantity=record["quantity"], outcome="cancelled",
+                    ))
+                    continue
+                logger.warning(f"check_pending_cancels: lookup failed for {record['order_id']}: {e}")
+                survivors.append(record)
+                continue
             except Exception as e:
                 logger.warning(f"check_pending_cancels: lookup failed for {record['order_id']}: {e}")
                 survivors.append(record)
