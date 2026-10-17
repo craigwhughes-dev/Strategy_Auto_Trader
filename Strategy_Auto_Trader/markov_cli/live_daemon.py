@@ -1501,6 +1501,8 @@ def process_cycle(
                         vvix_band=vvix_band,
                         logger=logger,
                     )
+                    daemon_state["tier_allocation_last"] = allocation_mgr.to_persisted_dict()
+                    save_daemon_state(daemon_state)
                     from ..broker.symbols import normalize_fill_price
                     from ..broker.types import FillResult
                     # Halt still allows exiting a tier position (frees capital,
@@ -2756,6 +2758,16 @@ def main(argv: list[str] | None = None) -> int:
     allocation_mgr = MultiTierAllocationManager.from_config(config.get("tier_allocation"))
     logger.info(f"Allocation manager initialized: tier_mode={args.tier_mode}, current_asset={allocation_mgr.current_asset}, "
                 f"thresholds: {allocation_mgr.thresholds_summary()}")
+
+    # Restore last signal (e.g. Friday close) so app_status.json shows something
+    # before this session's first successful rebalance — e.g. over a weekend, when
+    # the broker refuses connection and no fresh signal can run. Marked "stale" in
+    # app_status_dict() once the signal's date isn't today.
+    _persisted_tier_signal = daemon_state.get("tier_allocation_last")
+    if _persisted_tier_signal:
+        allocation_mgr.restore_last_signal(_persisted_tier_signal)
+        logger.info(f"Allocation: restored last tier signal from {_persisted_tier_signal.get('signal_date')} "
+                    f"(tier {_persisted_tier_signal.get('tier_num')}, asset {_persisted_tier_signal.get('target_asset')})")
 
     # Broker connection is async and can hang; skip it here and let it fail gracefully
     # when trades are attempted. Daemon can still process tickers and generate signals.

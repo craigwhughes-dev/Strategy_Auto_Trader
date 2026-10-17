@@ -199,6 +199,7 @@ class MultiTierAllocationManager:
         self._last_tier_num = None
         self._last_target_asset = None  # Target asset selected by last signal
         self._last_action = None  # "HOLD" | "BUY" | "SELL"
+        self._last_signal_date = None  # date the above were computed on
         self._data_outage = False  # both indices lost for longer than the outage limit
         self.outage_limit_hours = index_max_outage_seconds / 3600
 
@@ -345,6 +346,7 @@ class MultiTierAllocationManager:
         self._last_tier_num = tier
         self._last_target_asset = target_asset
         self._last_action = action
+        self._last_signal_date = today
 
         return AllocationSignal(
             date=today,
@@ -596,6 +598,33 @@ class MultiTierAllocationManager:
         US open this is the prior US session's last bar."""
         return self._vxn_feed.current(fetcher)
 
+    def to_persisted_dict(self) -> dict | None:
+        """Snapshot of the last signal, for daemon_state.json so a restart (e.g. over a weekend,
+        when the broker refuses connection and no fresh signal can run) still has something to
+        show — `restore_last_signal` reloads it. None if no signal has run yet this process."""
+        if self._last_tier_num is None:
+            return None
+        return {
+            "vix": self._last_vix,
+            "vxn": self._last_vxn,
+            "vvix_band": self._last_vvix_band,
+            "tier_num": self._last_tier_num,
+            "target_asset": self._last_target_asset,
+            "action": self._last_action,
+            "signal_date": self._last_signal_date.isoformat() if self._last_signal_date else None,
+        }
+
+    def restore_last_signal(self, data: dict) -> None:
+        """Hydrate the last-signal fields from a prior session's `to_persisted_dict()`."""
+        self._last_vix = data.get("vix")
+        self._last_vxn = data.get("vxn")
+        self._last_vvix_band = data.get("vvix_band", "base")
+        self._last_tier_num = data.get("tier_num")
+        self._last_target_asset = data.get("target_asset")
+        self._last_action = data.get("action")
+        signal_date = data.get("signal_date")
+        self._last_signal_date = date.fromisoformat(signal_date) if signal_date else None
+
     def app_status_dict(self, daemon_state: dict | None = None) -> dict:
         """Return current state for app_status.json.
 
@@ -664,6 +693,8 @@ class MultiTierAllocationManager:
                 "selected_tier_num": self._last_tier_num,
                 "selected_asset": self._last_target_asset,
                 "action": self._last_action,
+                "as_of_date": self._last_signal_date.isoformat() if self._last_signal_date else None,
+                "stale": self._last_signal_date is not None and self._last_signal_date != date.today(),
                 "vvix": {
                     "current": (daemon_state or {}).get("vvix_last_value"),
                     "band": self._last_vvix_band,
