@@ -1633,6 +1633,58 @@ def _seed_tier_price(ticker: str, broker, portfolio, config: dict, market_name: 
     return price
 
 
+_SEED_BUY_RETRY_COOLDOWN_SECONDS = 300
+
+
+def retry_cold_start_seed_buys(
+    allocation_mgr, broker, portfolio, config: dict, daemon_state: dict, logger: logging.Logger,
+) -> None:
+    """Retry an unheld enabled tier asset's seed buy every few minutes instead of waiting for
+    the next hourly market cycle — the hourly gate exists for the VIX/VXN signal cadence, not
+    for "do we have a price yet", so a cold-start account would otherwise sit unpriced for up
+    to an hour after a failed seed buy (e.g. a T212 429 during the first cycle's API burst).
+
+    Bootstrap-only: checks held positions once, seed-buys whichever enabled assets are still
+    missing, then marks itself resolved and stops entirely once none are — adds no ongoing API
+    load in steady state. Deliberately lighter than a full cycle (no VIX/VXN fetch, no price
+    check for already-held tickers, no rebalance()) so retrying doesn't repeat the same burst
+    of calls that caused the rate limit in the first place.
+    """
+    if allocation_mgr is None or daemon_state.get("cold_start_seed_buys_resolved"):
+        return
+    if daemon_state.get("halt_new_entries") or daemon_state.get("paused_by_user"):
+        return
+
+    now = datetime.now(timezone.utc)
+    next_retry = daemon_state.get("next_seed_buy_retry_at")
+    if next_retry and now < datetime.fromisoformat(next_retry):
+        return
+
+    enabled = set(allocation_mgr.enabled_assets())
+    if not enabled:
+        return
+    try:
+        held = broker.get_open_positions()
+    except Exception as e:
+        logger.error(f"Cold-start seed-buy retry: could not read positions: {e}")
+        return
+
+    missing = [t for t in enabled if not held.get(t)]
+    if not missing:
+        daemon_state["cold_start_seed_buys_resolved"] = True
+        daemon_state.pop("next_seed_buy_retry_at", None)
+        save_daemon_state(daemon_state)
+        return
+
+    for ticker in missing:
+        _seed_tier_price(ticker, broker, portfolio, config, "cold-start", logger)
+
+    daemon_state["next_seed_buy_retry_at"] = (
+        now + timedelta(seconds=_SEED_BUY_RETRY_COOLDOWN_SECONDS)
+    ).isoformat()
+    save_daemon_state(daemon_state)
+
+
 def _place_allocation_order(broker, order, logger, market_name):
     """Place one tier-allocation order and return its fill, or None.
 
@@ -2966,6 +3018,14 @@ def main(argv: list[str] | None = None) -> int:
 
                 # Process manual sell commands from mobile app
                 process_manual_commands_wrapper(config, portfolio, broker, logger, daemon_state)
+
+                # Cold-start bootstrap: retry an unheld tier asset's seed buy every few
+                # minutes rather than waiting for the next hourly market cycle (see
+                # retry_cold_start_seed_buys docstring). No-ops once resolved.
+                if args.tier_mode and not dry_run and startup_reconciliation_done:
+                    retry_cold_start_seed_buys(
+                        allocation_mgr, broker, portfolio, config, daemon_state, logger,
+                    )
 
                 # Check each market
                 now = datetime.now(timezone.utc)
