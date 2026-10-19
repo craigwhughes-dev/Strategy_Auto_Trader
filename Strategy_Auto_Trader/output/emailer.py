@@ -7,6 +7,7 @@ import logging
 import base64
 import os
 import smtplib
+import time
 from datetime import date
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -31,6 +32,15 @@ def _get_smtp_creds() -> tuple[str, str]:
     return user, password
 
 
+_RETRYABLE_SMTP_ERRORS = (
+    smtplib.SMTPServerDisconnected,
+    smtplib.SMTPConnectError,
+    ConnectionError,
+    TimeoutError,
+)
+_RETRY_BACKOFF_SECS = (5, 20)
+
+
 def _send(subject: str, html_body: str, to: str | None = None) -> None:
     user, password = _get_smtp_creds()
     to = to or os.environ.get("SMTP_TO") or user
@@ -41,19 +51,28 @@ def _send(subject: str, html_body: str, to: str | None = None) -> None:
     msg["To"] = to
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-    if SMTP_PORT == 465:
-        # SSL mode
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
-            server.login(user, password)
-            server.sendmail(user, [to], msg.as_string())
-    else:
-        # TLS mode (port 587)
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(user, password)
-            server.sendmail(user, [to], msg.as_string())
+    for attempt in range(len(_RETRY_BACKOFF_SECS) + 1):
+        try:
+            if SMTP_PORT == 465:
+                # SSL mode
+                with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
+                    server.login(user, password)
+                    server.sendmail(user, [to], msg.as_string())
+            else:
+                # TLS mode (port 587)
+                with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+                    server.ehlo()
+                    server.starttls()
+                    server.ehlo()
+                    server.login(user, password)
+                    server.sendmail(user, [to], msg.as_string())
+            return
+        except _RETRYABLE_SMTP_ERRORS as e:
+            if attempt >= len(_RETRY_BACKOFF_SECS):
+                raise
+            delay = _RETRY_BACKOFF_SECS[attempt]
+            logger.warning(f"  SMTP send failed ({e!r}), retrying in {delay}s (attempt {attempt + 1}/{len(_RETRY_BACKOFF_SECS)})")
+            time.sleep(delay)
 
 
 _SIG_COLOUR = {"BUY": "#1a7a3f", "SELL": "#a02020", "HOLD": "#5a5a5a"}
