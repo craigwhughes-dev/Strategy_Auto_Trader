@@ -165,9 +165,13 @@ class TestCheckPendingCancels:
         record.update(overrides)
         return record
 
-    def test_404_lookup_resolves_as_cancelled_not_retried_forever(self, monkeypatch):
-        """Order vanishing from T212 (404) means it's gone, not unreachable —
-        must resolve and stop polling, not retry every cycle indefinitely."""
+    def test_404_lookup_resolves_as_unknown_not_assumed_cancelled(self, monkeypatch):
+        """Order vanishing from T212 (404) means it's gone, not unreachable — must stop
+        polling, not retry every cycle indefinitely. But a 404 does NOT prove it was
+        cancelled: a filled order can equally be no-longer-listed by the time this GET
+        runs (confirmed live 2026-10-19 — a CSH2.L buy resolved this way had actually
+        filled at T212). Must resolve as "unknown" so the caller checks real broker
+        positions, not silently treat it as a clean, no-op cancel."""
         adapter = make_adapter()
         adapter._pending_cancels = [self._record()]
         fake = FakeRequest([RuntimeError("T212 GET /api/v0/equity/orders/9 failed: 404 {}")])
@@ -176,7 +180,7 @@ class TestCheckPendingCancels:
         events = adapter.check_pending_cancels()
 
         assert len(events) == 1
-        assert events[0].outcome == "cancelled"
+        assert events[0].outcome == "unknown"
         assert events[0].ticker == "AAPL"
         assert adapter._pending_cancels == []
 

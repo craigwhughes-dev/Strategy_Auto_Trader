@@ -76,10 +76,16 @@ class OpenOrderInfo:
 class PendingCancelEvent:
     """Result of resolving a previously-unconfirmed cancel request.
 
-    outcome is one of: "cancelled" (confirmed, no longer working),
-    "filled" (filled after the cancel was requested — a real position
-    that needs reconciling), "timeout_alert" (still unconfirmed after
-    the alert threshold — fires once, not every cycle)."""
+    outcome is one of: "cancelled" (confirmed via a live terminal non-fill
+    status — the order was actually read back as REJECTED/CANCELLED/etc.),
+    "filled" (filled after the cancel was requested — a real position that
+    needs reconciling), "unknown" (the status lookup itself 404'd — the
+    order vanished from T212's own account before we could read what
+    happened to it, which can mean cancelled OR filled-and-no-longer-listed;
+    stops polling but does NOT assume cancelled — the caller must verify
+    against actual broker positions, not take this as a clean resolution),
+    "timeout_alert" (still unconfirmed after the alert threshold — fires
+    once, not every cycle)."""
     ticker: str
     action: str
     quantity: float

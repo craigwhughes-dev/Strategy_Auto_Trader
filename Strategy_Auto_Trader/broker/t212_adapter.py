@@ -515,11 +515,16 @@ class T212Adapter:
                 order = self._request("GET", f"/api/v0/equity/orders/{record['order_id']}")
             except RuntimeError as e:
                 if " failed: 404 " in str(e):
-                    # Order no longer exists at T212 — it was cancelled (or
-                    # expunged after cancelling); nothing left to poll for.
+                    # Order no longer exists at T212 — stop polling, but a 404 here
+                    # does NOT prove it was cancelled: a filled order can equally be
+                    # "no longer listed" by the time this GET runs (confirmed live
+                    # 2026-10-19 — a CSH2.L buy resolved "cancelled" by this exact
+                    # path had actually filled at T212). Only a live terminal status
+                    # read back from T212 earns "cancelled"; this is "unknown" and
+                    # must be checked against real broker positions, not assumed.
                     events.append(PendingCancelEvent(
                         ticker=record["ticker"], action=record["action"],
-                        quantity=record["quantity"], outcome="cancelled",
+                        quantity=record["quantity"], outcome="unknown",
                     ))
                     continue
                 logger.warning(f"check_pending_cancels: lookup failed for {record['order_id']}: {e}")

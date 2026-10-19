@@ -77,7 +77,34 @@ class TestCheckPendingOrderCancels:
         )
 
         run_recon.assert_called_once_with(
-            portfolio, broker, daemon_state, mock.ANY, save_state=save_state,
+            portfolio, broker, daemon_state, mock.ANY, config=None, save_state=save_state,
+        )
+
+    def test_unknown_event_triggers_immediate_reconciliation(self):
+        """A 404 on the status lookup stops polling but proves nothing — it can mean
+        cancelled OR filled-and-no-longer-listed (confirmed live 2026-10-19: a CSH2.L
+        buy resolved this way had actually filled). Must reconcile immediately rather
+        than silently treating it as a clean, no-op cancel."""
+        from Strategy_Auto_Trader.markov_cli.live_daemon import check_pending_order_cancels
+        from Strategy_Auto_Trader.broker.types import PendingCancelEvent
+
+        portfolio = mock.Mock()
+        daemon_state = {"halt_new_entries": False}
+        broker = mock.Mock()
+        broker.check_pending_cancels.return_value = [
+            PendingCancelEvent(ticker="CSH2.L", action="BUY", quantity=1.13, outcome="unknown"),
+        ]
+        run_recon = mock.Mock()
+        save_state = mock.Mock()
+        config = {"reconciliation": {"materiality_threshold_gbp": 20.0}}
+
+        check_pending_order_cancels(
+            portfolio, daemon_state, broker, logging.getLogger(__name__),
+            config=config, run_recon=run_recon, save_state=save_state,
+        )
+
+        run_recon.assert_called_once_with(
+            portfolio, broker, daemon_state, mock.ANY, config=config, save_state=save_state,
         )
 
     def test_timeout_alert_sends_email_not_reconciliation(self, monkeypatch):

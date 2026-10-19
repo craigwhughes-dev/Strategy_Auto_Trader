@@ -2104,6 +2104,7 @@ def check_pending_order_cancels(
     broker: object,
     logger: logging.Logger,
     *,
+    config: dict | None = None,
     run_recon: Callable | None = None,
     save_state: Callable | None = None,
 ) -> None:
@@ -2136,7 +2137,16 @@ def check_pending_order_cancels(
                 f"— running immediate reconciliation"
             )
             (run_recon or run_reconciliation)(
-                portfolio, broker, daemon_state, logger, save_state=save_state,
+                portfolio, broker, daemon_state, logger, config=config, save_state=save_state,
+            )
+        elif event.outcome == "unknown":
+            logger.warning(
+                f"{event.ticker}: pending order vanished from T212 (404) with no confirmed "
+                f"fill or cancel status — could be either; running immediate reconciliation "
+                f"to check for an untracked fill rather than assuming it's safely gone"
+            )
+            (run_recon or run_reconciliation)(
+                portfolio, broker, daemon_state, logger, config=config, save_state=save_state,
             )
         elif event.outcome == "timeout_alert":
             logger.warning(
@@ -3037,7 +3047,7 @@ def main(argv: list[str] | None = None) -> int:
 
                 # Resolve any entry-order cancels IBKR hasn't confirmed yet
                 if not dry_run and startup_reconciliation_done:
-                    check_pending_order_cancels(portfolio, daemon_state, broker, logger)
+                    check_pending_order_cancels(portfolio, daemon_state, broker, logger, config=config)
 
                 # Process manual sell commands from mobile app
                 process_manual_commands_wrapper(config, portfolio, broker, logger, daemon_state)
