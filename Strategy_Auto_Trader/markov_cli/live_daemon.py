@@ -2152,12 +2152,16 @@ def check_pending_order_cancels(
                 logger.error(f"check_pending_order_cancels: alert email failed: {e}")
 
 
+DEFAULT_RECONCILIATION_MATERIALITY_THRESHOLD_GBP = 20.0
+
+
 def run_reconciliation(
     portfolio: object,
     broker: object,
     daemon_state: dict,
     logger: logging.Logger,
     *,
+    config: dict | None = None,
     save_state: Callable | None = None,
     send_alert: Callable | None = None,
 ) -> bool:
@@ -2165,9 +2169,16 @@ def run_reconciliation(
 
     On mismatch: log, email an alert, and set halt_new_entries so no new
     positions are opened until a clean pass. Never auto-corrects either side.
+
+    Discrepancies under config['reconciliation']['materiality_threshold_gbp']
+    (default £20) are logged but do not halt — a position missing entirely at
+    the broker is never filtered this way regardless of value (see
+    discrepancy_values_gbp). Only material discrepancies drive the halt/alert
+    and land in daemon_state['reconciliation_discrepancies'].
+
     Returns "clean", "mismatch", or "error" (broker positions unavailable).
     """
-    from ..broker.reconcile import reconcile_positions
+    from ..broker.reconcile import discrepancy_values_gbp, reconcile_positions
     if save_state is None:
         save_state = save_daemon_state
 
@@ -2205,6 +2216,17 @@ def run_reconciliation(
             logger.info(f"  {ticker}: {qty} shares")
 
     discrepancies = reconcile_positions(portfolio.positions, broker_positions)
+
+    if discrepancies:
+        threshold = (config or {}).get("reconciliation", {}).get(
+            "materiality_threshold_gbp", DEFAULT_RECONCILIATION_MATERIALITY_THRESHOLD_GBP
+        )
+        values = discrepancy_values_gbp(portfolio.positions, broker_positions, broker, logger)
+        immaterial = [d for d in discrepancies if values.get(d.split(":", 1)[0], math.inf) < threshold]
+        if immaterial:
+            for d in immaterial:
+                logger.warning(f"Reconciliation: immaterial mismatch (< £{threshold:g}), not halting — {d}")
+            discrepancies = [d for d in discrepancies if d not in immaterial]
 
     if discrepancies:
         logger.error(f"RECONCILIATION MISMATCH ({len(discrepancies)} discrepancies) "
@@ -2251,6 +2273,7 @@ def run_startup_reconciliation(
     broker: object,
     logger: logging.Logger,
     *,
+    config: dict | None = None,
     run_recon: Callable | None = None,
     save_state: Callable | None = None,
     send_interrupt_alert: Callable | None = None,
@@ -2279,7 +2302,7 @@ def run_startup_reconciliation(
     logger.info(f"About to run startup reconciliation (in-flight marker present: {marker is not None})...")
 
     outcome = run_recon(portfolio, broker, daemon_state, logger,
-                        save_state=save_state)
+                        config=config, save_state=save_state)
 
     if outcome == "error":
         logger.warning("Startup reconciliation could not reach broker — will retry next poll")
@@ -2494,7 +2517,7 @@ def check_nightly_reconciliation(
 
     if now.hour == run_hour and now.minute >= run_minute:
         logger.info("Running nightly position reconciliation...")
-        outcome = run_recon(portfolio, broker, daemon_state, logger)
+        outcome = run_recon(portfolio, broker, daemon_state, logger, config=config)
         if protective_stops:
             check_protective_stops(portfolio, broker, logger, stop_buffer_pct)
         # A broker fetch error is not a daily result — leave the date unset so
@@ -2921,7 +2944,7 @@ def main(argv: list[str] | None = None) -> int:
                 # needs_reconciliation, so a dropped socket self-heals within one poll
                 # interval instead of requiring a daemon restart.
                 if not dry_run and (not startup_reconciliation_done or daemon_state.get("needs_reconciliation")):
-                    if run_startup_reconciliation(daemon_state, portfolio, broker, logger):
+                    if run_startup_reconciliation(daemon_state, portfolio, broker, logger, config=config):
                         startup_reconciliation_done = True
                         if not startup_tier_state_done:
                             startup_tier_state_done = True

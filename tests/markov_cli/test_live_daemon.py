@@ -987,6 +987,66 @@ class TestReconciliation:
         assert outcome == "error"
         assert daemon_state["halt_new_entries"] is True
 
+    def test_immaterial_mismatch_does_not_halt(self, monkeypatch):
+        """A tiny quantity drift (below the £ materiality threshold) must log, not halt —
+        a dust-level mismatch from e.g. a seed buy shouldn't block the whole portfolio's
+        rebalance (2026-10-19 cold-start: £5.60 EQGB.L drift halted new entries)."""
+        broker = self._broker({"EQGB.L": 0.02})
+        broker.get_last_price.return_value = 560.0  # pence -> £5.60/share
+        daemon_state = {}
+        config = {"reconciliation": {"materiality_threshold_gbp": 20.0}}
+
+        outcome = live_daemon.run_reconciliation(
+            self._portfolio({"EQGB.L": {"quantity": 0.01}}), broker, daemon_state, mock.Mock(),
+            config=config, save_state=lambda s: None,
+        )
+        assert outcome == "clean"
+        assert daemon_state["halt_new_entries"] is False
+
+    def test_material_mismatch_still_halts(self, monkeypatch):
+        """A drift at or above the threshold halts exactly as before."""
+        broker = self._broker({"SPY": 7})
+        broker.get_last_price.return_value = 200.0
+        daemon_state = {}
+        config = {"reconciliation": {"materiality_threshold_gbp": 20.0}}
+
+        outcome = live_daemon.run_reconciliation(
+            self._portfolio({"SPY": {"quantity": 10}}), broker, daemon_state, mock.Mock(),
+            config=config, save_state=lambda s: None,
+        )
+        assert outcome == "mismatch"
+        assert daemon_state["halt_new_entries"] is True
+        assert len(daemon_state["reconciliation_discrepancies"]) == 1
+
+    def test_position_missing_at_broker_always_halts_regardless_of_threshold(self, monkeypatch):
+        """A position internal state thinks exists but the broker shows none at all is
+        never filtered by the £ threshold, however high — it's never priceable and is a
+        far more serious signal than a small quantity drift."""
+        broker = self._broker({})
+        daemon_state = {}
+        config = {"reconciliation": {"materiality_threshold_gbp": 1_000_000.0}}
+
+        outcome = live_daemon.run_reconciliation(
+            self._portfolio({"SPY": {"quantity": 10}}), broker, daemon_state, mock.Mock(),
+            config=config, save_state=lambda s: None,
+        )
+        assert outcome == "mismatch"
+        assert daemon_state["halt_new_entries"] is True
+
+    def test_default_materiality_threshold_used_without_config(self, monkeypatch):
+        """No config passed (or no 'reconciliation' key) falls back to the module default,
+        not to zero-tolerance — callers that don't thread config through still get a sane
+        default rather than an exception."""
+        broker = self._broker({"SPY": 10})
+        broker.get_last_price.return_value = 0.001  # tiny £ value, well under the default
+        daemon_state = {}
+
+        outcome = live_daemon.run_reconciliation(
+            self._portfolio({"SPY": {"quantity": 10.00001}}), broker, daemon_state, mock.Mock(),
+            save_state=lambda s: None,
+        )
+        assert outcome == "clean"
+
     def _nightly(self, monkeypatch, daemon_state, outcome, at_hour=21, at_minute=30, day=6):
         config = {"overnight_timezone": "Europe/London",
                   "reconciliation_run_time": "21:30"}

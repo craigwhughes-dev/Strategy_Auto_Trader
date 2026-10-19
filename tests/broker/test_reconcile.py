@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
-from Strategy_Auto_Trader.broker.reconcile import reconcile_positions
+from Strategy_Auto_Trader.broker.reconcile import discrepancy_values_gbp, reconcile_positions
 
 
 def _pos(qty: int) -> dict:
@@ -114,3 +116,47 @@ class TestFractionalQuantities:
     def test_difference_at_precision_is_flagged(self):
         internal = {"EQGB.L": {"quantity": 27.017}}
         assert len(reconcile_positions(internal, {"EQGB.L": 27.01701})) == 1
+
+
+class _FakeBroker:
+    def __init__(self, prices):
+        self._prices = prices
+
+    def get_last_price(self, ticker):
+        return self._prices[ticker]
+
+
+class TestDiscrepancyValuesGbp:
+    def test_matching_positions_have_no_value(self):
+        internal = {"SPY": _pos(10)}
+        broker = _FakeBroker({"SPY": 200.0})
+        assert discrepancy_values_gbp(internal, {"SPY": 10}, broker) == {}
+
+    def test_quantity_mismatch_is_priced_in_pounds_for_non_lse(self):
+        internal = {"SPY": _pos(10)}
+        broker = _FakeBroker({"SPY": 200.0})
+        values = discrepancy_values_gbp(internal, {"SPY": 7}, broker)
+        assert values == {"SPY": pytest.approx(3 * 200.0)}
+
+    def test_quantity_mismatch_converts_lse_pence_to_pounds(self):
+        # sizing_price divides .L tickers by 100 (pence -> pounds)
+        internal = {"EQGB.L": {"quantity": 0.02, "entry_date": "x", "fill_price": 5.0}}
+        broker = _FakeBroker({"EQGB.L": 560.0})  # pence
+        values = discrepancy_values_gbp(internal, {"EQGB.L": 0.01}, broker)
+        assert values == {"EQGB.L": pytest.approx(0.01 * 5.6)}
+
+    def test_missing_at_broker_is_always_infinite_regardless_of_price(self):
+        internal = {"SPY": _pos(10)}
+        broker = _FakeBroker({})  # get_last_price would KeyError if called
+        values = discrepancy_values_gbp(internal, {}, broker)
+        assert values == {"SPY": math.inf}
+
+    def test_pricing_failure_is_always_infinite(self):
+        internal = {"SPY": _pos(10)}
+
+        class RaisingBroker:
+            def get_last_price(self, ticker):
+                raise RuntimeError("no price available")
+
+        values = discrepancy_values_gbp(internal, {"SPY": 7}, RaisingBroker())
+        assert values == {"SPY": math.inf}

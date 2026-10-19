@@ -7,12 +7,22 @@ matching the internal positions dict key space directly.
 
 from __future__ import annotations
 
+import math
+
 from .types import QUANTITY_DECIMALS, round_quantity
 
 
 def _fmt_qty(quantity: float) -> str:
     """5 dp without trailing zeros, so 5.0 reads as 5 and 27.017 as 27.017 (discrepancy text is compared for alert dedup)."""
     return f"{quantity:.{QUANTITY_DECIMALS}f}".rstrip("0").rstrip(".")
+
+
+def _expected_quantities(internal_positions: dict[str, dict]) -> dict[str, float]:
+    """Internal holding per ticker, summed across any duplicate entries."""
+    expected: dict[str, float] = {}
+    for ticker, pos in internal_positions.items():
+        expected[ticker] = round_quantity(expected.get(ticker, 0) + pos.get("quantity", 0))
+    return expected
 
 
 def reconcile_positions(
@@ -25,33 +35,62 @@ def reconcile_positions(
     discrepancy strings; empty means the two states agree. Never mutates either
     side — surfacing is the caller's job.
     """
-    expected: dict[str, dict] = {}
-    for ticker, pos in internal_positions.items():
-        entry = expected.setdefault(ticker, {"quantity": 0})
-        entry["quantity"] = round_quantity(entry["quantity"] + pos.get("quantity", 0))
+    expected = _expected_quantities(internal_positions)
 
     discrepancies: list[str] = []
     for ticker in sorted(expected):
-        exp = expected[ticker]
+        exp_qty = expected[ticker]
         held = broker_positions.get(ticker)
         if held is None:
             discrepancies.append(
-                f"{ticker}: internal state shows {_fmt_qty(exp['quantity'])} shares, "
+                f"{ticker}: internal state shows {_fmt_qty(exp_qty)} shares, "
                 f"broker shows no position"
             )
-        elif round_quantity(held) != exp["quantity"]:
+        elif round_quantity(held) != exp_qty:
             discrepancies.append(
-                f"{ticker}: internal state shows {_fmt_qty(exp['quantity'])} shares, "
+                f"{ticker}: internal state shows {_fmt_qty(exp_qty)} shares, "
                 f"broker shows {_fmt_qty(round_quantity(held))}"
             )
 
-    for ticker in sorted(broker_positions):
-        if ticker not in expected:
-            # Broker positions not tracked internally are unmanaged (e.g., manual trades in a mixed account).
-            # Skip them — reconciliation only flags mismatches on daemon-managed positions.
-            pass
-
     return discrepancies
+
+
+def discrepancy_values_gbp(
+    internal_positions: dict[str, dict],
+    broker_positions: dict[str, int],
+    broker: object,
+    logger: object | None = None,
+) -> dict[str, float]:
+    """£ value of each discrepant ticker's quantity drift, for materiality filtering.
+
+    A position missing entirely at the broker (internal thinks we hold shares, broker
+    shows none) is always math.inf — that signals a position vanished or was closed
+    without us knowing, a far more serious case than a small quantity drift, and must
+    never be filtered out by a £ threshold. Same for any pricing failure: if a
+    discrepancy can't be priced, it can't be judged safe to ignore.
+    """
+    from .symbols import sizing_price
+
+    expected = _expected_quantities(internal_positions)
+
+    values: dict[str, float] = {}
+    for ticker in sorted(expected):
+        exp_qty = expected[ticker]
+        held = broker_positions.get(ticker)
+        if held is None:
+            values[ticker] = math.inf
+            continue
+        held = round_quantity(held)
+        if held == exp_qty:
+            continue
+        try:
+            price = sizing_price(ticker, broker.get_last_price(ticker))
+            values[ticker] = abs(held - exp_qty) * price
+        except Exception as e:
+            if logger is not None:
+                logger.warning(f"Reconciliation: could not price {ticker} discrepancy for materiality check: {e}")
+            values[ticker] = math.inf
+    return values
 
 
 def check_stop_fills_for_missing_positions(
