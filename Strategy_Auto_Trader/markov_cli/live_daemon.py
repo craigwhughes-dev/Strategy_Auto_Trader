@@ -1521,6 +1521,13 @@ def process_cycle(
                         daemon_state.get("halt_new_entries") or daemon_state.get("paused_by_user")
                     )
                     for order in orders:
+                        # Same interleave as the must-run/round-robin loops: a single order's
+                        # own fill-poll can block up to fill_timeout (180s), so refresh the
+                        # heartbeat and pick up manual commands before each one, not only after
+                        # the whole orders list (and whole cycle) has resolved.
+                        process_manual_commands_wrapper(config, portfolio, broker, logger, daemon_state)
+                        _write_app_status_snapshot_safe(portfolio, daemon_state, config, last_cycle_hour, logger,
+                                                       allocation_mgr=allocation_mgr, tier_mode=tier_mode)
                         if order.action == "BUY" and not allow_new_entries:
                             logger.warning(
                                 f"[{market_name}] Allocation: new entries halted — skipping "

@@ -858,6 +858,59 @@ def test_process_cycle_tier_mode_runs_rebalance_even_with_empty_in_scope(monkeyp
     allocation_mgr._get_vix_current.assert_called_once()
 
 
+def test_process_cycle_interleaves_manual_commands_and_snapshot_between_tier_orders(monkeypatch):
+    """A single tier order's own fill-poll can block up to fill_timeout (180s on T212), so the
+    heartbeat snapshot and manual-command check must run before EACH order in the rebalance,
+    not only once after the whole orders list (and whole cycle) resolves — same interleave
+    already applied to the must-run/round-robin loops (2026-10-19 staleness during a blocked
+    CSH2.L fill-poll)."""
+    from Strategy_Auto_Trader.allocation.allocation_manager import AllocationOrder
+    from Strategy_Auto_Trader.broker.types import FillResult
+
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: [])
+    manual_calls = []
+    snapshot_calls = []
+    monkeypatch.setattr(live_daemon, "process_manual_commands_wrapper",
+                         lambda *a, **k: manual_calls.append(1))
+    monkeypatch.setattr(live_daemon, "_write_app_status_snapshot_safe",
+                         lambda *a, **k: snapshot_calls.append(1))
+    monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: None)
+
+    allocation_mgr = mock.Mock()
+    allocation_mgr._get_vix_current.return_value = 15.0
+    allocation_mgr._get_vxn_current.return_value = 20.0
+    allocation_mgr.data_outage.return_value = (False, False)
+    allocation_mgr.vvix_edge_low = 25.0
+    allocation_mgr.vvix_edge_high = 30.0
+    allocation_mgr.vvix_confirm_days = 2
+    allocation_mgr.enabled_assets.return_value = ["EQGB.L"]
+    allocation_mgr.rebalance.return_value = [
+        AllocationOrder(ticker="EQGB.L", action="SELL", quantity=0.01),
+        AllocationOrder(ticker="EQGB.L", action="SELL", quantity=0.01),
+    ]
+
+    broker = mock.Mock()
+    broker.is_connected.return_value = True
+    broker.get_last_price.return_value = 500.0
+    broker.get_available_cash.return_value = 1000.0
+    broker.get_open_positions.return_value = {"EQGB.L": 0.02}
+    broker.place_order.return_value = FillResult("EQGB.L", "SELL", 5.0, 0.01, "t")
+
+    portfolio = mock.Mock()
+    portfolio.sync_tier_positions.return_value = []
+
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    daemon_state = {"cursors": {}, "vvix_last_date": date.today().isoformat()}
+    live_daemon.process_cycle(
+        "test_market", {}, config, daemon_state,
+        portfolio=portfolio, broker=broker, logger=mock.Mock(),
+        allocation_mgr=allocation_mgr, tier_mode=True,
+    )
+
+    assert len(manual_calls) == 2  # once before each of the 2 orders
+    assert len(snapshot_calls) == 2
+
+
 def test_process_cycle_non_tier_mode_still_returns_early_on_empty_in_scope(monkeypatch):
     """Guards the other side of the fix above: outside tier_mode, no in-scope tickers must
     still short-circuit the cycle before reaching the allocation block."""
