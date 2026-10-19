@@ -52,8 +52,13 @@ TIER_ASSETS = {1: "EQGB.L", 2: "VUSA", 3: "ISF.L", 4: "CSH2.L"}
 ASSET_TIERS = {"EQGB.L": 1, "VUSA": 2, "ISF.L": 3, "CSH2.L": 4}
 # Smallest fractional trade the allocator places (2 dp, accepted by T212 for every mapped tier asset)
 MIN_TRADE_UNITS = 0.01
-# Share of allocatable cash the allocator leaves unspent, for ask-over-quote fills on market buys
-MIN_HOLD_CASH_HEADROOM = 0.01
+# Share of allocatable cash the allocator leaves unspent, for ask-over-quote fills on market buys.
+# 1% (plus a 0.05% commission buffer) repeatedly undersized T212 buys by ~6.5% in practice (two
+# shrink-retries needed on both the 12:56 and 13:03 2026-10-19 CSH2.L cycles) — T212 evidently
+# reserves more than get_available_cash()'s availableToTrade figure reports, for reasons not
+# confirmed (FX/settlement hold, real spread on a thin instrument, or something else broker-side).
+# 7% is sized from that one day's observed gap, not a documented T212 reserve — revisit with more data.
+MIN_HOLD_CASH_HEADROOM = 0.07
 
 
 @dataclass

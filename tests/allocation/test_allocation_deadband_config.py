@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from Strategy_Auto_Trader.allocation.allocation_manager import MultiTierAllocationManager
+from Strategy_Auto_Trader.allocation.allocation_manager import MIN_HOLD_CASH_HEADROOM, MultiTierAllocationManager
 
 TODAY = date(2026, 9, 21)
 CONFIG = Path(__file__).resolve().parents[2] / "config" / "overnight_strategy.json"
@@ -230,8 +230,9 @@ class TestCommission:
         orders = mgr.rebalance(TODAY, 20.0, 30.0, {"EQGB.L": 10.0, "CSH2.L": 100.0}, 20_000.0, {"CSH2.L": 0})
         buy = next(o for o in orders if o.action == "BUY" and o.ticker == "EQGB.L")
         spent = buy.quantity * 10.0 * 1.0005
-        assert spent <= 20_000.0 * 0.99
-        assert spent > 20_000.0 * 0.99 - 20.0
+        budget_cap = 20_000.0 * (1 - MIN_HOLD_CASH_HEADROOM)
+        assert spent <= budget_cap
+        assert spent > budget_cap - 20.0
         cheaper_budget = MultiTierAllocationManager(vxn_threshold=23.0, vxn_exit_threshold=24.0, lower_tiers_enabled=False, commission_pct=0.1)
         cheaper_budget.current_asset = "CSH2.L"
         dearer = next(o for o in cheaper_budget.rebalance(TODAY, 20.0, 30.0, {"EQGB.L": 10.0, "CSH2.L": 100.0}, 20_000.0, {"CSH2.L": 0})
