@@ -72,6 +72,14 @@ RATE_LIMIT_RETRIES = 4
 RATE_LIMIT_BACKOFF_SECONDS = 5.0
 RATE_LIMIT_MAX_WAIT_SECONDS = 30.0
 
+# Separate from the raw per-HTTP-request timeout: a single rate-limited order-status check can
+# itself consume up to ~65s inside _request()'s own retry/backoff loop (RATE_LIMIT_RETRIES=4,
+# doubling from RATE_LIMIT_BACKOFF_SECONDS, capped at RATE_LIMIT_MAX_WAIT_SECONDS each) before it
+# even returns. Reusing the short per-request timeout as the fill-poll deadline let one
+# rate-limited status check cancel an order that was never actually slow to fill — the 429 was on
+# our own GET, not on the order itself (2026-10-19 cold-start seed buys).
+DEFAULT_FILL_TIMEOUT_SECONDS = 120.0
+
 
 class RateLimitedError(RuntimeError):
     """T212 429. `retry_after` is the server's Retry-After in seconds, or None when it sent none."""
@@ -119,6 +127,7 @@ class T212Adapter:
         environment: str = "demo",
         allow_live_account: bool = False,
         timeout: float = 30.0,
+        fill_timeout: float = DEFAULT_FILL_TIMEOUT_SECONDS,
         symbol_map: dict[str, str] | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -135,6 +144,7 @@ class T212Adapter:
             f"{api_key}:{api_secret}".encode("utf-8")
         ).decode("ascii")
         self._timeout = timeout
+        self._fill_timeout = fill_timeout
         self._sleep = sleep
         self._symbol_map = symbol_map if symbol_map is not None else load_symbol_map()
         self._connected = False
@@ -339,7 +349,7 @@ class T212Adapter:
             return None
         logger.info(f"T212 accepted {req.action} {req.ticker} qty={req.quantity} as order {order_id}")
 
-        deadline = time.monotonic() + self._timeout
+        deadline = time.monotonic() + self._fill_timeout
         order = self._poll_order(order_id, deadline)
         status = order.get("status")
 

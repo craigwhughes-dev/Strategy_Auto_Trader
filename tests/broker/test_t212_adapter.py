@@ -106,7 +106,7 @@ class TestPlaceOrder:
         assert adapter.place_order(OrderRequest("AAPL", "BUY", 1)) is None
 
     def test_unfilled_at_deadline_cancels_and_registers_pending(self, monkeypatch):
-        adapter = make_adapter(timeout=0.0)
+        adapter = make_adapter(fill_timeout=0.0)
         fake = FakeRequest([
             {"id": 9},
             {"status": "WORKING"},   # single poll, deadline already passed
@@ -117,6 +117,25 @@ class TestPlaceOrder:
         assert result is None
         assert len(adapter._pending_cancels) == 1
         assert adapter._pending_cancels[0]["order_id"] == 9
+
+    def test_fill_poll_deadline_is_independent_of_http_timeout(self, monkeypatch):
+        """Regression: the fill-poll deadline must use fill_timeout, not the per-request
+        HTTP timeout — a tiny HTTP timeout (sized for one socket call) must not prematurely
+        cancel an order that's still genuinely polling toward a fill (previously both used
+        the same `timeout` value, so a single rate-limited status check mid-poll could burn
+        the whole deadline and cancel a perfectly fine order — 2026-10-19 cold-start seed buys)."""
+        import Strategy_Auto_Trader.broker.t212_adapter as mod
+        monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+        adapter = make_adapter(timeout=0.0)  # tiny HTTP timeout, default fill_timeout
+        fake = FakeRequest([
+            {"id": 10},
+            {"status": "WORKING"},
+            {"status": "FILLED", "fillPrice": 100.0},
+        ])
+        monkeypatch.setattr(adapter, "_request", fake)
+        result = adapter.place_order(OrderRequest("AAPL", "BUY", 1))
+        assert result is not None
+        assert result.fill_price == 100.0
 
 
 class TestCheckPendingCancels:
