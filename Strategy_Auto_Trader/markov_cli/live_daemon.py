@@ -1468,13 +1468,22 @@ def process_cycle(
                     # TODO: optimize with cached quotes or batch fetch if cycle latency becomes issue.
                     from ..broker.symbols import sizing_price
                     current_prices = {}
+                    enabled_now = set(allocation_mgr.enabled_assets())
+                    held_now = broker.get_open_positions()
+                    seed_buys_allowed = not (
+                        daemon_state.get("halt_new_entries") or daemon_state.get("paused_by_user")
+                    )
                     for ticker in required_tickers:
                         try:
                             price = sizing_price(ticker, broker.get_last_price(ticker))
                             current_prices[ticker] = price if price > 0 else None
                         except Exception as _price_err:
-                            logger.error(f"[{market_name}] Failed to fetch price for {ticker}: {_price_err}")
-                            current_prices[ticker] = None
+                            seeded = None
+                            if ticker in enabled_now and not held_now.get(ticker) and seed_buys_allowed:
+                                seeded = _seed_tier_price(ticker, broker, portfolio, config, market_name, logger)
+                            current_prices[ticker] = seeded
+                            if seeded is None:
+                                logger.error(f"[{market_name}] Failed to fetch price for {ticker}: {_price_err}")
 
                 # Disabled tiers are held at the minimum but must not block the enabled tiers' rebalance
                 required_prices = set(allocation_mgr.enabled_assets())
@@ -1588,6 +1597,40 @@ def _is_broker_rejection(error: Exception) -> bool:
     """
     from ..broker.types import InsufficientFundsError
     return isinstance(error, InsufficientFundsError) or " failed: 400 " in str(error)
+
+
+def _seed_tier_price(ticker: str, broker, portfolio, config: dict, market_name: str, logger: logging.Logger) -> float | None:
+    """Break the cold-start chicken-and-egg: T212 only prices a held position, so a fresh
+    account with zero tier holdings can never price an enabled tier asset, which blocks
+    rebalance() forever (see error raised by t212_adapter.get_last_price). Place one minimal
+    buy to obtain a holding — and therefore a price — then let the normal rebalance resize it.
+    """
+    from dataclasses import replace
+    from ..allocation.allocation_manager import AllocationOrder, MIN_TRADE_UNITS
+    from ..broker.symbols import normalize_fill_price
+
+    order_market_name = _exchange_market_name_for_ticker(ticker)
+    order_market_cfg = config.get("markets", {}).get(order_market_name)
+    if order_market_cfg and not is_trading_hours(order_market_cfg, logger, market_name=order_market_name, quiet=True):
+        logger.info(f"[{market_name}] {ticker}'s exchange ({order_market_name}) closed — deferring seed buy to next open")
+        return None
+
+    logger.warning(f"[{market_name}] {ticker} unheld and unpriceable (T212 cold start) — placing minimal seed buy")
+    seed_order = AllocationOrder(
+        ticker=ticker, action="BUY", quantity=MIN_TRADE_UNITS,
+        reason="seed price: T212 has no quote endpoint, only priced positions",
+    )
+    fill = _place_allocation_order(broker, seed_order, logger, market_name)
+    if fill is None:
+        logger.error(f"[{market_name}] Seed buy for {ticker} failed — still unpriceable this cycle")
+        return None
+
+    price = normalize_fill_price(ticker, fill.fill_price, 0.0)
+    fill = replace(fill, fill_price=price)
+    portfolio.record_tier_fill(ticker, fill, "BUY", market_name, "GBP")
+    portfolio.save()
+    logger.info(f"[{market_name}] Seed buy filled: {ticker} qty={fill.quantity} at {price} — priced going forward")
+    return price
 
 
 def _place_allocation_order(broker, order, logger, market_name):
