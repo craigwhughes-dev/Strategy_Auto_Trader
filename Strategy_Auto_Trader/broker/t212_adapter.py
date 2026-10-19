@@ -72,13 +72,23 @@ RATE_LIMIT_RETRIES = 4
 RATE_LIMIT_BACKOFF_SECONDS = 5.0
 RATE_LIMIT_MAX_WAIT_SECONDS = 30.0
 
+# Order-status polling interval. At 1s (the old value) a 120s fill_timeout alone burns up to
+# ~120 GET calls confirming a single order — on top of sizing retries (each a separate POST) and
+# the cycle's other API calls (price checks, account summary), that volume was enough on its own
+# to trigger the 429s this file already retries around, which could then still eat into the poll
+# deadline and cancel an order that was simply taking a while, not stuck (2026-10-19 CSH2.L buy).
+ORDER_POLL_INTERVAL_SECONDS = 3.0
+
 # Separate from the raw per-HTTP-request timeout: a single rate-limited order-status check can
 # itself consume up to ~65s inside _request()'s own retry/backoff loop (RATE_LIMIT_RETRIES=4,
 # doubling from RATE_LIMIT_BACKOFF_SECONDS, capped at RATE_LIMIT_MAX_WAIT_SECONDS each) before it
 # even returns. Reusing the short per-request timeout as the fill-poll deadline let one
 # rate-limited status check cancel an order that was never actually slow to fill — the 429 was on
-# our own GET, not on the order itself (2026-10-19 cold-start seed buys).
-DEFAULT_FILL_TIMEOUT_SECONDS = 120.0
+# our own GET, not on the order itself (2026-10-19 cold-start seed buys). 180s (not the original
+# 120s) because a thin-volume tier asset (CSH2.L) was observed still genuinely unfilled
+# (status=NEW, not a 429 artifact) over two minutes after acceptance — see module banner
+# UNVERIFIED note; this remains tuned from one live data point, not a documented SLA from T212.
+DEFAULT_FILL_TIMEOUT_SECONDS = 180.0
 
 
 class RateLimitedError(RuntimeError):
@@ -286,7 +296,7 @@ class T212Adapter:
             and status not in _TERMINAL_NON_FILL_STATUSES
             and time.monotonic() < deadline
         ):
-            time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+            time.sleep(min(ORDER_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
             order = self._get_order(order_id)
             status = order.get("status")
         return order

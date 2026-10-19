@@ -118,6 +118,23 @@ class TestPlaceOrder:
         assert len(adapter._pending_cancels) == 1
         assert adapter._pending_cancels[0]["order_id"] == 9
 
+    def test_poll_interval_uses_the_gentler_constant_not_one_second(self, monkeypatch):
+        """Regression: polling every 1s for up to fill_timeout seconds can itself burn through
+        T212's rate quota confirming a single order (2026-10-19 CSH2.L buy, ~120 GET calls for
+        one order). ORDER_POLL_INTERVAL_SECONDS (3.0) must be what's actually slept, not 1.0."""
+        import Strategy_Auto_Trader.broker.t212_adapter as mod
+        sleeps = []
+        monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+        adapter = make_adapter()
+        fake = FakeRequest([
+            {"id": 11},
+            {"status": "WORKING"},
+            {"status": "FILLED", "fillPrice": 100.0},
+        ])
+        monkeypatch.setattr(adapter, "_request", fake)
+        adapter.place_order(OrderRequest("AAPL", "BUY", 1))
+        assert sleeps == [mod.ORDER_POLL_INTERVAL_SECONDS]
+
     def test_fill_poll_deadline_is_independent_of_http_timeout(self, monkeypatch):
         """Regression: the fill-poll deadline must use fill_timeout, not the per-request
         HTTP timeout — a tiny HTTP timeout (sized for one socket call) must not prematurely
