@@ -1290,7 +1290,7 @@ def process_cycle(
 
     in_scope = load_in_scope_tickers(market_name, logger)
     overrides = load_ticker_overrides(market_name, logger)
-    if not in_scope:
+    if not in_scope and not tier_mode:
         logger.debug(f"  {market_name}: no in-scope tickers")
         return 0
 

@@ -836,6 +836,47 @@ def test_process_cycle_passes_last_cycle_hour_through_to_snapshot(monkeypatch):
     assert captured == [sentinel]
 
 
+def test_process_cycle_tier_mode_runs_rebalance_even_with_empty_in_scope(monkeypatch):
+    """tier_mode doesn't use in_scope at all (round-robin is skipped entirely, must_run is
+    forced to []) — but the early 'no in-scope tickers' return used to fire regardless of
+    tier_mode, so a fresh deployment with no overnight_scope output (no in_scope_<market>.json
+    yet) could never reach the tier-rebalance block and would sit in cash forever."""
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: [])
+
+    allocation_mgr = mock.Mock()
+    allocation_mgr._get_vix_current.return_value = None
+    allocation_mgr._get_vxn_current.return_value = None
+    allocation_mgr.data_outage.return_value = (False, False)
+
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    live_daemon.process_cycle(
+        "test_market", {}, config, {"cursors": {}},
+        portfolio=mock.Mock(), broker=mock.Mock(), logger=mock.Mock(),
+        allocation_mgr=allocation_mgr, tier_mode=True,
+    )
+
+    allocation_mgr._get_vix_current.assert_called_once()
+
+
+def test_process_cycle_non_tier_mode_still_returns_early_on_empty_in_scope(monkeypatch):
+    """Guards the other side of the fix above: outside tier_mode, no in-scope tickers must
+    still short-circuit the cycle before reaching the allocation block."""
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: [])
+    monkeypatch.setattr(live_daemon, "get_open_positions", lambda m, l: [])
+
+    allocation_mgr = mock.Mock()
+
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    result = live_daemon.process_cycle(
+        "test_market", {}, config, {"cursors": {}},
+        portfolio=mock.Mock(), broker=mock.Mock(), logger=mock.Mock(),
+        allocation_mgr=allocation_mgr, tier_mode=False,
+    )
+
+    assert result == 0
+    allocation_mgr._get_vix_current.assert_not_called()
+
+
 class TestReconciliation:
     """run_reconciliation / check_nightly_reconciliation / halt enforcement."""
 
