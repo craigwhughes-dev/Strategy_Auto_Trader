@@ -302,10 +302,16 @@ class T212Adapter:
         return order
 
     def place_order(self, req: OrderRequest) -> FillResult | None:
+        # Whatever's already cached (e.g. from this cycle's price lookups) is the last position
+        # read from before this order existed — exactly the baseline a timed-out poll needs to spot
+        # a real fill through a ghost 404 (see _place_market_order). Grabbed before the line below
+        # clears it, and never fetched fresh here: a fresh fetch would reorder calls on every order,
+        # not just the rare ambiguous one, which no caller or test expects.
+        baseline_positions = self._positions_cache
         self._positions_cache = None  # the fill changes holdings, so the next read must go to the API
         t212_ticker(req.ticker, self._symbol_map)  # unmapped tickers fail here, before anything is sent
         try:
-            return self._place_market_order(req)
+            return self._place_market_order(req, baseline_positions)
         except RuntimeError as e:
             if " failed: 400 " in str(e) or isinstance(e, InsufficientFundsError):
                 # Logged here, not only by the caller, so T212's refusal reason survives the retry loop
@@ -341,9 +347,15 @@ class T212Adapter:
             except Exception as e:
                 logger.error(f"Could not cancel open {req.action} {req.ticker} order {order['id']}: {e}")
 
-    def _place_market_order(self, req: OrderRequest) -> FillResult | None:
+    def _place_market_order(self, req: OrderRequest, baseline_positions: dict | None) -> FillResult | None:
         code = t212_ticker(req.ticker, self._symbol_map)
         signed_qty = req.quantity if req.action == "BUY" else -req.quantity
+        # None (no recent position read to compare against) means the delta check below can't run;
+        # the ambiguous-timeout branch then falls back to the original cancel-and-flag behavior.
+        baseline_qty = (
+            baseline_positions.get(req.ticker, {}).get("quantity", 0.0)
+            if baseline_positions is not None else None
+        )
         try:
             resp = self._request(
                 "POST", "/api/v0/equity/orders/market",
@@ -368,8 +380,38 @@ class T212Adapter:
                         f"at {order.get('fillPrice') or order.get('averagePrice')}")
         if status != _FILLED_STATUS:
             if status not in _TERMINAL_NON_FILL_STATUSES:
-                # Still working at the deadline — cancel it ourselves rather
-                # than leave it resting unattended (mirrors ibkr_adapter.py).
+                # _get_order reads a 404 as "not visible yet", which is right immediately after
+                # placing but wrong once the order has already filled and T212 has archived it off
+                # the by-id endpoint — that 404s too, identically. A fast fill can therefore poll as
+                # 404 the whole way to the deadline and land here never having been seen as FILLED.
+                # With a baseline to compare against, ask the position itself before assuming
+                # nothing happened: it is unaffected by which kind of 404 the order endpoint gave us.
+                if baseline_qty is not None:
+                    self._positions_cache = None
+                    post_positions = self._fetch_positions()
+                    post_qty = post_positions.get(req.ticker, {}).get("quantity", 0.0)
+                    if abs(post_qty - (baseline_qty + signed_qty)) < 1e-4:
+                        fill_price = float(post_positions.get(req.ticker, {}).get("currentPrice") or 0.0)
+                        logger.info(
+                            f"T212 order {order_id} {req.action} {req.ticker} never reached a terminal "
+                            f"status (last status={status}) but the broker position moved "
+                            f"{baseline_qty:g} -> {post_qty:g}, matching the requested fill — treating "
+                            f"as filled at ~{fill_price} (approximate: no fill price was ever returned)"
+                        )
+                        self._positions_cache = post_positions
+                        self._positions_cache_at = time.monotonic()
+                        return FillResult(
+                            ticker=req.ticker,
+                            action=req.action,
+                            fill_price=fill_price,
+                            quantity=req.quantity,
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                        )
+                    self._positions_cache = post_positions
+                    self._positions_cache_at = time.monotonic()
+                # No baseline, or position didn't move as expected — genuinely still open (or
+                # cancelled elsewhere). Cancel it ourselves rather than leave it resting unattended
+                # (mirrors ibkr_adapter.py).
                 try:
                     self._request("DELETE", f"/api/v0/equity/orders/{order_id}")
                 except Exception as e:

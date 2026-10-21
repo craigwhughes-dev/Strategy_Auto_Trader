@@ -118,6 +118,47 @@ class TestPlaceOrder:
         assert len(adapter._pending_cancels) == 1
         assert adapter._pending_cancels[0]["order_id"] == 9
 
+    def test_timed_out_poll_confirmed_as_filled_via_position_delta(self, monkeypatch):
+        """A fill that lands fast enough to be archived off the by-id endpoint before the poll ever
+        reads FILLED must not be cancelled out from under the user — 404 "not visible yet" and 404
+        "already filled and gone" look identical to _get_order, so the broker position moving by
+        exactly the requested amount is what proves the fill (2026-10-21 live CSH2.L buy: a 6.63-share
+        order filled but polled as status=None the whole way to the deadline, got DELETE-cancelled
+        anyway, and desynced the internal ledger from the real position)."""
+        adapter = make_adapter(fill_timeout=0.0)
+        adapter._positions_cache = {"AAPL": {"quantity": 1.0, "currentPrice": 195.5}}
+        adapter._positions_cache_at = 0.0
+        fake = FakeRequest([
+            {"id": 9},                                                                      # POST market order
+            {},                                                                              # poll: 404 -> status=None, deadline already past
+            [{"instrument": {"ticker": "AAPL_US_EQ"}, "quantity": 11.0, "currentPrice": 196.0}],  # GET positions
+        ])
+        monkeypatch.setattr(adapter, "_request", fake)
+        fill = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
+        assert fill is not None
+        assert fill.quantity == 10
+        assert fill.fill_price == pytest.approx(196.0)
+        assert adapter._pending_cancels == []
+        assert all(call[0] != "DELETE" for call in fake.calls)
+
+    def test_timed_out_poll_with_baseline_but_no_position_move_still_cancels(self, monkeypatch):
+        """The position-delta check only short-circuits a real fill — when the position truly
+        hasn't moved, a baseline must not change the original cancel-and-flag behavior."""
+        adapter = make_adapter(fill_timeout=0.0)
+        adapter._positions_cache = {"AAPL": {"quantity": 1.0, "currentPrice": 195.5}}
+        adapter._positions_cache_at = 0.0
+        fake = FakeRequest([
+            {"id": 9},
+            {"status": "WORKING"},
+            [{"instrument": {"ticker": "AAPL_US_EQ"}, "quantity": 1.0, "currentPrice": 195.5}],  # unchanged
+            {},                                                                                   # DELETE cancel
+        ])
+        monkeypatch.setattr(adapter, "_request", fake)
+        result = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
+        assert result is None
+        assert len(adapter._pending_cancels) == 1
+        assert adapter._pending_cancels[0]["order_id"] == 9
+
     def test_poll_interval_uses_the_gentler_constant_not_one_second(self, monkeypatch):
         """Regression: polling every 1s for up to fill_timeout seconds can itself burn through
         T212's rate quota confirming a single order (2026-10-19 CSH2.L buy, ~120 GET calls for
