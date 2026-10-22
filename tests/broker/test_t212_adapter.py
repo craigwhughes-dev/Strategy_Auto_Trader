@@ -159,6 +159,44 @@ class TestPlaceOrder:
         assert len(adapter._pending_cancels) == 1
         assert adapter._pending_cancels[0]["order_id"] == 9
 
+    def test_cold_ttl_cache_falls_back_to_last_known_positions_for_delta_check(self, monkeypatch):
+        """self._positions_cache alone being cold (TTL expired, or cleared by the previous order's
+        own "next read must go to the API" reset) must not drop the delta-check fallback entirely:
+        self._last_known_positions is never cleared, so it still holds whatever was last actually
+        read, however many cycles ago, and that's enough of a baseline to run the check (2026-10-21
+        CSH2.L miscredit: this call was the first broker call of its cycle, so the TTL cache alone
+        was always going to be cold — the real fix can't depend on it being warm)."""
+        adapter = make_adapter(fill_timeout=0.0)
+        adapter._positions_cache = None
+        adapter._last_known_positions = {"AAPL": {"quantity": 1.0, "currentPrice": 195.5}}
+        fake = FakeRequest([
+            {"id": 9},                                                                      # POST market order
+            {},                                                                              # poll: 404 -> status=None, deadline already past
+            [{"instrument": {"ticker": "AAPL_US_EQ"}, "quantity": 11.0, "currentPrice": 196.0}],  # GET positions
+        ])
+        monkeypatch.setattr(adapter, "_request", fake)
+        fill = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
+        assert fill is not None
+        assert fill.quantity == 10
+        assert fill.fill_price == pytest.approx(196.0)
+        assert adapter._pending_cancels == []
+        assert all(call[0] != "DELETE" for call in fake.calls)
+
+    def test_both_caches_cold_still_falls_back_to_cancel_and_flag(self, monkeypatch):
+        """No positions read of any kind, ever (fresh adapter, or broker never reachable) means
+        no baseline exists at all — must preserve the original safe behavior, not invent one."""
+        adapter = make_adapter(fill_timeout=0.0)
+        assert adapter._positions_cache is None and adapter._last_known_positions is None
+        fake = FakeRequest([
+            {"id": 9},
+            {"status": "WORKING"},
+            {},  # DELETE cancel response
+        ])
+        monkeypatch.setattr(adapter, "_request", fake)
+        result = adapter.place_order(OrderRequest("AAPL", "BUY", 10))
+        assert result is None
+        assert len(adapter._pending_cancels) == 1
+
     def test_poll_interval_uses_the_gentler_constant_not_one_second(self, monkeypatch):
         """Regression: polling every 1s for up to fill_timeout seconds can itself burn through
         T212's rate quota confirming a single order (2026-10-19 CSH2.L buy, ~120 GET calls for
@@ -287,6 +325,19 @@ class TestPositionsAndOrders:
         monkeypatch.setattr(adapter, "_request", fake)
         assert adapter.get_open_positions() == {"AAPL": pytest.approx(0.34094783)}
         assert fake.calls[0][1] == "/api/v0/equity/positions"
+
+    def test_fetch_positions_updates_last_known_positions(self, monkeypatch):
+        """_last_known_positions is place_order's fallback baseline when the TTL cache is cold —
+        it must track every real read, not just the ones place_order itself triggers."""
+        adapter = make_adapter()
+        fake = FakeRequest([
+            [{"instrument": {"ticker": "AAPL_US_EQ"}, "quantity": 3}],
+        ])
+        monkeypatch.setattr(adapter, "_request", fake)
+        adapter.get_open_positions()
+        assert adapter._last_known_positions == {
+            "AAPL": {"instrument": {"ticker": "AAPL_US_EQ"}, "quantity": 3}
+        }
 
     def test_place_order_polls_through_transient_404(self, monkeypatch):
         adapter = make_adapter()

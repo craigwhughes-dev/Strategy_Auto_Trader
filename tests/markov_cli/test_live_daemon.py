@@ -911,6 +911,99 @@ def test_process_cycle_interleaves_manual_commands_and_snapshot_between_tier_ord
     assert len(snapshot_calls) == 2
 
 
+def test_process_cycle_seed_buy_skips_attempt_during_cooldown(monkeypatch):
+    """A cash-exhausted seed buy must not retry (or ERROR-log) every single hourly cycle:
+    once a cooldown is active (shared with retry_cold_start_seed_buys' own timestamp), the
+    inline price-fetch loop skips the seed-buy attempt entirely and logs at WARNING, not
+    ERROR (2026-10-21/22 prod: VUSA/ISF.L burned cash to dust, then hammered this every
+    cycle forever with no cooldown)."""
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: [])
+    seed_calls = []
+    monkeypatch.setattr(live_daemon, "_seed_tier_price", lambda *a, **k: seed_calls.append(1))
+
+    allocation_mgr = mock.Mock()
+    allocation_mgr._get_vix_current.return_value = 15.0
+    allocation_mgr._get_vxn_current.return_value = 20.0
+    allocation_mgr.data_outage.return_value = (False, False)
+    allocation_mgr.vvix_edge_low = 25.0
+    allocation_mgr.vvix_edge_high = 30.0
+    allocation_mgr.vvix_confirm_days = 2
+    allocation_mgr.enabled_assets.return_value = ["VUSA"]
+    allocation_mgr.rebalance.return_value = []
+
+    broker = mock.Mock()
+    broker.is_connected.return_value = True
+    broker.get_open_positions.return_value = {}
+
+    def _price(ticker):
+        if ticker == "VUSA":
+            raise RuntimeError("T212 has no quote for an unheld position")
+        return 100.0
+    broker.get_last_price.side_effect = _price
+
+    logger = mock.Mock()
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    future = (datetime.now(timezone.utc) + timedelta(seconds=120)).isoformat()
+    daemon_state = {
+        "cursors": {}, "vvix_last_date": date.today().isoformat(),
+        "next_seed_buy_retry_at": future,
+    }
+    live_daemon.process_cycle(
+        "test_market", {}, config, daemon_state,
+        portfolio=mock.Mock(), broker=broker, logger=logger,
+        allocation_mgr=allocation_mgr, tier_mode=True,
+    )
+
+    assert seed_calls == []
+    assert not any("ERROR" in str(c) or c.args and "Failed to fetch price" in str(c.args[0])
+                   for c in logger.error.call_args_list)
+    assert any("cooling down" in str(c.args[0]) for c in logger.warning.call_args_list)
+
+
+def test_process_cycle_seed_buy_sets_cooldown_on_failure(monkeypatch):
+    """Outside any cooldown, the inline path still attempts the seed buy as before — but a
+    failed attempt now sets next_seed_buy_retry_at so neither this path nor
+    retry_cold_start_seed_buys hammers the broker again before the cooldown elapses."""
+    monkeypatch.setattr(live_daemon, "load_in_scope_tickers", lambda m, l: [])
+    monkeypatch.setattr(live_daemon, "_seed_tier_price", lambda *a, **k: None)
+    saved = []
+    monkeypatch.setattr(live_daemon, "save_daemon_state", lambda s: saved.append(dict(s)))
+
+    allocation_mgr = mock.Mock()
+    allocation_mgr._get_vix_current.return_value = 15.0
+    allocation_mgr._get_vxn_current.return_value = 20.0
+    allocation_mgr.data_outage.return_value = (False, False)
+    allocation_mgr.vvix_edge_low = 25.0
+    allocation_mgr.vvix_edge_high = 30.0
+    allocation_mgr.vvix_confirm_days = 2
+    allocation_mgr.enabled_assets.return_value = ["VUSA"]
+    allocation_mgr.rebalance.return_value = []
+
+    broker = mock.Mock()
+    broker.is_connected.return_value = True
+    broker.get_open_positions.return_value = {}
+
+    def _price(ticker):
+        if ticker == "VUSA":
+            raise RuntimeError("T212 has no quote for an unheld position")
+        return 100.0
+    broker.get_last_price.side_effect = _price
+
+    logger = mock.Mock()
+    config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
+    daemon_state = {"cursors": {}, "vvix_last_date": date.today().isoformat()}
+    live_daemon.process_cycle(
+        "test_market", {}, config, daemon_state,
+        portfolio=mock.Mock(), broker=broker, logger=logger,
+        allocation_mgr=allocation_mgr, tier_mode=True,
+    )
+
+    assert "next_seed_buy_retry_at" in daemon_state
+    assert any("next_seed_buy_retry_at" in s for s in saved)
+    assert any("cooling down" in str(c.args[0]) for c in logger.warning.call_args_list)
+    assert not any("Failed to fetch price" in str(c.args[0]) for c in logger.error.call_args_list)
+
+
 def test_process_cycle_non_tier_mode_still_returns_early_on_empty_in_scope(monkeypatch):
     """Guards the other side of the fix above: outside tier_mode, no in-scope tickers must
     still short-circuit the cycle before reaching the allocation block."""

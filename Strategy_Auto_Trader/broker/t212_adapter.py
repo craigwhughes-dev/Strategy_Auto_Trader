@@ -161,6 +161,10 @@ class T212Adapter:
         self._prices: dict[str, float] = {}
         self._positions_cache: dict[str, dict] | None = None
         self._positions_cache_at = 0.0
+        # Unlike _positions_cache (cleared after every order, re-fetched on its own TTL), this
+        # is never cleared — it's a fallback baseline for place_order when the TTL cache is cold,
+        # better than no baseline at all even if stale by a cycle or more.
+        self._last_known_positions: dict[str, dict] | None = None
         self._pending_cancels: list[dict] = []
 
     def set_prices(self, prices: dict[str, float]) -> None:
@@ -276,6 +280,7 @@ class T212Adapter:
                 logger.warning(f"Skipping unmapped T212 position: {e}")
                 continue
             result[ticker] = pos
+        self._last_known_positions = result
         return result
 
     def _get_order(self, order_id: int) -> dict:
@@ -302,14 +307,19 @@ class T212Adapter:
         return order
 
     def place_order(self, req: OrderRequest) -> FillResult | None:
+        t212_ticker(req.ticker, self._symbol_map)  # unmapped tickers fail here, before anything is sent
         # Whatever's already cached (e.g. from this cycle's price lookups) is the last position
         # read from before this order existed — exactly the baseline a timed-out poll needs to spot
         # a real fill through a ghost 404 (see _place_market_order). Grabbed before the line below
-        # clears it, and never fetched fresh here: a fresh fetch would reorder calls on every order,
-        # not just the rare ambiguous one, which no caller or test expects.
+        # clears it. A cold TTL cache (e.g. the first broker call of a cycle) falls back to
+        # _last_known_positions instead of nothing — the exact gap that let a fast real fill get
+        # cancelled as a ghost 404 and miscredited (order 56800521351): that field is never cleared
+        # (unlike _positions_cache, which deliberately resets after every order), so it still holds
+        # whatever was last fetched, however many cycles ago, rather than forcing a fresh call here.
         baseline_positions = self._positions_cache
+        if baseline_positions is None:
+            baseline_positions = self._last_known_positions
         self._positions_cache = None  # the fill changes holdings, so the next read must go to the API
-        t212_ticker(req.ticker, self._symbol_map)  # unmapped tickers fail here, before anything is sent
         try:
             return self._place_market_order(req, baseline_positions)
         except RuntimeError as e:
@@ -350,8 +360,9 @@ class T212Adapter:
     def _place_market_order(self, req: OrderRequest, baseline_positions: dict | None) -> FillResult | None:
         code = t212_ticker(req.ticker, self._symbol_map)
         signed_qty = req.quantity if req.action == "BUY" else -req.quantity
-        # None (no recent position read to compare against) means the delta check below can't run;
-        # the ambiguous-timeout branch then falls back to the original cancel-and-flag behavior.
+        # None now only means no position read has ever succeeded on this adapter (fresh
+        # instance, or broker unreachable so far); the delta check below can't run, so the
+        # ambiguous-timeout branch falls back to the original cancel-and-flag behavior.
         baseline_qty = (
             baseline_positions.get(req.ticker, {}).get("quantity", 0.0)
             if baseline_positions is not None else None

@@ -1473,17 +1473,38 @@ def process_cycle(
                     seed_buys_allowed = not (
                         daemon_state.get("halt_new_entries") or daemon_state.get("paused_by_user")
                     )
+                    # Shares retry_cold_start_seed_buys' own cooldown timestamp so a cash-exhausted
+                    # seed buy (unfunded tier asset that can never clear MIN_TRADE_UNITS) doesn't
+                    # retry — and ERROR-log — every single hourly cycle forever on top of that
+                    # function's own 5-minute retries (2026-10-21/22 prod: VUSA/ISF.L burned cash
+                    # 642.72 -> 1.33 seeding, then repeated this every cycle with no cooldown).
+                    seed_retry_at = daemon_state.get("next_seed_buy_retry_at")
+                    seed_buy_in_cooldown = bool(seed_retry_at) and datetime.now(timezone.utc) < datetime.fromisoformat(seed_retry_at)
                     for ticker in required_tickers:
                         try:
                             price = sizing_price(ticker, broker.get_last_price(ticker))
                             current_prices[ticker] = price if price > 0 else None
                         except Exception as _price_err:
                             seeded = None
-                            if ticker in enabled_now and not held_now.get(ticker) and seed_buys_allowed:
+                            is_cold_start_candidate = (
+                                ticker in enabled_now and not held_now.get(ticker) and seed_buys_allowed
+                            )
+                            if is_cold_start_candidate and not seed_buy_in_cooldown:
                                 seeded = _seed_tier_price(ticker, broker, portfolio, config, market_name, logger)
+                                if seeded is None:
+                                    daemon_state["next_seed_buy_retry_at"] = (
+                                        datetime.now(timezone.utc) + timedelta(seconds=_SEED_BUY_RETRY_COOLDOWN_SECONDS)
+                                    ).isoformat()
+                                    save_daemon_state(daemon_state)
                             current_prices[ticker] = seeded
                             if seeded is None:
-                                logger.error(f"[{market_name}] Failed to fetch price for {ticker}: {_price_err}")
+                                if is_cold_start_candidate:
+                                    logger.warning(
+                                        f"[{market_name}] {ticker} still unpriced (cold-start seed buy "
+                                        f"pending/cooling down, insufficient cash so far) — will retry: {_price_err}"
+                                    )
+                                else:
+                                    logger.error(f"[{market_name}] Failed to fetch price for {ticker}: {_price_err}")
 
                 # Disabled tiers are held at the minimum but must not block the enabled tiers' rebalance
                 required_prices = set(allocation_mgr.enabled_assets())
