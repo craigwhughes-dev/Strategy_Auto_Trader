@@ -1481,6 +1481,12 @@ def process_cycle(
                     seed_retry_at = daemon_state.get("next_seed_buy_retry_at")
                     seed_buy_in_cooldown = bool(seed_retry_at) and datetime.now(timezone.utc) < datetime.fromisoformat(seed_retry_at)
                     for ticker in required_tickers:
+                        # Disabled tiers (e.g. lower_tiers_enabled=false) with no existing position
+                        # need no price at all — skip the broker call entirely instead of raising
+                        # and error-logging every cycle forever (2026-10-23 prod: VUSA/ISF.L spam).
+                        if ticker not in enabled_now and not held_now.get(ticker):
+                            current_prices[ticker] = None
+                            continue
                         try:
                             price = sizing_price(ticker, broker.get_last_price(ticker))
                             current_prices[ticker] = price if price > 0 else None
