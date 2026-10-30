@@ -1889,6 +1889,16 @@ class TestTierLedger:
         assert "VUSA" not in pm.positions
         assert len(notes) == 2
 
+    def test_sync_rescales_fill_price_on_split_ratio(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
+        pm.record_tier_fill("CSH2.L", _buy_fill("CSH2.L", 1256.88, 20.34224), "BUY", "ftse", "GBP")
+        pm.sync_tier_positions({"CSH2.L": 5085.56}, {"CSH2.L": 5.033}, ["CSH2.L"], "ftse", "GBP")
+        pos = pm.positions["CSH2.L"]
+        assert pos["quantity"] == pytest.approx(5085.56)
+        assert pos["fill_price"] == pytest.approx(1256.88 * 20.34224 / 5085.56)
+        assert pos["cost_value"] == pytest.approx(1256.88 * 20.34224, rel=1e-3)
+
     def test_sync_no_change_is_silent(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         pm = PortfolioManager(20_000, tmp_path / "state.json")

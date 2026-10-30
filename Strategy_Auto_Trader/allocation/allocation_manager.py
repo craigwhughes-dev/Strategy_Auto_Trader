@@ -52,6 +52,10 @@ TIER_ASSETS = {1: "EQGB.L", 2: "VUSA", 3: "ISF.L", 4: "CSH2.L"}
 ASSET_TIERS = {"EQGB.L": 1, "VUSA": 2, "ISF.L": 3, "CSH2.L": 4}
 # Smallest fractional trade the allocator places (2 dp, accepted by T212 for every mapped tier asset)
 MIN_TRADE_UNITS = 0.01
+# T212's real floor is a notional value, not a share count (CSH2.L at ~£5/share rejects anything
+# below ~0.199 units, i.e. ~£1) — a flat 0.01-share gate lets tiny top-ups through that are always
+# below that floor, so the min-hold rebalance sizing gates below check notional value instead.
+MIN_TRADE_GBP = 1.0
 # Share of allocatable cash the allocator leaves unspent, for ask-over-quote fills on market buys.
 # 1% (plus a 0.05% commission buffer) repeatedly undersized T212 buys by ~6.5% in practice (two
 # shrink-retries needed on both the 12:56 and 13:03 2026-10-19 CSH2.L cycles) — T212 evidently
@@ -492,7 +496,7 @@ class MultiTierAllocationManager:
         trades = {}
         for asset in priced:
             units = round((desired[asset] - held_value[asset]) / current_price[asset], 2)
-            if abs(units) >= MIN_TRADE_UNITS:
+            if abs(units) * current_price[asset] >= MIN_TRADE_GBP:
                 trades[asset] = units
 
         orders: list[AllocationOrder] = []
@@ -514,7 +518,7 @@ class MultiTierAllocationManager:
                 continue
             unit_cost = current_price[asset] * (1 + self.commission_pct / 100)
             affordable = math.floor(min(units, budget / unit_cost) * 100) / 100
-            if affordable < MIN_TRADE_UNITS:
+            if affordable * unit_cost < MIN_TRADE_GBP:
                 log.warning(f"[{today}]   Insufficient cash for {asset}: budget {budget:.2f}, need {units * unit_cost:.2f}")
                 continue
             log.info(f"[{today}]   BUY sizing {asset}: qty={affordable} price={current_price[asset]:.4f} "

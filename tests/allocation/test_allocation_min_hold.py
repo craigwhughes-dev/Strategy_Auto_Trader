@@ -71,6 +71,21 @@ class TestTopUpWithoutRotation:
         spare = 1000.0 * (1 - MIN_HOLD_CASH_HEADROOM) - others_spent
         assert got["EQGB.L"].quantity * PRICES["EQGB.L"] == pytest.approx(spare, abs=PRICES["EQGB.L"] * 0.01)
 
+    def test_sub_notional_topup_is_not_traded(self):
+        # Regression: leftover cash below T212's real ~£1 notional floor must not generate a
+        # dust order (T212 rejected these with min-quantity-exceeded, every cycle, forever).
+        prices = {**PRICES, "CSH2.L": 5.03}
+        m = _mgr(current_asset="CSH2.L")
+        positions = {
+            "EQGB.L": 10.0 / prices["EQGB.L"],
+            "VUSA": 10.0 / prices["VUSA"],
+            "ISF.L": 10.0 / prices["ISF.L"],
+            "CSH2.L": 0.0,
+        }
+        orders = m.rebalance(TODAY, vxn=30.0, vix=None, current_price=prices,
+                             available_cash=0.65, positions=positions, logger=LOG)
+        assert orders == []
+
     def test_no_trades_on_price_drift_alone(self):
         m = _mgr(current_asset="EQGB.L")
         # Every asset already at the minimum; a price move must not trade

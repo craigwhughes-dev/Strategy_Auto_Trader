@@ -267,6 +267,13 @@ class PortfolioManager:
                 del self._state["positions"][ticker]
                 notes.append(f"{ticker}: ledger {ledger} → broker 0, position removed")
             elif pos is not None:
+                # A corporate action (share split/consolidation) moves quantity by a large,
+                # clean ratio while total value is preserved — rescale fill_price by the
+                # inverse ratio so cost_value doesn't explode/collapse. Ordinary fill drift
+                # (a missed partial fill) never multiplies quantity by more than ~3x, so that
+                # threshold distinguishes the two without a dedicated split-detection feed.
+                if ledger > 0 and (held / ledger > 3 or held / ledger < 1 / 3):
+                    pos["fill_price"] = pos["fill_price"] * ledger / held
                 pos["quantity"] = held
                 pos["cost_value"] = pos["fill_price"] * held
                 notes.append(f"{ticker}: ledger {ledger} → broker {held}")
