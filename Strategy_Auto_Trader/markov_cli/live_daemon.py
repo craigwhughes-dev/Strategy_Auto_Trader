@@ -708,6 +708,7 @@ def write_app_status_snapshot(
         "markets": markets_status,
         "positions": positions_snapshot,
         "allocation": allocation_mgr.app_status_dict(daemon_state) if allocation_mgr is not None else None,
+        "shadow_benchmark": daemon_state.get("shadow_benchmark"),
     }
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1539,6 +1540,18 @@ def process_cycle(
                     )
                     daemon_state["tier_allocation_last"] = allocation_mgr.to_persisted_dict()
                     save_daemon_state(daemon_state)
+                    if daemon_state.get("last_shadow_update_date") != today.isoformat():
+                        tier_since = daemon_state["tier_allocation_last"].get("tier_active_since")
+                        if tier_since:
+                            try:
+                                from ..allocation.shadow_benchmark import compute_shadow_benchmark
+                                shadow = compute_shadow_benchmark(_date.fromisoformat(tier_since), today)
+                                if shadow is not None:
+                                    daemon_state["shadow_benchmark"] = shadow
+                            except Exception as _shadow_err:
+                                logger.warning(f"Shadow benchmark update failed: {_shadow_err}")
+                        daemon_state["last_shadow_update_date"] = today.isoformat()
+                        save_daemon_state(daemon_state)
                     from ..broker.symbols import normalize_fill_price
                     from ..broker.types import FillResult
                     # Halt still allows exiting a tier position (frees capital,

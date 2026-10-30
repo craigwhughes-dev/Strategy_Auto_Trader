@@ -209,6 +209,7 @@ class MultiTierAllocationManager:
         self._last_target_asset = None  # Target asset selected by last signal
         self._last_action = None  # "HOLD" | "BUY" | "SELL"
         self._last_signal_date = None  # date the above were computed on
+        self._tier_active_since = None  # date self._last_tier_num last changed (any tier, not just cash)
         self._data_outage = False  # both indices lost for longer than the outage limit
         self.outage_limit_hours = index_max_outage_seconds / 3600
 
@@ -349,6 +350,8 @@ class MultiTierAllocationManager:
             action = "HOLD"
 
         # Store tier info for app_status_dict
+        if tier != self._last_tier_num:
+            self._tier_active_since = today
         self._last_vix = vix
         self._last_vxn = vxn
         self._last_vvix_band = vvix_band
@@ -621,6 +624,7 @@ class MultiTierAllocationManager:
             "target_asset": self._last_target_asset,
             "action": self._last_action,
             "signal_date": self._last_signal_date.isoformat() if self._last_signal_date else None,
+            "tier_active_since": self._tier_active_since.isoformat() if self._tier_active_since else None,
         }
 
     def restore_last_signal(self, data: dict) -> None:
@@ -633,6 +637,8 @@ class MultiTierAllocationManager:
         self._last_action = data.get("action")
         signal_date = data.get("signal_date")
         self._last_signal_date = date.fromisoformat(signal_date) if signal_date else None
+        tier_active_since = data.get("tier_active_since")
+        self._tier_active_since = date.fromisoformat(tier_active_since) if tier_active_since else self._last_signal_date
 
     def app_status_dict(self, daemon_state: dict | None = None) -> dict:
         """Return current state for app_status.json.
@@ -704,6 +710,7 @@ class MultiTierAllocationManager:
                 "action": self._last_action,
                 "as_of_date": self._last_signal_date.isoformat() if self._last_signal_date else None,
                 "stale": self._last_signal_date is not None and self._last_signal_date != date.today(),
+                "tier_active_since": self._tier_active_since.isoformat() if self._tier_active_since else None,
                 "vvix": {
                     "current": (daemon_state or {}).get("vvix_last_value"),
                     "band": self._last_vvix_band,
