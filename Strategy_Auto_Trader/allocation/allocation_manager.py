@@ -211,6 +211,9 @@ class MultiTierAllocationManager:
         self._last_signal_date = None  # date the above were computed on
         self._tier_active_since = None  # date self._last_tier_num last changed (any tier, not just cash)
         self._data_outage = False  # both indices lost for longer than the outage limit
+        # Latest indicator readings for the dashboard, refreshed outside the decision cycle
+        # (live_daemon.refresh_indicators). Display only — never read by signal evaluation.
+        self._indicators: dict = {"vix": None, "vxn": None, "vvix": None, "as_of": None}
         self.outage_limit_hours = index_max_outage_seconds / 3600
 
     @classmethod
@@ -640,6 +643,23 @@ class MultiTierAllocationManager:
         tier_active_since = data.get("tier_active_since")
         self._tier_active_since = date.fromisoformat(tier_active_since) if tier_active_since else self._last_signal_date
 
+    def set_indicator_readings(self, vix: float | None, vxn: float | None, vvix: float | None) -> None:
+        """Record the latest completed-bar VIX/VXN/VVIX for app_status.json. Display only: the
+        decision path keeps its own `_last_vix`/`_last_vxn` from the reading it acted on."""
+        from datetime import datetime, timezone
+        self._indicators = {"vix": vix, "vxn": vxn, "vvix": vvix, "as_of": datetime.now(timezone.utc).isoformat()}
+
+    def _display_band(self, daemon_state: dict | None) -> str:
+        """The confirmed VVIX band the next decision will use (from the persisted streaks), falling
+        back to the band the last decision used when no streak state is available."""
+        if not daemon_state or not ({"vvix_calm_streak_days", "vvix_stressed_streak_days"} & daemon_state.keys()):
+            return self._last_vvix_band
+        if daemon_state.get("vvix_calm_streak_days", 0) >= self.vvix_confirm_days:
+            return "calm"
+        if daemon_state.get("vvix_stressed_streak_days", 0) >= self.vvix_confirm_days:
+            return "stressed"
+        return "base"
+
     def app_status_dict(self, daemon_state: dict | None = None) -> dict:
         """Return current state for app_status.json.
 
@@ -652,20 +672,26 @@ class MultiTierAllocationManager:
         """
         tier_allocation = None
         if self._last_tier_num is not None:
-            # Build tier breakdown for display
-            enter_at, exit_above = self._nasdaq_pair(self._last_vvix_band)
+            # Build tier breakdown for display from the LATEST indicator readings (refreshed hourly
+            # through US hours, outside the decision cycle); the reading the last decision acted on
+            # is kept under "decision". Falls back to the decision readings before the first refresh.
+            ind = self._indicators
+            vix = ind["vix"] if ind["vix"] is not None else self._last_vix
+            vxn = ind["vxn"] if ind["vxn"] is not None else self._last_vxn
+            band = self._display_band(daemon_state)
+            enter_at, exit_above = self._nasdaq_pair(band)
             tiers = [
                 {
                     "tier_num": 1,
                     "asset": "EQGB.L",
                     "label": "Nasdaq",
                     "index": "VXN",
-                    "gate_value": self._nasdaq_gate(self._last_vvix_band),
+                    "gate_value": self._nasdaq_gate(band),
                     "enter_gate_value": enter_at,
                     "exit_gate_value": exit_above,
-                    "current_value": self._last_vxn,
-                    "vvix_band": self._last_vvix_band,
-                    "passes": self._last_vxn is not None and self._last_vxn <= self._nasdaq_gate(self._last_vvix_band),
+                    "current_value": vxn,
+                    "vvix_band": band,
+                    "passes": vxn is not None and vxn <= self._nasdaq_gate(band),
                 },
                 {
                     "tier_num": 2,
@@ -674,9 +700,9 @@ class MultiTierAllocationManager:
                     "index": "VIX",
                     "gate_value": self.vix_tier1,
                     "enabled": self.lower_tiers_enabled,
-                    "current_value": self._last_vix,
-                    "passes": (self.lower_tiers_enabled and self._last_vix is not None
-                               and self._last_vix <= self.vix_tier1),
+                    "current_value": vix,
+                    "passes": (self.lower_tiers_enabled and vix is not None
+                               and vix <= self.vix_tier1),
                 },
                 {
                     "tier_num": 3,
@@ -685,9 +711,9 @@ class MultiTierAllocationManager:
                     "index": "VIX",
                     "gate_value": self.vix_tier2,
                     "enabled": self.lower_tiers_enabled,
-                    "current_value": self._last_vix,
-                    "passes": (self.lower_tiers_enabled and self._last_vix is not None
-                               and self.vix_tier1 < self._last_vix <= self.vix_tier2),
+                    "current_value": vix,
+                    "passes": (self.lower_tiers_enabled and vix is not None
+                               and self.vix_tier1 < vix <= self.vix_tier2),
                 },
                 {
                     "tier_num": 4,
@@ -701,9 +727,15 @@ class MultiTierAllocationManager:
             ]
 
             tier_allocation = {
-                "vix_current": self._last_vix,
-                "vxn_current": self._last_vxn,
-                "vvix_band": self._last_vvix_band,
+                "vix_current": vix,
+                "vxn_current": vxn,
+                "vvix_band": band,
+                "indicators_as_of": ind["as_of"],
+                "decision": {
+                    "vix": self._last_vix,
+                    "vxn": self._last_vxn,
+                    "vvix_band": self._last_vvix_band,
+                },
                 "tiers": tiers,
                 "selected_tier_num": self._last_tier_num,
                 "selected_asset": self._last_target_asset,
@@ -712,8 +744,9 @@ class MultiTierAllocationManager:
                 "stale": self._last_signal_date is not None and self._last_signal_date != date.today(),
                 "tier_active_since": self._tier_active_since.isoformat() if self._tier_active_since else None,
                 "vvix": {
-                    "current": (daemon_state or {}).get("vvix_last_value"),
-                    "band": self._last_vvix_band,
+                    "current": ind["vvix"] if ind["vvix"] is not None else (daemon_state or {}).get("vvix_last_value"),
+                    "last_close": (daemon_state or {}).get("vvix_last_value"),
+                    "band": band,
                     "calm_streak_days": (daemon_state or {}).get("vvix_calm_streak_days", 0),
                     "stressed_streak_days": (daemon_state or {}).get("vvix_stressed_streak_days", 0),
                     "confirm_days": self.vvix_confirm_days,

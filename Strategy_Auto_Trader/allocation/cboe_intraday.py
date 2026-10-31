@@ -30,6 +30,8 @@ CBOE_QUOTE_URL = "https://cdn.cboe.com/api/global/delayed_quotes/quotes/_{symbol
 USER_AGENT = "Mozilla/5.0"
 MAX_ROW_LAG = pd.Timedelta(minutes=5)
 SETTLEMENT_TIME = "16:00"
+# A session's daily index close is final at 16:15 ET; the extra 15 minutes covers the delayed feed.
+DAILY_SETTLED_TIME = "16:30"
 _OHLC = ("Open", "High", "Low", "Close")
 
 GetJson = Callable[[str, float], dict]
@@ -209,13 +211,32 @@ def fetch_cboe_daily_close(
     get_json: GetJson = _get_json,
     now: Callable[[], pd.Timestamp] = _utc_now,
 ) -> pd.DataFrame | None:
-    """One-row daily frame (Close, indexed by the prior session date), or None. Used once a day, pre-open."""
+    """Latest SETTLED daily close as a one-row frame (Close, indexed by its session date), or None.
+
+    The quote feed's `close` is dated by `last_trade_time`. Once that session's settlement has passed
+    (`DAILY_SETTLED_TIME` ET, the 16:15 index close plus a margin for the delayed feed) it is final
+    and is returned under its own session date, so Friday's close is available on Friday evening.
+    While that session is still trading there is no new settled close: None is returned rather than
+    `prev_day_close`, which the feed doesn't date (after a market holiday a prior-weekday stamp
+    would mislabel it and count the same close twice). `prev_day_close` is only a fallback when the
+    feed carries no usable dated close at all.
+    """
     try:
-        prior = fetch_prior_close(symbol, timeout, get_json)
+        data = get_json(CBOE_QUOTE_URL.format(symbol=symbol), timeout).get("data") or {}
     except Exception as e:
         _log.warning(f"CBOE quote {symbol}: daily close fetch failed ({e})")
         return None
-    if prior is None:
-        _log.warning(f"CBOE quote {symbol}: no previous close")
+    close = float(data.get("close") or 0)
+    trade = data.get("last_trade_time") or ""
+    if close > 0 and len(trade) >= 10:
+        session_date = trade[:10]
+        settled_at = pd.Timestamp(f"{session_date} {DAILY_SETTLED_TIME}", tz=US.tz)
+        if now().tz_convert(US.tz) < settled_at:
+            _log.debug(f"CBOE quote {symbol}: session {session_date} not settled yet")
+            return None
+        return pd.DataFrame({"Close": [close]}, index=pd.DatetimeIndex([pd.Timestamp(session_date)]))
+    prior = float(data.get("prev_day_close") or 0)
+    if prior <= 0:
+        _log.warning(f"CBOE quote {symbol}: no usable close")
         return None
     return pd.DataFrame({"Close": [prior]}, index=pd.DatetimeIndex([_prior_weekday(now())]))

@@ -212,12 +212,19 @@ def fetch_vix_hourly_raw() -> pd.DataFrame | None:
     return fetch_cboe_index_hourly("VIX")
 
 
+def fetch_vvix_hourly_raw() -> pd.DataFrame | None:
+    """Hourly VVIX from CBOE's intraday feed, bar-start stamped — DISPLAY ONLY (the dashboard's
+    hourly reading). The VVIX band itself is confirmed from daily closes (`fetch_vvix_daily`)."""
+    from ..allocation.cboe_intraday import fetch_cboe_index_hourly
+    return fetch_cboe_index_hourly("VVIX")
+
+
 def fetch_vvix_daily() -> pd.DataFrame | None:
-    """Daily VVIX previous-session close from CBOE's quote feed — for the tier allocator's VVIX-band
-    confirmation (live_daemon.py's `update_vvix_band`). Daily only, deliberately: the confirmation
-    mechanism is a day-counter by design (matches the research it was validated against), and VVIX
-    moves slowly enough that hourly resolution buys nothing. Previously read from IBKR, which confirmed
-    VVIX history was available there (2026-09-30)."""
+    """Latest settled daily VVIX close from CBOE's quote feed, indexed by its session date (None while
+    the session is still trading) — for the tier allocator's VVIX-band confirmation (live_daemon.py's
+    `update_vvix_band`). Daily only, deliberately: the confirmation mechanism is a day-counter by
+    design (matches the research it was validated against, which stamps each close after the US
+    session and holds it until the next one). Previously read from IBKR (2026-09-30)."""
     from ..allocation.cboe_intraday import fetch_cboe_daily_close
     return fetch_cboe_daily_close("VVIX")
 

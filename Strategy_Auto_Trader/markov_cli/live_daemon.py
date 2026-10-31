@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -1453,7 +1453,7 @@ def process_cycle(
             from datetime import date as _date
             today = _date.today()
             vvix_band = update_vvix_band(
-                daemon_state, today,
+                daemon_state,
                 allocation_mgr.vvix_edge_low, allocation_mgr.vvix_edge_high,
                 n_confirm=allocation_mgr.vvix_confirm_days, logger=logger,
             )
@@ -2636,9 +2636,42 @@ def check_nightly_reconciliation(
                 save_state(daemon_state)
 
 
+VVIX_RETRY_SECONDS = 900  # spacing between daily-close fetches while waiting for a new settled session
+
+
+def _latest_settled_session(now_utc: datetime) -> date:
+    """Newest weekday whose daily index close should be settled by `now_utc` (US/Eastern).
+
+    Holidays are not modelled: on one, the expected session never settles and the fetch just keeps
+    returning the previous close, which `update_vvix_band` ignores as already counted.
+    """
+    from ..allocation.cboe_intraday import DAILY_SETTLED_TIME
+    et = now_utc.astimezone(ZoneInfo("America/New_York"))
+    hh, mm = (int(x) for x in DAILY_SETTLED_TIME.split(":"))
+    day = et.date()
+    if et.weekday() >= 5 or (et.hour, et.minute) < (hh, mm):
+        day -= timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
+def _vvix_last_session(daemon_state: dict) -> date | None:
+    """Session date of the last counted VVIX close. State written before session dating stored only
+    the calendar day the close was fetched (pre-open, so the previous weekday's close)."""
+    if daemon_state.get("vvix_session_date"):
+        return date.fromisoformat(daemon_state["vvix_session_date"])
+    legacy = daemon_state.get("vvix_last_date")
+    if not legacy:
+        return None
+    day = date.fromisoformat(legacy) - timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
 def update_vvix_band(
     daemon_state: dict,
-    today,
     edge_low: float,
     edge_high: float,
     n_confirm: int,
@@ -2646,24 +2679,25 @@ def update_vvix_band(
     *,
     fetch_vvix: Callable | None = None,
     save_state: Callable | None = None,
+    now: datetime | None = None,
 ) -> str:
-    """Today's confirmed VVIX band ("calm" | "base" | "stressed") for the tier allocator.
+    """Current confirmed VVIX band ("calm" | "base" | "stressed") for the tier allocator.
 
-    Runs at most once per calendar day (like `run_daily_reconciliation`) — VVIX is a daily close,
-    re-fetching it every ~5-min cycle would be pointless. Persists two counters in `daemon_state`
-    (`vvix_calm_streak_days`, `vvix_stressed_streak_days`) plus a `vvix_last_date` cursor, following
-    this file's existing hand-rolled counter pattern (see `reconciliation_consecutive_error_days`)
-    — there is no shared helper for this in the repo.
+    Counts each SETTLED US session's VVIX close exactly once, keyed by that session's date, so
+    Friday's close is counted on Friday evening (as soon as CBOE publishes it) and not again on
+    Monday. Called from the main loop every poll (outside trading hours too) and from the decision
+    cycle; it only fetches when a newer session should have settled than the one last counted,
+    and retries at most every `VVIX_RETRY_SECONDS` while waiting for it. Persists two counters in
+    `daemon_state` (`vvix_calm_streak_days`, `vvix_stressed_streak_days`) plus the
+    `vvix_session_date` cursor (`vvix_last_date` mirrors it for the dashboard).
 
     Streak rule, matching the research this was validated against (BACKTEST_LOG.md 2026-09-30
-    19:05): a day with VVIX < edge_low extends the calm streak and resets the stressed one; a day
-    with VVIX >= edge_high does the reverse; a day with VVIX in between resets BOTH streaks (same
-    as the research's per-day classification). A MISSING day (fetch failed / daemon was down) does
-    neither — it's skipped entirely, not treated as a mid-band day — because unlike the research's
-    complete daily series, a live gap means "unknown", not "unknown counts as not-extreme"; per
-    owner's explicit decision, a gap must not silently reset a streak that's still probably valid.
-    A gap over ~4 calendar days (covers a normal weekend without false-triggering) logs a warning,
-    since the confirmed band could be stale relative to what VVIX actually did during a long outage.
+    19:05), whose daily closes are stamped after the US session and held until the next: a
+    session with VVIX < edge_low extends the calm streak and resets the stressed one; a session
+    with VVIX >= edge_high does the reverse; a session in between resets BOTH streaks. A MISSING
+    session (fetch failed / daemon was down) does neither — per owner's explicit decision, a gap
+    must not silently reset a streak that's still probably valid. A gap over ~4 calendar days
+    between counted sessions logs a warning.
 
     Returns "base" (no VVIX effect — reproduces the pre-VVIX rule) whenever neither streak has
     reached `n_confirm`, including on every call before the first successful fetch.
@@ -2673,38 +2707,50 @@ def update_vvix_band(
         fetch_vvix = fetch_vvix_daily
     if save_state is None:
         save_state = save_daemon_state
+    if now is None:
+        now = datetime.now(timezone.utc)
 
-    today_str = today.isoformat()
-    prior_date_str = daemon_state.get("vvix_last_date")
+    last_session = _vvix_last_session(daemon_state)
+    last_attempt = daemon_state.get("vvix_last_attempt_at")
+    due = last_session is None or last_session < _latest_settled_session(now)
+    if due and last_attempt is not None and (now - datetime.fromisoformat(last_attempt)).total_seconds() < VVIX_RETRY_SECONDS:
+        due = False
 
-    if prior_date_str != today_str:
+    if due:
+        daemon_state["vvix_last_attempt_at"] = now.isoformat()
         df = fetch_vvix()
         if df is None or df.empty:
-            logger.warning("VVIX: fetch failed — leaving calm/stressed streaks unchanged (gap, not a reset)")
+            logger.debug("VVIX: no new settled close yet — streaks unchanged (gap, not a reset)")
         else:
+            import pandas as pd
+            session = pd.Timestamp(df.index[-1]).date()
             value = float(df["Close"].iloc[-1])
-            calm = daemon_state.get("vvix_calm_streak_days", 0)
-            stressed = daemon_state.get("vvix_stressed_streak_days", 0)
-            if value < edge_low:
-                calm, stressed = calm + 1, 0
-            elif value >= edge_high:
-                calm, stressed = 0, stressed + 1
+            if last_session is not None and session <= last_session:
+                logger.debug(f"VVIX: close for {session} already counted — waiting for a newer session")
             else:
-                calm, stressed = 0, 0
-            daemon_state["vvix_calm_streak_days"] = calm
-            daemon_state["vvix_stressed_streak_days"] = stressed
-            daemon_state["vvix_last_date"] = today_str
-            daemon_state["vvix_last_value"] = value
-            if prior_date_str is not None:
-                from datetime import date as _date
-                gap_days = (today - _date.fromisoformat(prior_date_str)).days
-                if gap_days > 4:
-                    logger.warning(
-                        f"VVIX: {gap_days} calendar days since the last reading ({prior_date_str} -> "
-                        f"{today_str}) — confirmed band may be stale relative to what VVIX did in between."
-                    )
-            logger.info(f"VVIX: {value:.2f} (calm_streak={calm}, stressed_streak={stressed}, edges={edge_low:g}/{edge_high:g})")
-            save_state(daemon_state)
+                calm = daemon_state.get("vvix_calm_streak_days", 0)
+                stressed = daemon_state.get("vvix_stressed_streak_days", 0)
+                if value < edge_low:
+                    calm, stressed = calm + 1, 0
+                elif value >= edge_high:
+                    calm, stressed = 0, stressed + 1
+                else:
+                    calm, stressed = 0, 0
+                daemon_state["vvix_calm_streak_days"] = calm
+                daemon_state["vvix_stressed_streak_days"] = stressed
+                daemon_state["vvix_session_date"] = session.isoformat()
+                daemon_state["vvix_last_date"] = session.isoformat()
+                daemon_state["vvix_last_value"] = value
+                if last_session is not None:
+                    gap_days = (session - last_session).days
+                    if gap_days > 4:
+                        logger.warning(
+                            f"VVIX: {gap_days} calendar days since the last counted close ({last_session} -> "
+                            f"{session}) — confirmed band may be stale relative to what VVIX did in between."
+                        )
+                logger.info(f"VVIX: {session} close {value:.2f} (calm_streak={calm}, stressed_streak={stressed}, "
+                            f"edges={edge_low:g}/{edge_high:g})")
+                save_state(daemon_state)
 
     calm_streak = daemon_state.get("vvix_calm_streak_days", 0)
     stressed_streak = daemon_state.get("vvix_stressed_streak_days", 0)
@@ -2713,6 +2759,33 @@ def update_vvix_band(
     if stressed_streak >= n_confirm:
         return "stressed"
     return "base"
+
+
+_VVIX_DISPLAY_FEED = None
+
+
+def refresh_indicators(allocation_mgr, daemon_state: dict, logger: logging.Logger) -> None:
+    """Keep the dashboard's VIX / VXN / VVIX current, independent of the decision cycle.
+
+    Runs every main-loop poll at any hour, including after the London close, through the US session
+    and its settlement, so the readings follow every completed US hourly bar and end the day on the
+    official closes. Reads only: no signal evaluation, no orders. VIX/VXN go through the allocator's
+    own IndexFeeds (TTL-cached, so this just keeps them warm for the next decision). VVIX's hourly
+    reading is display only; its band still comes from settled daily closes via `update_vvix_band`.
+    """
+    global _VVIX_DISPLAY_FEED
+    from ..allocation.index_feed import IndexFeed
+    from ..quant_hmm.sentiment import fetch_vix_hourly_raw, fetch_vvix_hourly_raw, fetch_vxn_hourly_raw
+    if _VVIX_DISPLAY_FEED is None:
+        _VVIX_DISPLAY_FEED = IndexFeed("VVIX")
+    vix = allocation_mgr._get_vix_current(fetch_vix_hourly_raw)
+    vxn = allocation_mgr._get_vxn_current(fetch_vxn_hourly_raw)
+    vvix = _VVIX_DISPLAY_FEED.current(fetch_vvix_hourly_raw)
+    update_vvix_band(
+        daemon_state, allocation_mgr.vvix_edge_low, allocation_mgr.vvix_edge_high,
+        n_confirm=allocation_mgr.vvix_confirm_days, logger=logger,
+    )
+    allocation_mgr.set_indicator_readings(vix=vix, vxn=vxn, vvix=vvix)
 
 
 def process_manual_commands_wrapper(config: dict, portfolio: object, broker: object, logger: logging.Logger, daemon_state: dict) -> None:
@@ -3106,6 +3179,15 @@ def main(argv: list[str] | None = None) -> int:
                     retry_cold_start_seed_buys(
                         allocation_mgr, broker, portfolio, config, daemon_state, logger,
                     )
+
+                # Dashboard indicators (VIX/VXN/VVIX) follow every completed US hourly bar and the
+                # settled closes, at any hour — separate from the decision cycle below, which only
+                # runs in market hours. Read-only: no signals, no orders.
+                if allocation_mgr is not None:
+                    try:
+                        refresh_indicators(allocation_mgr, daemon_state, logger)
+                    except Exception as e:
+                        logger.error(f"Indicator refresh failed: {e}", exc_info=True)
 
                 # Check each market
                 now = datetime.now(timezone.utc)

@@ -147,3 +147,37 @@ class TestAppStatusDictBandAware:
     def test_non_positive_confirm_days_rejected(self):
         with pytest.raises(ValueError):
             MultiTierAllocationManager(vvix_confirm_days=0)
+
+
+class TestAppStatusLatestIndicators:
+    """The dashboard follows the latest indicator readings (refreshed hourly outside the decision
+    cycle), while the reading the last decision acted on stays under "decision"."""
+
+    def test_display_uses_latest_readings_and_keeps_decision_readings(self):
+        m = _mgr()
+        m.signal(date(2026, 10, 30), vxn=30.02, vix=21.79, verbose=False)
+        m.set_indicator_readings(vix=19.5, vxn=22.5, vvix=106.43)
+        status = m.app_status_dict({"vvix_last_value": 98.01})["tier_allocation"]
+        assert (status["vix_current"], status["vxn_current"]) == (19.5, 22.5)
+        assert status["tiers"][0]["current_value"] == 22.5
+        assert status["tiers"][0]["passes"] is True  # 22.5 <= base enter 23
+        assert status["decision"] == {"vix": 21.79, "vxn": 30.02, "vvix_band": "base"}
+        assert status["vvix"]["current"] == 106.43
+        assert status["vvix"]["last_close"] == 98.01
+        assert status["action"] == m._last_action  # still the last real decision
+        assert status["indicators_as_of"] is not None
+
+    def test_falls_back_to_decision_readings_before_first_refresh(self):
+        m = _mgr()
+        m.signal(date(2026, 10, 30), vxn=30.02, vix=21.79, verbose=False)
+        status = m.app_status_dict({"vvix_last_value": 98.01})["tier_allocation"]
+        assert (status["vix_current"], status["vxn_current"]) == (21.79, 30.02)
+        assert status["vvix"]["current"] == 98.01
+
+    def test_band_shown_is_the_one_the_next_decision_will_use(self):
+        m = _mgr(vvix_confirm_days=3)
+        m.signal(date(2026, 10, 30), vxn=24.5, vix=None, verbose=False)
+        status = m.app_status_dict({"vvix_calm_streak_days": 0, "vvix_stressed_streak_days": 3})["tier_allocation"]
+        assert status["vvix_band"] == "stressed"
+        assert status["decision"]["vvix_band"] == "base"
+        assert status["tiers"][0]["enter_gate_value"] == 21.0

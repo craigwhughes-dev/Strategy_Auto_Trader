@@ -193,8 +193,37 @@ def _prior(prev: float) -> dict:
     return {"data": {"close": 88.9, "prev_day_close": prev, "last_trade_time": "2026-10-05T08:45:00"}}
 
 
-def test_daily_close_is_previous_session_close_not_live_price():
-    frame = fetch_cboe_daily_close("VVIX", get_json=lambda u, t: _prior(87.02), now=MONDAY_PREOPEN)
+FRIDAY_EVENING = lambda: pd.Timestamp("2026-10-30 21:00", tz="UTC")  # Fri 17:00 EDT, after settlement
+FRIDAY_MIDSESSION = lambda: pd.Timestamp("2026-10-30 18:00", tz="UTC")  # Fri 14:00 EDT
+
+
+def _settled(close: float, session: str = "2026-10-30") -> dict:
+    return {"data": {"close": close, "prev_day_close": 98.01, "last_trade_time": f"{session}T16:15:00"}}
+
+
+def test_daily_close_after_settlement_is_that_sessions_close():
+    frame = fetch_cboe_daily_close("VVIX", get_json=lambda u, t: _settled(106.43), now=FRIDAY_EVENING)
+    assert frame["Close"].iloc[0] == pytest.approx(106.43)
+    assert list(frame.index) == [pd.Timestamp("2026-10-30")]
+
+
+def test_daily_close_preopen_is_previous_sessions_close_dated_to_it():
+    # Monday pre-open the quote's close is still Friday's, dated Friday
+    monday_preopen = lambda: pd.Timestamp("2026-11-02 13:00", tz="UTC")  # Mon 08:00 EST
+    frame = fetch_cboe_daily_close("VVIX", get_json=lambda u, t: _settled(106.43), now=monday_preopen)
+    assert frame["Close"].iloc[0] == pytest.approx(106.43)
+    assert list(frame.index) == [pd.Timestamp("2026-10-30")]
+
+
+def test_daily_close_none_while_session_is_trading():
+    # The live close is not settled and prev_day_close is undated, so there is no new reading
+    quote = {"data": {"close": 104.0, "prev_day_close": 98.01, "last_trade_time": "2026-10-30T14:00:00"}}
+    assert fetch_cboe_daily_close("VVIX", get_json=lambda u, t: quote, now=FRIDAY_MIDSESSION) is None
+
+
+def test_daily_close_falls_back_to_prev_close_when_feed_has_no_dated_close():
+    quote = {"data": {"close": 0, "prev_day_close": 87.02, "last_trade_time": ""}}
+    frame = fetch_cboe_daily_close("VVIX", get_json=lambda u, t: quote, now=MONDAY_PREOPEN)
     assert frame["Close"].iloc[0] == pytest.approx(87.02)
     assert list(frame.index) == [pd.Timestamp("2026-10-02")]  # Friday, the prior weekday
 
@@ -205,8 +234,9 @@ def test_daily_close_requests_quote_url_for_symbol():
     assert seen == ["https://cdn.cboe.com/api/global/delayed_quotes/quotes/_VVIX.json"]
 
 
-def test_daily_close_none_when_no_prior_close_or_request_fails():
-    assert fetch_cboe_daily_close("VVIX", get_json=lambda u, t: _prior(0.0), now=MONDAY_PREOPEN) is None
+def test_daily_close_none_when_no_usable_close_or_request_fails():
+    empty = {"data": {"close": 0, "prev_day_close": 0, "last_trade_time": ""}}
+    assert fetch_cboe_daily_close("VVIX", get_json=lambda u, t: empty, now=MONDAY_PREOPEN) is None
 
     def boom(url, timeout):
         raise OSError("network down")

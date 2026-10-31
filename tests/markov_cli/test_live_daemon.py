@@ -900,7 +900,7 @@ def test_process_cycle_interleaves_manual_commands_and_snapshot_between_tier_ord
     portfolio.sync_tier_positions.return_value = []
 
     config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
-    daemon_state = {"cursors": {}, "vvix_last_date": date.today().isoformat()}
+    daemon_state = {"cursors": {}, "vvix_last_attempt_at": datetime.now(timezone.utc).isoformat()}
     live_daemon.process_cycle(
         "test_market", {}, config, daemon_state,
         portfolio=portfolio, broker=broker, logger=mock.Mock(),
@@ -945,7 +945,7 @@ def test_process_cycle_seed_buy_skips_attempt_during_cooldown(monkeypatch):
     config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
     future = (datetime.now(timezone.utc) + timedelta(seconds=120)).isoformat()
     daemon_state = {
-        "cursors": {}, "vvix_last_date": date.today().isoformat(),
+        "cursors": {}, "vvix_last_attempt_at": datetime.now(timezone.utc).isoformat(),
         "next_seed_buy_retry_at": future,
     }
     live_daemon.process_cycle(
@@ -991,7 +991,7 @@ def test_process_cycle_seed_buy_sets_cooldown_on_failure(monkeypatch):
 
     logger = mock.Mock()
     config = {"daytime": {"max_seconds_per_cycle": 60, "cycle_buffer_minutes": 0}}
-    daemon_state = {"cursors": {}, "vvix_last_date": date.today().isoformat()}
+    daemon_state = {"cursors": {}, "vvix_last_attempt_at": datetime.now(timezone.utc).isoformat()}
     live_daemon.process_cycle(
         "test_market", {}, config, daemon_state,
         portfolio=mock.Mock(), broker=broker, logger=logger,
@@ -3754,82 +3754,121 @@ class TestCheckoutAttributionRealWorldShapes:
 
 
 class TestVvixBand:
-    """update_vvix_band — the VVIX calm/stressed streak confirmation for the tier allocator."""
+    """update_vvix_band — the VVIX calm/stressed streak confirmation, counted once per settled session."""
 
-    def _df(self, close: float):
+    # Evening after each session's settlement (US/Eastern 17:00 = 21:00/22:00 UTC)
+    @staticmethod
+    def _evening(day: date) -> datetime:
+        return datetime(day.year, day.month, day.day, 17, 0, tzinfo=ZoneInfo("America/New_York")).astimezone(timezone.utc)
+
+    @staticmethod
+    def _df(close: float, session: date):
         import pandas as pd
-        return pd.DataFrame({"Close": [close]})
+        return pd.DataFrame({"Close": [close]}, index=pd.DatetimeIndex([pd.Timestamp(session)]))
 
-    def test_confirms_calm_after_n_consecutive_days_below_low_edge(self):
+    def _run(self, state, session: date, close, *, now=None, logger=None):
+        return live_daemon.update_vvix_band(
+            state, 76.0, 122.0, 3, logger or mock.Mock(),
+            fetch_vvix=lambda: None if close is None else self._df(close, session),
+            save_state=lambda s: None, now=now or self._evening(session),
+        )
+
+    def test_confirms_calm_after_n_consecutive_sessions_below_low_edge(self):
         state = {}
         for day, close in [(5, 70.0), (6, 71.0), (7, 72.0)]:
-            band = live_daemon.update_vvix_band(
-                state, date(2026, 1, day), 76.0, 122.0, 3, mock.Mock(),
-                fetch_vvix=lambda c=close: self._df(c), save_state=lambda s: None,
-            )
+            band = self._run(state, date(2026, 1, day), close)
         assert band == "calm"
         assert state["vvix_calm_streak_days"] == 3
         assert state["vvix_stressed_streak_days"] == 0
+        assert state["vvix_session_date"] == "2026-01-07"
 
     def test_stays_base_before_confirmation_threshold(self):
         state = {}
-        band = live_daemon.update_vvix_band(
-            state, date(2026, 1, 5), 76.0, 122.0, 3, mock.Mock(),
-            fetch_vvix=lambda: self._df(70.0), save_state=lambda s: None,
-        )
-        assert band == "base"
-        band = live_daemon.update_vvix_band(
-            state, date(2026, 1, 6), 76.0, 122.0, 3, mock.Mock(),
-            fetch_vvix=lambda: self._df(70.0), save_state=lambda s: None,
-        )
-        assert band == "base"  # only 2 consecutive days, needs 3
+        assert self._run(state, date(2026, 1, 5), 70.0) == "base"
+        assert self._run(state, date(2026, 1, 6), 70.0) == "base"  # only 2 sessions, needs 3
 
-    def test_confirms_stressed_after_n_consecutive_days_at_or_above_high_edge(self):
+    def test_confirms_stressed_after_n_consecutive_sessions_at_or_above_high_edge(self):
         state = {}
         for day, close in [(5, 130.0), (6, 125.0), (7, 140.0)]:
-            band = live_daemon.update_vvix_band(
-                state, date(2026, 1, day), 76.0, 122.0, 3, mock.Mock(),
-                fetch_vvix=lambda c=close: self._df(c), save_state=lambda s: None,
-            )
+            band = self._run(state, date(2026, 1, day), close)
         assert band == "stressed"
 
     def test_mid_range_reading_resets_both_streaks(self):
-        state = {"vvix_calm_streak_days": 2, "vvix_stressed_streak_days": 0, "vvix_last_date": "2026-01-06"}
-        band = live_daemon.update_vvix_band(
-            state, date(2026, 1, 7), 76.0, 122.0, 3, mock.Mock(),
-            fetch_vvix=lambda: self._df(95.0), save_state=lambda s: None,
-        )
-        assert band == "base"
+        state = {"vvix_calm_streak_days": 2, "vvix_stressed_streak_days": 0, "vvix_session_date": "2026-01-06"}
+        assert self._run(state, date(2026, 1, 7), 95.0) == "base"
         assert state["vvix_calm_streak_days"] == 0
         assert state["vvix_stressed_streak_days"] == 0
 
     def test_missing_reading_does_not_reset_an_already_confirmed_streak(self):
-        state = {"vvix_calm_streak_days": 3, "vvix_stressed_streak_days": 0, "vvix_last_date": "2026-01-07"}
-        band = live_daemon.update_vvix_band(
-            state, date(2026, 1, 8), 76.0, 122.0, 3, mock.Mock(),
-            fetch_vvix=lambda: None, save_state=lambda s: None,
-        )
-        assert band == "calm"
+        state = {"vvix_calm_streak_days": 3, "vvix_stressed_streak_days": 0, "vvix_session_date": "2026-01-07"}
+        assert self._run(state, date(2026, 1, 8), None) == "calm"
         assert state["vvix_calm_streak_days"] == 3  # untouched by the gap
-        assert state["vvix_last_date"] == "2026-01-07"  # cursor not advanced on a failed fetch
+        assert state["vvix_session_date"] == "2026-01-07"  # cursor not advanced on a failed fetch
 
-    def test_same_day_call_does_not_refetch(self):
-        state = {"vvix_calm_streak_days": 1, "vvix_stressed_streak_days": 0, "vvix_last_date": "2026-01-05"}
+    def test_friday_close_counted_friday_evening_and_not_again_monday(self):
+        state = {"vvix_calm_streak_days": 0, "vvix_stressed_streak_days": 2, "vvix_session_date": "2026-10-29"}
+        friday = date(2026, 10, 30)
+        assert self._run(state, friday, 130.0) == "stressed"
+        assert state["vvix_session_date"] == "2026-10-30"
+        # Monday pre-open the feed still returns Friday's close: already counted, streak unchanged
+        monday_preopen = datetime(2026, 11, 2, 8, 0, tzinfo=ZoneInfo("America/New_York")).astimezone(timezone.utc)
+        self._run(state, friday, 130.0, now=monday_preopen)
+        assert state["vvix_stressed_streak_days"] == 3
+
+    def test_no_fetch_once_latest_settled_session_is_counted(self):
+        state = {"vvix_calm_streak_days": 1, "vvix_stressed_streak_days": 0, "vvix_session_date": "2026-10-30"}
 
         def explode():
-            raise AssertionError("fetch_vvix should not be called again the same day")
+            raise AssertionError("fetch_vvix should not be called — Friday already counted")
 
-        band = live_daemon.update_vvix_band(
-            state, date(2026, 1, 5), 76.0, 122.0, 3, mock.Mock(),
-            fetch_vvix=explode, save_state=lambda s: None,
-        )
-        assert band == "base"  # streak=1, still below n_confirm=3
+        saturday = datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc)
+        band = live_daemon.update_vvix_band(state, 76.0, 122.0, 3, mock.Mock(),
+                                            fetch_vvix=explode, save_state=lambda s: None, now=saturday)
+        assert band == "base"
+
+    def test_retry_while_waiting_for_settlement_is_spaced(self):
+        state = {"vvix_session_date": "2026-10-29"}
+        calls = []
+        evening = self._evening(date(2026, 10, 30))
+        for minutes in (0, 5, 16):
+            live_daemon.update_vvix_band(state, 76.0, 122.0, 3, mock.Mock(),
+                                         fetch_vvix=lambda: calls.append(1), save_state=lambda s: None,
+                                         now=evening + timedelta(minutes=minutes))
+        assert len(calls) == 2  # at 0 and 16 minutes, not at 5
+
+    def test_legacy_calendar_cursor_maps_to_previous_session(self):
+        # Old state: fetched pre-open Friday (Thursday's close). Friday's close must still count.
+        state = {"vvix_calm_streak_days": 0, "vvix_stressed_streak_days": 0, "vvix_last_date": "2026-10-30"}
+        self._run(state, date(2026, 10, 30), 106.43)
+        assert state["vvix_session_date"] == "2026-10-30"
+        assert state["vvix_last_value"] == 106.43
 
     def test_long_gap_logs_a_warning(self):
-        state = {"vvix_calm_streak_days": 1, "vvix_stressed_streak_days": 0, "vvix_last_date": "2026-01-01"}
+        state = {"vvix_calm_streak_days": 1, "vvix_stressed_streak_days": 0, "vvix_session_date": "2026-01-01"}
         logger = mock.Mock()
-        live_daemon.update_vvix_band(
-            state, date(2026, 1, 10), 76.0, 122.0, 3, logger,
-            fetch_vvix=lambda: self._df(70.0), save_state=lambda s: None,
-        )
+        self._run(state, date(2026, 1, 9), 70.0, logger=logger)
         assert logger.warning.called
+
+
+
+
+def test_refresh_indicators_reads_all_three_without_deciding(monkeypatch):
+    """Indicator refresh runs outside the decision cycle: it reads VIX/VXN/VVIX and records them
+    for display, but never evaluates a signal or rebalances."""
+    import pandas as pd
+
+    from Strategy_Auto_Trader.allocation.index_feed import IndexFeed
+
+    bar = pd.DataFrame({"Close": [104.2]}, index=pd.DatetimeIndex([pd.Timestamp("2026-10-30 18:00", tz="UTC")]))
+    monkeypatch.setattr(live_daemon, "_VVIX_DISPLAY_FEED", IndexFeed("VVIX"))
+    monkeypatch.setattr("Strategy_Auto_Trader.quant_hmm.sentiment.fetch_vvix_hourly_raw", lambda: bar)
+    monkeypatch.setattr(live_daemon, "update_vvix_band", lambda *a, **k: "base")
+
+    mgr = mock.Mock()
+    mgr._get_vix_current.return_value = 19.0
+    mgr._get_vxn_current.return_value = 24.0
+    live_daemon.refresh_indicators(mgr, {}, mock.Mock())
+
+    mgr.set_indicator_readings.assert_called_once_with(vix=19.0, vxn=24.0, vvix=104.2)
+    mgr.rebalance.assert_not_called()
+    mgr.signal.assert_not_called()
