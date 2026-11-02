@@ -217,8 +217,21 @@ class IBKRDataClient:
 
     def disconnect(self) -> None:
         if self._ib is not None:
-            self._ib.disconnect()
+            try:
+                self._ib.disconnect()
+            except Exception as e:
+                logger.debug("disconnect() suppressed error: %s", e)
             self._ib = None
+
+    def is_connected(self) -> bool:
+        """Check if currently connected — never raises, mirrors IBKRAdapter.is_connected()."""
+        if self._ib is None:
+            return False
+        try:
+            return self._ib.isConnected()
+        except Exception as e:
+            logger.debug("is_connected() check failed (suppressed): %s", e)
+            return False
 
     def _fetch_pages(self, contract, what_to_show: str = "TRADES",
                       stop_at: pd.Timestamp | None = None,

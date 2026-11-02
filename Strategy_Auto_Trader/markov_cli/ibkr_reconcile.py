@@ -71,10 +71,34 @@ def main(argv: list[str] | None = None) -> int:
     logger.info(f"Reconciling {len(tickers)} tickers, last {args.lookback_days}d "
                f"against stored IBKR cache...")
 
+    RECONNECT_BACKOFFS_S = (5, 15, 45)
+
     total_checked = total_corrected = 0
     affected_tickers: set[str] = set()
+    aborted = False
     try:
         for i, ticker in enumerate(tickers, 1):
+            if not client.is_connected():
+                reconnected = False
+                for backoff in RECONNECT_BACKOFFS_S:
+                    logger.warning(
+                        f"[{i}/{len(tickers)}] connection lost before {ticker}; "
+                        f"reconnecting in {backoff}s..."
+                    )
+                    time.sleep(backoff)
+                    if client.connect():
+                        reconnected = True
+                        break
+                if not reconnected:
+                    logger.error(
+                        f"Could not reconnect to TWS/Gateway after "
+                        f"{len(RECONNECT_BACKOFFS_S)} attempts; aborting at "
+                        f"[{i}/{len(tickers)}] {ticker} rather than burn the "
+                        f"remaining {len(tickers) - i + 1} tickers."
+                    )
+                    aborted = True
+                    break
+
             try:
                 result = reconcile_recent_bars(ticker, client, lookback_days=args.lookback_days)
             except Exception as exc:
@@ -94,12 +118,13 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         client.disconnect()
 
-    logger.info(f"Reconciliation complete: {total_checked} bars checked, "
+    status = "aborted early (reconnect exhausted)" if aborted else "complete"
+    logger.info(f"Reconciliation {status}: {total_checked} bars checked, "
                f"{total_corrected} correction(s) found across {len(tickers)} tickers.")
     if affected_tickers:
         logger.warning(f"{len(affected_tickers)} ticker(s) had corrections applied: "
                        f"{sorted(affected_tickers)}")
-    return 0
+    return 1 if aborted else 0
 
 
 if __name__ == "__main__":

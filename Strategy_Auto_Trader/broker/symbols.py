@@ -26,6 +26,9 @@ IBKR_UNRESOLVABLE: frozenset[str] = frozenset({
     "MTLN.L",  # Metlen Energy (ex-Mytilineos): IBKR resolves as MTLN/LSE/EUR only — confirmed 2026-08-16
     "AVB",     # AvalonBay Communities (REIT): IBKR returns Error 200 "No security definition" — confirmed 2026-08-19
     "EQR",     # Equity Residential (REIT): IBKR returns Error 200 "No security definition" — confirmed 2026-08-19
+    "BEZ.L",   # Beazley Group: no GBP line on IBKR under symbol BEZ (LSE/LSEETF/SMART all
+               # "No security definition"); reqMatchingSymbols("BEZ") turns up no LSE match either
+               # (BZT/LSE/GBP is an unrelated company, Bezant Resources plc) — confirmed 2026-11-02
 })
 
 # A handful of short LSE codes are registered on IBKR with a literal trailing
