@@ -51,6 +51,13 @@ class TestIbkrContractParams:
         assert ibkr_contract_params("ISF.L") == ("ISF", "LSEETF", "GBP")
         assert ibkr_contract_params("EQGB.L") == ("EQGB", "LSEETF", "GBP")
 
+    def test_eqqq_maps_to_lseetf_exchange(self):
+        # Verified live against paper Gateway 2026-11-04: Stock("EQQQ","LSE","GBP") fails
+        # to qualify (same failure mode as ISF before this fix); "LSEETF" resolves
+        # (conId 35628280). Needed for the crash-recovery override's historical daily
+        # closes (allocation/crash_recovery_override.py), not order routing.
+        assert ibkr_contract_params("EQQQ.L") == ("EQQQ", "LSEETF", "GBP")
+
     def test_csh2_maps_to_plain_lse_gbp_line(self):
         # IBKR lists CSH2's GBP share class on LSE (tradingClass ETFS), not
         # LSEETF; the IBIS/EUR line has no market-data permission (2026-09-17).

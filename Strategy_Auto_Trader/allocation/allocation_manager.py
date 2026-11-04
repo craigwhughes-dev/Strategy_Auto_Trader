@@ -277,6 +277,13 @@ class MultiTierAllocationManager:
         enter_at, exit_above = self._nasdaq_pair(vvix_band)
         return exit_above if self.current_asset == "EQGB.L" else enter_at
 
+    def would_pick_nasdaq(self, vxn: float | None, vvix_band: str = "base") -> bool:
+        """Whether the base VXN/VVIX-banded rule would pick tier 1 (Nasdaq) right now, with
+        no side effects — unlike `signal()`, which mutates `_last_tier_num`/`_tier_active_since`
+        on every call. For callers (e.g. the crash-recovery override) that need to know "what
+        would the base rule do" without disturbing app_status.json's tier-active-since tracking."""
+        return vxn is not None and vxn <= self._nasdaq_gate(vvix_band)
+
     def signal(
         self,
         today: date,
@@ -285,6 +292,7 @@ class MultiTierAllocationManager:
         vvix_band: str = "base",
         logger=None,
         verbose: bool = True,
+        force_tier1: bool = False,
     ) -> AllocationSignal:
         """Compute daily allocation decision.
 
@@ -301,6 +309,10 @@ class MultiTierAllocationManager:
             verbose: Log the full tier-by-tier breakdown at INFO level. Set False for
                 a quiet lookup (e.g. speculative pre-checks) so the breakdown appears
                 only once, at the call site that actually acts on it.
+            force_tier1: owned by the crash-recovery override (live_daemon.py, via
+                allocation/crash_recovery_override.py), never a CLI flag or engine default.
+                When True, tier 1 passes regardless of the VXN gate. Default False reproduces
+                behavior exactly as if the override didn't exist.
 
         Returns:
             AllocationSignal with tier, target asset, and rebalance decision
@@ -315,13 +327,19 @@ class MultiTierAllocationManager:
         # Evaluate every tier independently (each computes its own pass/fail + reason),
         # log the result, then pick the best (lowest-numbered) tier that passed.
         nasdaq_gate = self._nasdaq_gate(vvix_band)
+        tier1_passed = force_tier1 or (vxn is not None and vxn <= nasdaq_gate)
+        tier1_detail = (
+            f"VXN={vxn:.2f} vs gate={nasdaq_gate:g} [{vvix_band}] "
+            f"({'hold' if self.current_asset == 'EQGB.L' else 'enter'})"
+            if vxn is not None else "VXN unavailable"
+        )
+        if force_tier1:
+            tier1_detail += " (crash-recovery override forced)"
         tiers = [
             (1, "EQGB.L", "Nasdaq", "VXN",
              vxn, nasdaq_gate,
-             vxn is not None and vxn <= nasdaq_gate,
-             f"VXN={vxn:.2f} vs gate={nasdaq_gate:g} [{vvix_band}] "
-             f"({'hold' if self.current_asset == 'EQGB.L' else 'enter'})"
-             if vxn is not None else "VXN unavailable"),
+             tier1_passed,
+             tier1_detail),
             (2, "VUSA", "Balanced", "VIX",
              vix, self.vix_tier1,
              self.lower_tiers_enabled and vix is not None and vix <= self.vix_tier1,
@@ -385,6 +403,7 @@ class MultiTierAllocationManager:
         positions: dict[str, int],
         vvix_band: str = "base",
         logger=None,
+        force_tier1: bool = False,
     ) -> list[AllocationOrder]:
         """Generate rebalance orders if target tier differs from current.
 
@@ -397,6 +416,7 @@ class MultiTierAllocationManager:
             positions: Current positions {ticker: quantity}
             vvix_band: "calm" | "base" | "stressed" — see `signal()`. Default "base" is a no-op.
             logger: Logger to use (if None, uses module logger)
+            force_tier1: see `signal()`. Default False is a no-op.
 
         Returns:
             List of AllocationOrder (sell current + buy target, or empty if no rebalance needed)
@@ -412,7 +432,7 @@ class MultiTierAllocationManager:
         # Verbose tier breakdown logged here (not at any earlier speculative signal()
         # call) so it lands right next to the resulting order, not 10-20s earlier
         # across an unrelated price-fetch gap.
-        signal = self.signal(today, vxn, vix, vvix_band=vvix_band, logger=log)
+        signal = self.signal(today, vxn, vix, vvix_band=vvix_band, logger=log, force_tier1=force_tier1)
 
         return self._rebalance_tiers(today, signal, current_price, allocatable_cash, positions, log)
 

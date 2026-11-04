@@ -640,6 +640,18 @@ def _exchange_market_name_for_ticker(ticker: str) -> str:
     return "ftse" if ticker.endswith(".L") else "sp500"
 
 
+def _crash_recovery_override_status(daemon_state: dict, config: dict) -> dict | None:
+    """app_status.json's crash_recovery_override block, or None when the feature has no
+    config section at all (vs. {"enabled": false} once a config exists but the owner
+    hasn't opted in — still shown so the UI can display the thresholds)."""
+    section = config.get("crash_recovery_override")
+    if section is None:
+        return None
+    from ..allocation import crash_recovery_override
+    cfg = crash_recovery_override.load_config(section)
+    return crash_recovery_override.app_status_dict(daemon_state, cfg)
+
+
 def write_app_status_snapshot(
     portfolio: object,
     daemon_state: dict,
@@ -709,6 +721,7 @@ def write_app_status_snapshot(
         "positions": positions_snapshot,
         "allocation": allocation_mgr.app_status_dict(daemon_state) if allocation_mgr is not None else None,
         "shadow_benchmark": daemon_state.get("shadow_benchmark"),
+        "crash_recovery_override": _crash_recovery_override_status(daemon_state, config),
     }
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1457,6 +1470,17 @@ def process_cycle(
                 allocation_mgr.vvix_edge_low, allocation_mgr.vvix_edge_high,
                 n_confirm=allocation_mgr.vvix_confirm_days, logger=logger,
             )
+
+            from ..allocation import crash_recovery_override
+            cro_cfg = crash_recovery_override.load_config(config.get("crash_recovery_override"))
+            force_tier1 = False
+            if cro_cfg["enabled"] and vxn_current is not None:
+                force_tier1 = crash_recovery_override.update_and_decide(
+                    daemon_state, today, cro_cfg,
+                    base_would_pick_nasdaq=allocation_mgr.would_pick_nasdaq(vxn_current, vvix_band),
+                    logger=logger,
+                )
+
             try:
                 required_tickers = ["EQGB.L", "VUSA", "ISF.L", "CSH2.L"]
 
@@ -1537,6 +1561,7 @@ def process_cycle(
                         positions=alloc_positions,
                         vvix_band=vvix_band,
                         logger=logger,
+                        force_tier1=force_tier1,
                     )
                     daemon_state["tier_allocation_last"] = allocation_mgr.to_persisted_dict()
                     save_daemon_state(daemon_state)

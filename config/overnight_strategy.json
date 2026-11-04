@@ -82,6 +82,15 @@
     "vxn_stressed_exit": 22,
     "min_hold_gbp": 10
   },
+  "crash_recovery_override": {
+    "enabled": false,
+    "hyg_recovery_threshold": 0.90,
+    "confirm_days": 5,
+    "exit_confirm_days": 5,
+    "rise_days": 10,
+    "min_depth": 0.20,
+    "ibkr_client_id": 3
+  },
   "broker": {
     "provider": "t212",
     "t212": {

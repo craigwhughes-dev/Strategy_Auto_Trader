@@ -87,6 +87,41 @@ class TestSignalBandAware:
         assert sig3.target_asset != "EQGB.L"  # 26.5 > calm exit 26, now exits
 
 
+class TestWouldPickNasdaqAndForceTier1:
+    """Seam for the crash-recovery override (allocation/crash_recovery_override.py) added
+    2026-11-04 — would_pick_nasdaq() is a pure peek, force_tier1 overrides tier 1's gate."""
+
+    def test_would_pick_nasdaq_true_when_vxn_within_gate(self):
+        m = _mgr()
+        assert m.would_pick_nasdaq(22.0, "base") is True
+
+    def test_would_pick_nasdaq_false_when_vxn_beyond_gate(self):
+        m = _mgr()
+        assert m.would_pick_nasdaq(24.5, "base") is False
+
+    def test_would_pick_nasdaq_false_when_vxn_none(self):
+        m = _mgr()
+        assert m.would_pick_nasdaq(None, "base") is False
+
+    def test_would_pick_nasdaq_has_no_side_effects(self):
+        """Unlike signal(), must not mutate _last_tier_num/_tier_active_since."""
+        m = _mgr()
+        before = (m._last_tier_num, m._tier_active_since)
+        m.would_pick_nasdaq(22.0, "base")
+        assert (m._last_tier_num, m._tier_active_since) == before
+
+    def test_force_tier1_overrides_a_failing_vxn_gate(self):
+        m = _mgr()
+        sig = m.signal(date(2026, 1, 5), vxn=30.0, vix=None, verbose=False, force_tier1=True)
+        assert sig.tier == 1
+        assert sig.target_asset == "EQGB.L"
+
+    def test_force_tier1_false_is_a_no_op(self):
+        m = _mgr()
+        sig = m.signal(date(2026, 1, 5), vxn=30.0, vix=None, verbose=False, force_tier1=False)
+        assert sig.tier != 1
+
+
 class TestFromConfigVvixKeys:
     def test_accepts_the_new_vvix_keys(self):
         m = MultiTierAllocationManager.from_config({

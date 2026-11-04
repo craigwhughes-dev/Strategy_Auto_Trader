@@ -194,9 +194,12 @@ class TestEngineParity:
 class TestEqqqIsTaxExempt:
     """EQQQ.L is an LSE UCITS ETF used in the tier research datasets.
 
-    It is not in the order-routing tables (not wired for live orders), which
-    previously meant cost models charged it 0.5% stamp duty as if it were a UK
-    company share — a phantom cost on the Nasdaq leg of every tier backtest.
+    It was not in the order-routing tables before 2026-11-04 (not wired for live orders),
+    which previously meant cost models charged it 0.5% stamp duty as if it were a UK
+    company share — a phantom cost on the Nasdaq leg of every tier backtest. It was then
+    added to _LSEETF_SYMBOLS (verified live against the paper Gateway, conId 35628280) for
+    allocation/crash_recovery_override.py's historical daily-close series — still never
+    used for order placement, since nothing places an EQQQ order.
     """
 
     def test_eqqq_pays_no_stamp_duty(self):
@@ -216,10 +219,13 @@ class TestEqqqIsTaxExempt:
         from Strategy_Auto_Trader.broker.symbols import is_uk_listed_etf
         assert is_uk_listed_etf("EQQQ.L") is True
 
-    def test_tax_exemption_does_not_change_order_routing(self):
-        """Exemption is decoupled from routing: EQQQ has no verified LSEETF listing."""
-        from Strategy_Auto_Trader.broker.symbols import ibkr_contract_params
-        assert ibkr_contract_params("EQQQ.L") == ("EQQQ", "LSE", "GBP")
+    def test_tax_exemption_does_not_depend_on_order_routing(self):
+        """is_uk_listed_etf (cost-model exemption) doesn't care which exchange EQQQ resolves
+        to for market data — it was True before EQQQ had a verified LSEETF listing (via
+        _UK_ETF_TAX_EXEMPT) and stays True now that it does (also via _LSEETF_SYMBOLS)."""
+        from Strategy_Auto_Trader.broker.symbols import ibkr_contract_params, is_uk_listed_etf
+        assert ibkr_contract_params("EQQQ.L") == ("EQQQ", "LSEETF", "GBP")
+        assert is_uk_listed_etf("EQQQ.L") is True
 
     def test_uk_share_still_taxed(self):
         """Guard against the exemption widening to real UK shares."""

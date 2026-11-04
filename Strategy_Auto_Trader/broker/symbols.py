@@ -43,7 +43,11 @@ _LSE_DOT_SYMBOLS = {"AV", "BA", "BP", "JD", "NG", "RR", "SN", "UU"}
 # LSE-listed ETFs use exchange "LSEETF" on IBKR, not "LSE" (which is for equities).
 # Stock("ISF","LSE","GBP") returns Error 200; Stock("ISF","LSEETF","GBP") resolves correctly.
 # Verified 2026-09-14 on paper Gateway port 4002: conIds 13444223/104145585/68490081.
-_LSEETF_SYMBOLS: frozenset[str] = frozenset({"ISF", "XSTR", "IGLS", "ISXF", "EQGB"})  # EQGB = Invesco Nasdaq-100 GBP-hedged UCITS
+# EQQQ added 2026-11-04 (conId 35628280) for the crash-recovery override's historical
+# daily-close series only (allocation/crash_recovery_override.py) — nothing places EQQQ
+# orders, so this doesn't newly wire it for order routing; the caution in
+# _UK_ETF_TAX_EXEMPT's comment below still holds for that.
+_LSEETF_SYMBOLS: frozenset[str] = frozenset({"ISF", "XSTR", "IGLS", "ISXF", "EQGB", "EQQQ"})  # EQGB = Invesco Nasdaq-100 GBP-hedged UCITS
 
 # CSH2 (Amundi Smart Overnight Return UCITS ETF, GBP-hedged share class) is
 # registered on IBKR as Stock("CSH2", "LSE", "GBP") — conId 196610715,
