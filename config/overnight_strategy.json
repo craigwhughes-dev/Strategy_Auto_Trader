@@ -83,7 +83,7 @@
     "min_hold_gbp": 10
   },
   "crash_recovery_override": {
-    "enabled": false,
+    "enabled": true,
     "hyg_recovery_threshold": 0.90,
     "confirm_days": 5,
     "exit_confirm_days": 5,

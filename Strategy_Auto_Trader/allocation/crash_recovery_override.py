@@ -131,6 +131,7 @@ def fetch_eqqq_hyg_daily(
     eqqq = hyg = None
     if due:
         state["last_fetch_attempt_at"] = now.isoformat()
+        logger.info(f"Crash-recovery override: fetching EQQQ/HYG daily (ibkr client_id={cfg['ibkr_client_id']})...")
         client = client_factory(cfg["ibkr_client_id"])
         try:
             eqqq = client.fetch_daily("EQQQ.L", period="max")
@@ -220,7 +221,7 @@ def current_episode(nasdaq_close: pd.Series | None, today: date, min_depth: floa
         return None
     episodes = find_episodes(nasdaq_close, min_depth=min_depth)
     idx = nasdaq_close.index
-    today_ts = pd.Timestamp(today)
+    today_ts = pd.Timestamp(today, tz=idx.tz)
     for ep in episodes:
         if idx[ep.peak_idx] <= today_ts <= idx[ep.end_idx]:
             return ep

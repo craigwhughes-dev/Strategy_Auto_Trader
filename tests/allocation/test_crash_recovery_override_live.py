@@ -280,6 +280,19 @@ class TestCurrentEpisode:
         assert cro.current_episode(None, date(2020, 1, 1), min_depth=0.20) is None
         assert cro.current_episode(pd.Series(dtype=float), date(2020, 1, 1), min_depth=0.20) is None
 
+    def test_tz_aware_index_does_not_raise(self):
+        """Live series from IBKRDataClient.fetch_daily are UTC tz-aware (see
+        ibkr_data.py's `out.index = pd.to_datetime(out.index, utc=True)`) — `today`
+        (a plain date) must not raise 'Cannot compare tz-naive and tz-aware timestamps'
+        (prod incident 2026-11-04, first live run after enabling the override)."""
+        n = 300
+        prices = [100.0] * 50 + [70.0] * (n - 50)
+        idx = pd.bdate_range("2020-01-02", periods=n, tz="UTC")
+        series = pd.Series(prices, index=idx)
+        today = idx[55].date()
+        ep = cro.current_episode(series, today, min_depth=0.20)
+        assert ep is not None
+
 
 class TestAppStatusDict:
     def test_shape_with_no_state_yet(self):

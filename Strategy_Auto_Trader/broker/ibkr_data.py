@@ -401,10 +401,12 @@ class IBKRDataClient:
                 return _truncate_to_period(cached, period)
             if cached is not None:
                 new_df = self._fetch_pages(contract, what_to_show=what_to_show,
-                                            stop_at=cached.index[-1], bar_size="1 day")
+                                            stop_at=cached.index[-1], bar_size="1 day",
+                                            page_duration="5 Y")
             else:
                 new_df = self._fetch_pages(contract, what_to_show=what_to_show,
-                                            min_days=_period_to_days(period), bar_size="1 day")
+                                            min_days=_period_to_days(period), bar_size="1 day",
+                                            page_duration="5 Y")
         except Exception:
             logger.warning("fetch_daily(%s) failed", ticker, exc_info=True)
             return _truncate_to_period(cached, period)

@@ -289,6 +289,8 @@ class TestFetchHourly:
 
 class TestFetchDaily:
     def test_bootstrap_pages_until_min_days_covered(self, tmp_path, monkeypatch):
+        """Daily bootstrap pages in 5 Y chunks (not the 6 M hourly default) — a
+        page=1825d easily covers a 200d min_days request in a single page."""
         pytest.importorskip("ib_async")
         from unittest.mock import MagicMock
         monkeypatch.setattr(ibkr_data, "CACHE_DIR_DAILY", tmp_path)
@@ -296,16 +298,16 @@ class TestFetchDaily:
         client = IBKRDataClient()
         client._ib = MagicMock()
         start = datetime.now(timezone.utc) - timedelta(days=190)
-        page1 = _make_page(start + timedelta(days=180), 5)
-        page2 = _make_page(start, 5)
-        client._ib.reqHistoricalData.side_effect = [page1, page2]
+        page1 = _make_page(start, 5)
+        client._ib.reqHistoricalData.side_effect = [page1]
 
         out = client.fetch_daily("AAPL", period="200d", use_cache=False)
 
-        assert client._ib.reqHistoricalData.call_count == 2
+        assert client._ib.reqHistoricalData.call_count == 1
         assert client._ib.reqHistoricalData.call_args.kwargs["barSizeSetting"] == "1 day"
+        assert client._ib.reqHistoricalData.call_args.kwargs["durationStr"] == "5 Y"
         assert list(out.columns) == ["Open", "High", "Low", "Close", "Volume"]
-        assert len(out) == 10
+        assert len(out) == 5
         assert out.index.is_monotonic_increasing
 
     def test_incremental_fetch_only_pages_the_gap(self, tmp_path, monkeypatch):
