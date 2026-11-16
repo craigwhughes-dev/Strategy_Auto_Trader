@@ -24,13 +24,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from datetime import date, datetime, timezone
 
 import pandas as pd
 
-from .cboe_intraday import DAILY_SETTLED_TIME
+from .cboe_intraday import latest_settled_session as _latest_settled_session
 from ..research.crash_phases import Episode, find_episodes
+
+_log = logging.getLogger(__name__)
 
 FETCH_RETRY_SECONDS = 900  # same cooldown idea as live_daemon.update_vvix_band's VVIX_RETRY_SECONDS
 
@@ -60,25 +61,6 @@ def load_config(section: dict | None) -> dict:
     return cfg
 
 
-def _latest_settled_session(now_utc: datetime) -> date:
-    """Newest weekday whose daily EQQQ/HYG close should be settled by `now_utc`.
-
-    Same shape as live_daemon.py's `_latest_settled_session` (used for VVIX) — duplicated
-    rather than imported because that helper is private to live_daemon.py and this module
-    sits below it in the import graph (live_daemon.py imports this module, not the other
-    way round). Holidays are not modelled: on one, the expected session never settles and
-    the fetch just keeps returning the previous close, harmlessly re-attempted next cycle.
-    """
-    et = now_utc.astimezone(ZoneInfo("America/New_York"))
-    hh, mm = (int(x) for x in DAILY_SETTLED_TIME.split(":"))
-    day = et.date()
-    if et.weekday() >= 5 or (et.hour, et.minute) < (hh, mm):
-        day -= timedelta(days=1)
-    while day.weekday() >= 5:
-        day -= timedelta(days=1)
-    return day
-
-
 _EPISODE_STATE_KEYS = ("episode_peak_date", "exited_to_cash", "fired", "active", "resolved")
 
 
@@ -94,6 +76,16 @@ def _reset_episode_state(state: dict) -> None:
 def _default_client_factory(client_id: int):
     from ..broker.ibkr_data import IBKRDataClient
     return IBKRDataClient(client_id=client_id)
+
+
+# In-memory cache of the last returned (eqqq_close, hyg_close), keyed by the session cursor.
+# The on-disk CSVs cannot change between fetches (the fetch is gated to once per settled
+# session), so re-parsing ~26y of daily history on every hourly cache-only readback is waste.
+_series_cache: dict = {"session": None, "eqqq": None, "hyg": None}
+
+
+def _clear_series_cache() -> None:
+    _series_cache.update(session=None, eqqq=None, hyg=None)
 
 
 def fetch_eqqq_hyg_daily(
@@ -142,15 +134,25 @@ def fetch_eqqq_hyg_daily(
         finally:
             client.disconnect()
         if eqqq is not None and not eqqq.empty and hyg is not None and not hyg.empty:
-            state["last_fetch_session"] = _latest_settled_session(now).isoformat()
+            # Stamp the cursor from the session dates actually present in the data, not the
+            # wall clock: if the expected session's bar isn't published yet, the cursor stays
+            # behind and the 900s retry cooldown keeps re-attempting, instead of silently
+            # running a full day on data one session stale.
+            fetched_session = min(eqqq.index[-1], hyg.index[-1]).date()
+            state["last_fetch_session"] = fetched_session.isoformat()
             save_state(daemon_state)
             logger.info(f"Crash-recovery override: EQQQ/HYG refreshed through {eqqq.index[-1].date()}/{hyg.index[-1].date()}")
+            if fetched_session < _latest_settled_session(now):
+                logger.info(f"Crash-recovery override: session {_latest_settled_session(now)} not in the feed yet (data through {fetched_session}) — will retry after cooldown")
         else:
             logger.debug("Crash-recovery override: EQQQ/HYG fetch returned no new data this attempt")
             eqqq = hyg = None  # fall through to a cache-only readback below
 
     if eqqq is None or hyg is None:
-        # Not due this cycle, or the due fetch above failed — serve whatever is cached
+        # Not due this cycle, or the due fetch above failed — serve whatever is cached.
+        session_key = state.get("last_fetch_session")
+        if session_key is not None and _series_cache["session"] == session_key:
+            return _series_cache["eqqq"], _series_cache["hyg"]
         # (historical_only=True never opens a connection when the cache already has data).
         client = client_factory(cfg["ibkr_client_id"])
         try:
@@ -160,6 +162,7 @@ def fetch_eqqq_hyg_daily(
             client.disconnect()
     eqqq_close = eqqq["Close"] if eqqq is not None and not eqqq.empty else None
     hyg_close = hyg["Close"] if hyg is not None and not hyg.empty else None
+    _series_cache.update(session=state.get("last_fetch_session"), eqqq=eqqq_close, hyg=hyg_close)
     return eqqq_close, hyg_close
 
 
@@ -173,15 +176,35 @@ def hyg_recovery_confirmed_today(
     hyg_close: pd.Series | None,
     daemon_state: dict,
     cfg: dict,
+    logger: logging.Logger | None = None,
 ) -> bool:
     """Today's HYG / its own trailing-252d high vs `hyg_recovery_threshold`, confirmed
     sticky the same way as the batch script's `_sticky_confirmed`: arms after
     `confirm_days` consecutive qualifying days, stays armed through blips, disarms only
     after `exit_confirm_days` consecutive non-qualifying days. Persists the two streak
     counters + armed flag in daemon_state so the deadband survives a restart.
+
+    Counts each settled daily close EXACTLY ONCE, keyed by `hyg_streak_session_date`
+    (same cursor shape as live_daemon's `vvix_session_date`): the decision cycle runs
+    hourly, and without the cursor the same close would extend the streak ~7x per day,
+    collapsing the day-based deadband to hours.
     """
+    log = logger or _log
     state = daemon_state.setdefault("crash_override", {})
     if hyg_close is None or len(hyg_close) < 252:
+        return bool(state.get("hyg_sticky_armed", False))
+
+    session = hyg_close.index[-1].date()
+    last_counted_str = state.get("hyg_streak_session_date")
+    if last_counted_str is None and (state.get("hyg_confirm_streak") or state.get("hyg_exit_streak") or state.get("hyg_sticky_armed")):
+        # Pre-cursor state was incremented per cycle, not per session, so the streaks (and
+        # any armed flag derived from them) are inflated — reset and re-confirm from scratch.
+        # Fails toward "signal not confirmed", the doc's missing-data default.
+        log.warning("Crash-recovery override: resetting HYG streak state written before per-session counting — streaks were per-cycle-inflated, re-confirming from scratch")
+        state["hyg_confirm_streak"] = 0
+        state["hyg_exit_streak"] = 0
+        state["hyg_sticky_armed"] = False
+    elif last_counted_str is not None and session <= date.fromisoformat(last_counted_str):
         return bool(state.get("hyg_sticky_armed", False))
 
     rolling_high = hyg_close.rolling(252, min_periods=252).max()
@@ -193,6 +216,7 @@ def hyg_recovery_confirmed_today(
     exit_streak = _streak(not qualifies, state.get("hyg_exit_streak", 0))
     state["hyg_confirm_streak"] = confirm_streak
     state["hyg_exit_streak"] = exit_streak
+    state["hyg_streak_session_date"] = session.isoformat()
 
     armed = state.get("hyg_sticky_armed", False)
     if not armed and confirm_streak >= cfg["confirm_days"]:
@@ -311,7 +335,7 @@ def update_and_decide(
     return whether to force tier 1. Disabled config is the caller's job to check first."""
     eqqq_close, hyg_close = fetch_eqqq_hyg_daily(daemon_state, cfg, logger, client_factory=client_factory, save_state=save_state, now=now)
     episode = current_episode(eqqq_close, today, cfg["min_depth"])
-    hyg_confirmed = hyg_recovery_confirmed_today(hyg_close, daemon_state, cfg)
+    hyg_confirmed = hyg_recovery_confirmed_today(hyg_close, daemon_state, cfg, logger)
     nasdaq_rising = price_rising_today(eqqq_close, cfg["rise_days"])
     daemon_state.setdefault("crash_override", {})["nasdaq_rising_last"] = nasdaq_rising
     episode_peak_date = eqqq_close.index[episode.peak_idx].date() if episode is not None else None
@@ -334,6 +358,7 @@ def app_status_dict(daemon_state: dict, cfg: dict) -> dict:
         "hyg_confirm_streak": state.get("hyg_confirm_streak", 0),
         "hyg_exit_streak": state.get("hyg_exit_streak", 0),
         "hyg_sticky_armed": state.get("hyg_sticky_armed", False),
+        "hyg_streak_session_date": state.get("hyg_streak_session_date"),
         "nasdaq_rising": state.get("nasdaq_rising_last"),
         "fired": state.get("fired", False),
         "active": state.get("active", False),

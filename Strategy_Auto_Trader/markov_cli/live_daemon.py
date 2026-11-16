@@ -1474,12 +1474,31 @@ def process_cycle(
             from ..allocation import crash_recovery_override
             cro_cfg = crash_recovery_override.load_config(config.get("crash_recovery_override"))
             force_tier1 = False
-            if cro_cfg["enabled"] and vxn_current is not None:
-                force_tier1 = crash_recovery_override.update_and_decide(
-                    daemon_state, today, cro_cfg,
-                    base_would_pick_nasdaq=allocation_mgr.would_pick_nasdaq(vxn_current, vvix_band),
-                    logger=logger,
-                )
+            if cro_cfg["enabled"]:
+                cro_state = daemon_state.get("crash_override", {})
+                override_holding = bool(cro_state.get("fired")) and not cro_state.get("resolved")
+                if vxn_current is not None:
+                    # While the override holds EQGB.L the un-overridden base book is notionally
+                    # still in cash, so "base caught up" must be judged at the ENTRY gate — the
+                    # actual current_asset would select the wider hold/exit deadband gate and
+                    # resolve the override far earlier than the backtested mechanism.
+                    force_tier1 = crash_recovery_override.update_and_decide(
+                        daemon_state, today, cro_cfg,
+                        base_would_pick_nasdaq=allocation_mgr.would_pick_nasdaq(
+                            vxn_current, vvix_band,
+                            assume_asset="CSH2.L" if override_holding else None,
+                        ),
+                        logger=logger,
+                    )
+                elif override_holding and not data_lost:
+                    # Transient VXN gap mid-override: pin the forced position rather than letting
+                    # tier 1 fail on "VXN unavailable" and round-trip the book for one bad quote
+                    # fetch. A prolonged VIX+VXN outage (data_lost) still falls to cash.
+                    force_tier1 = True
+                    logger.warning(
+                        f"[{market_name}] Crash-recovery override active but VXN unavailable this "
+                        "cycle — holding the forced Nasdaq position through the data gap"
+                    )
 
             try:
                 required_tickers = ["EQGB.L", "VUSA", "ISF.L", "CSH2.L"]
@@ -2666,19 +2685,9 @@ VVIX_RETRY_SECONDS = 900  # spacing between daily-close fetches while waiting fo
 
 def _latest_settled_session(now_utc: datetime) -> date:
     """Newest weekday whose daily index close should be settled by `now_utc` (US/Eastern).
-
-    Holidays are not modelled: on one, the expected session never settles and the fetch just keeps
-    returning the previous close, which `update_vvix_band` ignores as already counted.
-    """
-    from ..allocation.cboe_intraday import DAILY_SETTLED_TIME
-    et = now_utc.astimezone(ZoneInfo("America/New_York"))
-    hh, mm = (int(x) for x in DAILY_SETTLED_TIME.split(":"))
-    day = et.date()
-    if et.weekday() >= 5 or (et.hour, et.minute) < (hh, mm):
-        day -= timedelta(days=1)
-    while day.weekday() >= 5:
-        day -= timedelta(days=1)
-    return day
+    Shared implementation in cboe_intraday (also used by crash_recovery_override)."""
+    from ..allocation.cboe_intraday import latest_settled_session
+    return latest_settled_session(now_utc)
 
 
 def _vvix_last_session(daemon_state: dict) -> date | None:
@@ -2745,7 +2754,17 @@ def update_vvix_band(
         daemon_state["vvix_last_attempt_at"] = now.isoformat()
         df = fetch_vvix()
         if df is None or df.empty:
-            logger.debug("VVIX: no new settled close yet — streaks unchanged (gap, not a reset)")
+            # One missing session is the normal wait for today's settlement; TWO OR MORE means
+            # the feed has failed across at least a whole prior session — warn, so a prolonged
+            # CBOE outage isn't silent while the confirmed band quietly goes stale.
+            from ..allocation.cboe_intraday import previous_settled_session
+            if last_session is not None and last_session < previous_settled_session(_latest_settled_session(now)):
+                logger.warning(
+                    f"VVIX: no settled close counted since {last_session} and the feed is still "
+                    "returning nothing — VVIX feed may be down; confirmed band is going stale."
+                )
+            else:
+                logger.debug("VVIX: no new settled close yet — streaks unchanged (gap, not a reset)")
         else:
             import pandas as pd
             session = pd.Timestamp(df.index[-1]).date()
@@ -2777,13 +2796,12 @@ def update_vvix_band(
                             f"edges={edge_low:g}/{edge_high:g})")
                 save_state(daemon_state)
 
-    calm_streak = daemon_state.get("vvix_calm_streak_days", 0)
-    stressed_streak = daemon_state.get("vvix_stressed_streak_days", 0)
-    if calm_streak >= n_confirm:
-        return "calm"
-    if stressed_streak >= n_confirm:
-        return "stressed"
-    return "base"
+    from ..allocation.allocation_manager import confirmed_vvix_band
+    return confirmed_vvix_band(
+        daemon_state.get("vvix_calm_streak_days", 0),
+        daemon_state.get("vvix_stressed_streak_days", 0),
+        n_confirm,
+    )
 
 
 _VVIX_DISPLAY_FEED = None

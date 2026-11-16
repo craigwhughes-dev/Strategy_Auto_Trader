@@ -235,6 +235,41 @@ class TestHygRecoveryConfirmedToday:
         armed = cro.hyg_recovery_confirmed_today(self._series(base + [95.0, 95.0, 50.0, 50.0]), state, cfg)
         assert armed is False
 
+    def test_same_session_counted_exactly_once_across_hourly_cycles(self):
+        """The decision cycle runs ~7x/day on the SAME settled daily close; without the session
+        cursor the streak would hit confirm_days within one afternoon instead of N days."""
+        state = _state()
+        cfg = self._cfg(confirm_days=3, exit_confirm_days=3)
+        series = self._series([100.0] * 252 + [95.0])  # qualifying close, one session
+        for _ in range(7):  # one trading day's worth of hourly cycles
+            armed = cro.hyg_recovery_confirmed_today(series, state, cfg)
+        assert state["crash_override"]["hyg_confirm_streak"] == 1
+        assert armed is False
+        assert state["crash_override"]["hyg_streak_session_date"] == series.index[-1].date().isoformat()
+
+    def test_streak_advances_only_when_a_new_session_arrives(self):
+        state = _state()
+        cfg = self._cfg(confirm_days=3, exit_confirm_days=3)
+        base = [100.0] * 252
+        for extra in ([95.0], [95.0, 95.0], [95.0, 95.0, 95.0]):
+            series = self._series(base + extra)
+            cro.hyg_recovery_confirmed_today(series, state, cfg)  # counted
+            armed = cro.hyg_recovery_confirmed_today(series, state, cfg)  # same session: no-op
+        assert state["crash_override"]["hyg_confirm_streak"] == 3
+        assert armed is True
+
+    def test_pre_cursor_state_is_reset_not_trusted(self):
+        """State written before per-session counting was per-cycle-inflated — streaks AND the
+        armed flag derived from them must reset and re-confirm from scratch (fails toward
+        'signal not confirmed')."""
+        state = _state()
+        state["crash_override"] = {"hyg_confirm_streak": 35, "hyg_exit_streak": 0, "hyg_sticky_armed": True}
+        cfg = self._cfg(confirm_days=3, exit_confirm_days=3)
+        armed = cro.hyg_recovery_confirmed_today(self._series([100.0] * 252 + [95.0]), state, cfg)
+        assert armed is False
+        assert state["crash_override"]["hyg_confirm_streak"] == 1
+        assert state["crash_override"]["hyg_sticky_armed"] is False
+
 
 class TestPriceRisingToday:
     def _series(self, values: list[float]) -> pd.Series:
@@ -292,6 +327,76 @@ class TestCurrentEpisode:
         today = idx[55].date()
         ep = cro.current_episode(series, today, min_depth=0.20)
         assert ep is not None
+
+
+class _FakeDailyClient:
+    """Stands in for IBKRDataClient: returns canned frames, records calls."""
+
+    def __init__(self, frames: dict, calls: list):
+        self._frames = frames
+        self._calls = calls
+
+    def fetch_daily(self, symbol, period="max", historical_only=False):
+        self._calls.append((symbol, historical_only))
+        return self._frames[symbol]
+
+    def disconnect(self):
+        pass
+
+
+def _daily_frame(last_session: str, n: int = 5) -> pd.DataFrame:
+    idx = pd.bdate_range(end=last_session, periods=n, tz="UTC")
+    return pd.DataFrame({"Close": np.linspace(100.0, 101.0, n)}, index=idx)
+
+
+class TestFetchEqqqHygDaily:
+    def setup_method(self):
+        cro._clear_series_cache()
+
+    def _cfg(self):
+        return cro.load_config({"enabled": True})
+
+    def test_cursor_stamped_from_fetched_data_not_wall_clock(self):
+        """18:00 ET Wednesday: session 2026-11-11 should be settled, but the feed only has
+        data through Tuesday. The cursor must say Tuesday (so the 900s retry keeps trying),
+        not Wednesday (which would silently serve stale data for ~24h)."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        state = {}
+        frames = {"EQQQ.L": _daily_frame("2026-11-10"), "HYG": _daily_frame("2026-11-10")}
+        calls = []
+        now = datetime(2026, 11, 11, 18, 0, tzinfo=ZoneInfo("America/New_York"))
+        eqqq, hyg = cro.fetch_eqqq_hyg_daily(
+            state, self._cfg(), _logger(),
+            client_factory=lambda cid: _FakeDailyClient(frames, calls),
+            save_state=_NOOP_SAVE, now=now,
+        )
+        assert eqqq is not None and hyg is not None
+        assert state["crash_override"]["last_fetch_session"] == "2026-11-10"
+
+    def test_cache_only_readback_served_from_memory_not_reparsed(self):
+        """Cycles between fetches must not re-read the full-history CSVs: once the series for
+        the current cursor session are in memory, the client is not constructed at all."""
+        from datetime import datetime, timezone
+        # 2026-11-13 is the Friday before the Saturday `now` below: the latest settled session.
+        state = {"crash_override": {"last_fetch_session": "2026-11-13"}}
+        frames = {"EQQQ.L": _daily_frame("2026-11-13"), "HYG": _daily_frame("2026-11-13")}
+        calls = []
+        factory_calls = []
+
+        def factory(cid):
+            factory_calls.append(cid)
+            return _FakeDailyClient(frames, calls)
+
+        # Saturday: cursor already at the latest settled session, so not due — cache-only path.
+        now = datetime(2026, 11, 14, 12, 0, tzinfo=timezone.utc)
+        first = cro.fetch_eqqq_hyg_daily(state, self._cfg(), _logger(),
+                                         client_factory=factory, save_state=_NOOP_SAVE, now=now)
+        assert len(factory_calls) == 1  # disk readback once
+        second = cro.fetch_eqqq_hyg_daily(state, self._cfg(), _logger(),
+                                          client_factory=factory, save_state=_NOOP_SAVE, now=now)
+        assert len(factory_calls) == 1  # served from memory, no new client
+        assert second[0] is first[0] and second[1] is first[1]
 
 
 class TestAppStatusDict:

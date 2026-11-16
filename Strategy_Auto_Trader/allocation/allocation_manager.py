@@ -65,6 +65,17 @@ MIN_TRADE_GBP = 1.0
 MIN_HOLD_CASH_HEADROOM = 0.07
 
 
+def confirmed_vvix_band(calm_streak: int, stressed_streak: int, n_confirm: int) -> str:
+    """Streaks-to-band confirmation rule, the SINGLE implementation shared by the decision path
+    (live_daemon.update_vvix_band) and the dashboard (`_display_band`) so the displayed band can
+    never silently diverge from the band the next decision actually uses."""
+    if calm_streak >= n_confirm:
+        return "calm"
+    if stressed_streak >= n_confirm:
+        return "stressed"
+    return "base"
+
+
 @dataclass
 class AllocationOrder:
     """Single buy/sell order for rebalancing. Fractional units (T212)."""
@@ -270,19 +281,27 @@ class MultiTierAllocationManager:
             raise ValueError(f"unknown vvix_band {vvix_band!r}; expected 'calm', 'base', or 'stressed'")
         return self.vxn_threshold, self.vxn_exit_threshold
 
-    def _nasdaq_gate(self, vvix_band: str = "base") -> float:
+    def _nasdaq_gate(self, vvix_band: str = "base", current_asset: str | None = None) -> float:
         """VXN level tier 1 must satisfy right now, for the given confirmed VVIX band: the wider
         exit edge while Nasdaq is already held (deadband, so small wobbles around the entry level
-        do not trade), else the entry level."""
+        do not trade), else the entry level. `current_asset` defaults to the actually-held asset;
+        pass a counterfactual asset to ask which gate a differently-positioned book would face."""
         enter_at, exit_above = self._nasdaq_pair(vvix_band)
-        return exit_above if self.current_asset == "EQGB.L" else enter_at
+        held = self.current_asset if current_asset is None else current_asset
+        return exit_above if held == "EQGB.L" else enter_at
 
-    def would_pick_nasdaq(self, vxn: float | None, vvix_band: str = "base") -> bool:
+    def would_pick_nasdaq(self, vxn: float | None, vvix_band: str = "base",
+                          assume_asset: str | None = None) -> bool:
         """Whether the base VXN/VVIX-banded rule would pick tier 1 (Nasdaq) right now, with
         no side effects — unlike `signal()`, which mutates `_last_tier_num`/`_tier_active_since`
         on every call. For callers (e.g. the crash-recovery override) that need to know "what
-        would the base rule do" without disturbing app_status.json's tier-active-since tracking."""
-        return vxn is not None and vxn <= self._nasdaq_gate(vvix_band)
+        would the base rule do" without disturbing app_status.json's tier-active-since tracking.
+
+        `assume_asset` evaluates the counterfactual book instead of the actual one: while the
+        crash-recovery override is holding EQGB.L the un-overridden base rule is notionally still
+        in cash, so "base caught up" must be judged at the ENTRY gate (`assume_asset="CSH2.L"`),
+        not the wider hold/exit gate that the override's own position would otherwise select."""
+        return vxn is not None and vxn <= self._nasdaq_gate(vvix_band, current_asset=assume_asset)
 
     def signal(
         self,
@@ -674,11 +693,11 @@ class MultiTierAllocationManager:
         back to the band the last decision used when no streak state is available."""
         if not daemon_state or not ({"vvix_calm_streak_days", "vvix_stressed_streak_days"} & daemon_state.keys()):
             return self._last_vvix_band
-        if daemon_state.get("vvix_calm_streak_days", 0) >= self.vvix_confirm_days:
-            return "calm"
-        if daemon_state.get("vvix_stressed_streak_days", 0) >= self.vvix_confirm_days:
-            return "stressed"
-        return "base"
+        return confirmed_vvix_band(
+            daemon_state.get("vvix_calm_streak_days", 0),
+            daemon_state.get("vvix_stressed_streak_days", 0),
+            self.vvix_confirm_days,
+        )
 
     def app_status_dict(self, daemon_state: dict | None = None) -> dict:
         """Return current state for app_status.json.

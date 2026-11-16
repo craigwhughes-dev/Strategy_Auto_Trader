@@ -17,6 +17,8 @@ import json
 import logging
 import urllib.request
 from collections.abc import Callable
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -35,6 +37,32 @@ DAILY_SETTLED_TIME = "16:30"
 _OHLC = ("Open", "High", "Low", "Close")
 
 GetJson = Callable[[str, float], dict]
+
+
+def latest_settled_session(now_utc: datetime) -> date:
+    """Newest weekday whose daily index close should be settled by `now_utc` (US/Eastern).
+
+    Shared by live_daemon.py (VVIX band) and crash_recovery_override.py (EQQQ/HYG), so the two
+    session counters can never desynchronize. Holidays are not modelled: on one, the expected
+    session never settles and the fetch just keeps returning the previous close, which callers
+    ignore as already counted / harmlessly re-attempt next cycle.
+    """
+    et = now_utc.astimezone(ZoneInfo("America/New_York"))
+    hh, mm = (int(x) for x in DAILY_SETTLED_TIME.split(":"))
+    day = et.date()
+    if et.weekday() >= 5 or (et.hour, et.minute) < (hh, mm):
+        day -= timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
+def previous_settled_session(session: date) -> date:
+    """The settled session immediately before `session` (previous weekday; holidays not modelled)."""
+    day = session - timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
 
 
 def _get_json(url: str, timeout: float) -> dict:

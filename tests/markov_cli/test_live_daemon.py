@@ -3849,6 +3849,22 @@ class TestVvixBand:
         self._run(state, date(2026, 1, 9), 70.0, logger=logger)
         assert logger.warning.called
 
+    def test_prolonged_feed_outage_warns_even_before_a_close_is_counted(self):
+        """Two or more settled sessions missing with the feed still returning nothing is a feed
+        outage, not the normal wait for today's settlement — must WARN (the band is going stale),
+        not hide behind the same debug line as 'not settled yet'."""
+        state = {"vvix_calm_streak_days": 1, "vvix_stressed_streak_days": 0, "vvix_session_date": "2026-01-05"}
+        logger = mock.Mock()
+        # Wednesday evening: Tuesday 01-06 AND Wednesday 01-07 both settled but never counted.
+        self._run(state, date(2026, 1, 7), None, logger=logger)
+        assert logger.warning.called
+
+    def test_single_missing_session_while_waiting_for_settlement_stays_quiet(self):
+        state = {"vvix_calm_streak_days": 1, "vvix_stressed_streak_days": 0, "vvix_session_date": "2026-01-06"}
+        logger = mock.Mock()
+        self._run(state, date(2026, 1, 7), None, logger=logger)
+        assert not logger.warning.called
+
 
 
 

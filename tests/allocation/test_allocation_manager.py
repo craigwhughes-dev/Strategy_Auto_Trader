@@ -11,7 +11,7 @@ from datetime import date
 
 import pytest
 
-from Strategy_Auto_Trader.allocation.allocation_manager import MultiTierAllocationManager
+from Strategy_Auto_Trader.allocation.allocation_manager import MultiTierAllocationManager, confirmed_vvix_band
 
 
 def _mgr(**overrides) -> MultiTierAllocationManager:
@@ -110,6 +110,21 @@ class TestWouldPickNasdaqAndForceTier1:
         m.would_pick_nasdaq(22.0, "base")
         assert (m._last_tier_num, m._tier_active_since) == before
 
+    def test_would_pick_nasdaq_assume_cash_uses_entry_gate_while_override_holds_nasdaq(self):
+        """While the crash-recovery override holds EQGB.L, 'base caught up' must be judged at
+        the counterfactual base book's ENTRY gate (base is notionally in cash), not the wider
+        hold/exit deadband gate the override's own position would select."""
+        m = _mgr()
+        m.current_asset = "EQGB.L"  # the override's position
+        vxn = 23.5  # between base enter (23) and base exit (24)
+        assert m.would_pick_nasdaq(vxn, "base") is True  # actual book: hold gate 24
+        assert m.would_pick_nasdaq(vxn, "base", assume_asset="CSH2.L") is False  # base book: enter gate 23
+
+    def test_would_pick_nasdaq_assume_asset_none_matches_actual_book(self):
+        m = _mgr()
+        m.current_asset = "CSH2.L"
+        assert m.would_pick_nasdaq(23.5, "base") is m.would_pick_nasdaq(23.5, "base", assume_asset="CSH2.L")
+
     def test_force_tier1_overrides_a_failing_vxn_gate(self):
         m = _mgr()
         sig = m.signal(date(2026, 1, 5), vxn=30.0, vix=None, verbose=False, force_tier1=True)
@@ -120,6 +135,24 @@ class TestWouldPickNasdaqAndForceTier1:
         m = _mgr()
         sig = m.signal(date(2026, 1, 5), vxn=30.0, vix=None, verbose=False, force_tier1=False)
         assert sig.tier != 1
+
+
+class TestConfirmedVvixBand:
+    """The single streaks-to-band rule shared by update_vvix_band (decision) and
+    _display_band (dashboard) — one implementation, so they cannot diverge."""
+
+    def test_band_from_streaks(self):
+        assert confirmed_vvix_band(3, 0, 3) == "calm"
+        assert confirmed_vvix_band(0, 3, 3) == "stressed"
+        assert confirmed_vvix_band(2, 2, 3) == "base"
+        assert confirmed_vvix_band(0, 0, 3) == "base"
+
+    def test_display_band_uses_the_shared_rule(self):
+        m = _mgr(vvix_confirm_days=3)
+        state = {"vvix_calm_streak_days": 3, "vvix_stressed_streak_days": 0}
+        assert m._display_band(state) == "calm"
+        state = {"vvix_calm_streak_days": 1, "vvix_stressed_streak_days": 0}
+        assert m._display_band(state) == "base"
 
 
 class TestFromConfigVvixKeys:
