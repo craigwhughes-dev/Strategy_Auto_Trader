@@ -262,6 +262,9 @@ class PortfolioManager:
             pos = self._state["positions"].get(ticker)
             ledger = pos["quantity"] if pos else 0.0
             if round_quantity(held - ledger) == 0:
+                note = self._heal_split_basis(ticker, pos, prices.get(ticker))
+                if note:
+                    notes.append(note)
                 continue
             if held <= 0:
                 del self._state["positions"][ticker]
@@ -299,6 +302,32 @@ class PortfolioManager:
                 }
                 notes.append(f"{ticker}: adopted {held} at {price} (broker holds, ledger empty)")
         return notes
+
+    @staticmethod
+    def _heal_split_basis(ticker: str, pos: dict | None, price: float | None) -> str | None:
+        """Repair a cost basis that a split left on the wrong scale, once quantity already matches.
+
+        The quantity-jump rescale in sync_tier_positions only fires on the sync where the split
+        lands. A ledger that took the post-split quantity before that fix (the paper profile's
+        CSH2.L) keeps the pre-split fill_price forever, so cost_value (and with it available_cash)
+        stays off by the split ratio. Tier assets are broad ETFs that never move 3x within a
+        holding, so a fill_price more than 3x away from the current price can only be a split;
+        divide it by the nearest whole ratio (or multiply, for a consolidation).
+        """
+        if pos is None or not price or price <= 0 or not pos.get("fill_price") or pos["quantity"] <= 0:
+            return None
+        ratio = pos["fill_price"] / price
+        if ratio > 3:
+            factor = 1 / round(ratio)
+        elif ratio < 1 / 3:
+            factor = float(round(1 / ratio))
+        else:
+            return None
+        old = pos["fill_price"]
+        pos["fill_price"] = old * factor
+        pos["cost_value"] = pos["fill_price"] * pos["quantity"]
+        return (f"{ticker}: split-scaled cost basis {old:.4f} rescaled to {pos['fill_price']:.4f} "
+                f"(current price {price:.4f})")
 
     def _log_tier_trade(self, ticker: str, action: str, fill: FillResult, quantity: float,
                         cost: float, pl: float | None) -> None:

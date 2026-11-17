@@ -1899,6 +1899,32 @@ class TestTierLedger:
         assert pos["fill_price"] == pytest.approx(1256.88 * 20.34224 / 5085.56)
         assert pos["cost_value"] == pytest.approx(1256.88 * 20.34224, rel=1e-3)
 
+    def test_sync_heals_split_basis_already_absorbed_into_quantity(self, tmp_path):
+        # Ledger took the post-split quantity before the rescale fix: quantity matches the
+        # broker, but fill_price is still pre-split, so cost_value (and cash) is 250x off.
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
+        pm.record_tier_fill("CSH2.L", _buy_fill("CSH2.L", 1256.88, 20.34224), "BUY", "ftse", "GBP")
+        pos = pm.positions["CSH2.L"]
+        pos["quantity"] = 5085.56
+        pos["cost_value"] = pos["fill_price"] * 5085.56
+        notes = pm.sync_tier_positions({"CSH2.L": 5085.56}, {"CSH2.L": 5.033}, ["CSH2.L"], "ftse", "GBP")
+        assert len(notes) == 1
+        assert pos["quantity"] == pytest.approx(5085.56)
+        assert pos["fill_price"] == pytest.approx(1256.88 / 250)
+        assert pos["cost_value"] == pytest.approx(1256.88 * 20.34224, rel=1e-3)
+        assert pm.available_cash == pytest.approx(20_000 - 1256.88 * 20.34224, rel=1e-3)
+        # Healed basis is stable on the next sync
+        assert pm.sync_tier_positions({"CSH2.L": 5085.56}, {"CSH2.L": 5.033}, ["CSH2.L"], "ftse", "GBP") == []
+
+    def test_sync_leaves_ordinary_price_move_alone(self, tmp_path):
+        from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
+        pm = PortfolioManager(20_000, tmp_path / "state.json")
+        pm.record_tier_fill("VUSA", _buy_fill("VUSA", 90.0, 10.0), "BUY", "ftse", "GBP")
+        before = dict(pm.positions["VUSA"])
+        assert pm.sync_tier_positions({"VUSA": 10.0}, {"VUSA": 120.0}, ["VUSA"], "ftse", "GBP") == []
+        assert pm.positions["VUSA"] == before
+
     def test_sync_no_change_is_silent(self, tmp_path):
         from Strategy_Auto_Trader.broker.portfolio import PortfolioManager
         pm = PortfolioManager(20_000, tmp_path / "state.json")
