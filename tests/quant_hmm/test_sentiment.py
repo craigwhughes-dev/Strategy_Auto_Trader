@@ -261,35 +261,81 @@ class TestRawIndexHourly:
         assert sentiment.fetch_vxn_hourly() is None
 
 
-class TestCboeVolFeeds:
-    """VIX and VXN (hourly) and VVIX (daily) for the tier allocator come from CBOE, not IBKR, so the
-    allocator keeps working with IB Gateway down."""
+class TestYfinanceVolFeeds:
+    """VIX and VXN (hourly) and VVIX (daily) for the tier allocator come from yfinance, not IBKR, so
+    the allocator keeps working with IB Gateway down. Switched from CBOE's own feed 2026-11-20 after
+    CBOE's CDN started Cloudflare-blocking every request (see HANDOFF.md)."""
 
-    @pytest.mark.parametrize("func,symbol", [("fetch_vix_hourly_raw", "VIX"), ("fetch_vxn_hourly_raw", "VXN")])
-    def test_hourly_raw_reads_cboe_index_bars(self, monkeypatch, func, symbol):
-        from Strategy_Auto_Trader.allocation import cboe_intraday
+    @pytest.mark.parametrize("func,symbol", [("fetch_vix_hourly_raw", "^VIX"), ("fetch_vxn_hourly_raw", "^VXN")])
+    def test_hourly_raw_reads_yfinance_index_bars(self, monkeypatch, func, symbol):
         from Strategy_Auto_Trader.quant_hmm import sentiment
-        frame = pd.DataFrame({"Close": [16.0]}, index=pd.DatetimeIndex(["2026-09-16 14:00"], tz="UTC"))
+        frame = pd.DataFrame(
+            {"Open": [16.0], "High": [16.0], "Low": [16.0], "Close": [16.0]},
+            index=pd.DatetimeIndex(["2026-09-16 14:00"], tz="UTC"),
+        )
         seen = []
-        monkeypatch.setattr(cboe_intraday, "fetch_cboe_index_hourly", lambda s: (seen.append(s), frame)[1])
-        assert getattr(sentiment, func)() is frame
+
+        def fake_download(sym, **kwargs):
+            seen.append(sym)
+            return frame
+
+        import sys
+        monkeypatch.setitem(sys.modules, "yfinance", mock.Mock(download=fake_download))
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.core.net_retry.call_with_timeout_retry", lambda fn, **kw: fn()
+        )
+        result = getattr(sentiment, func)()
+        assert result is not None
+        assert list(result["Close"]) == [16.0]
         assert seen == [symbol]
 
     @pytest.mark.parametrize("func", ["fetch_vix_hourly_raw", "fetch_vxn_hourly_raw"])
-    def test_hourly_raw_none_when_cboe_has_nothing(self, monkeypatch, func):
-        from Strategy_Auto_Trader.allocation import cboe_intraday
+    def test_hourly_raw_none_when_yfinance_has_nothing(self, monkeypatch, func):
+        import sys
+
         from Strategy_Auto_Trader.quant_hmm import sentiment
-        monkeypatch.setattr(cboe_intraday, "fetch_cboe_index_hourly", lambda s: None)
+        monkeypatch.setitem(sys.modules, "yfinance", mock.Mock(download=lambda *a, **k: pd.DataFrame()))
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.core.net_retry.call_with_timeout_retry", lambda fn, **kw: fn()
+        )
         assert getattr(sentiment, func)() is None
 
-    def test_vvix_daily_reads_cboe_settlement_close(self, monkeypatch):
+    def test_vvix_daily_reads_settled_close_for_latest_settled_session(self, monkeypatch):
+        import sys
+
         from Strategy_Auto_Trader.allocation import cboe_intraday
         from Strategy_Auto_Trader.quant_hmm import sentiment
-        frame = pd.DataFrame({"Close": [95.5]}, index=pd.DatetimeIndex(["2026-10-02"]))
+
+        session = cboe_intraday.latest_settled_session(pd.Timestamp.now(tz="UTC"))
+        frame = pd.DataFrame(
+            {"Close": [95.5]},
+            index=pd.DatetimeIndex([pd.Timestamp(session), pd.Timestamp(session) + pd.Timedelta(days=1)]),
+        )
         seen = []
-        monkeypatch.setattr(cboe_intraday, "fetch_cboe_daily_close", lambda symbol: (seen.append(symbol), frame)[1])
-        assert sentiment.fetch_vvix_daily() is frame
-        assert seen == ["VVIX"]
+
+        def fake_download(sym, **kwargs):
+            seen.append(sym)
+            return frame
+
+        monkeypatch.setitem(sys.modules, "yfinance", mock.Mock(download=fake_download))
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.core.net_retry.call_with_timeout_retry", lambda fn, **kw: fn()
+        )
+        result = sentiment.fetch_vvix_daily()
+        assert result is not None
+        assert float(result["Close"].iloc[0]) == 95.5
+        assert seen == ["^VVIX"]
+
+    def test_vvix_daily_none_when_session_not_yet_settled(self, monkeypatch):
+        import sys
+
+        from Strategy_Auto_Trader.quant_hmm import sentiment
+        frame = pd.DataFrame({"Close": [95.5]}, index=pd.DatetimeIndex(["2000-01-03"]))
+        monkeypatch.setitem(sys.modules, "yfinance", mock.Mock(download=lambda *a, **k: frame))
+        monkeypatch.setattr(
+            "Strategy_Auto_Trader.core.net_retry.call_with_timeout_retry", lambda fn, **kw: fn()
+        )
+        assert sentiment.fetch_vvix_daily() is None
 
 
 def test_daemon_tier_block_feeds_the_allocator_raw_bars():

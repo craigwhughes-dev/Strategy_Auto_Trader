@@ -199,34 +199,74 @@ def fetch_vxn_hourly(period: str = "730d") -> pd.DataFrame | None:
     return _fetch_index_hourly("VXN", aligned=True)
 
 
+def _fetch_yf_index_hourly(yf_symbol: str) -> pd.DataFrame | None:
+    """Hourly bars for a CBOE volatility index via yfinance, bar-start stamped UTC.
+
+    yfinance's 1h bars are the convention IBKR's own hourly fetch resamples onto (see
+    broker/ibkr_data.py's _resample_30min_aligned docstring) — no extra alignment needed here.
+    No IB Gateway or broker connection involved, same Gateway-independence CBOE's feed gave."""
+    import yfinance as yf
+
+    from ..core.net_retry import call_with_timeout_retry
+
+    df = call_with_timeout_retry(
+        lambda: yf.download(yf_symbol, period="730d", interval="1h", progress=False, auto_adjust=True)
+    )
+    if df is None or df.empty:
+        return None
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    df.index = df.index.tz_localize("UTC") if df.index.tz is None else df.index.tz_convert("UTC")
+    return df[["Open", "High", "Low", "Close"]]
+
+
 def fetch_vxn_hourly_raw() -> pd.DataFrame | None:
-    """Hourly VXN from CBOE's intraday feed (allocation/cboe_intraday.py), bar-start stamped — for the
-    tier allocator's completed-bar reading. Replaced IBKR so the Nasdaq gate no longer needs IB Gateway."""
-    from ..allocation.cboe_intraday import fetch_cboe_index_hourly
-    return fetch_cboe_index_hourly("VXN")
+    """Hourly VXN from yfinance (^VXN), bar-start stamped — for the tier allocator's completed-bar
+    reading. Switched off CBOE's intraday feed 2026-11-20: CBOE's CDN is now blocked by Cloudflare
+    bot-management (TLS/HTTP fingerprint, not fixable by headers — see HANDOFF.md)."""
+    return _fetch_yf_index_hourly("^VXN")
 
 
 def fetch_vix_hourly_raw() -> pd.DataFrame | None:
-    """Hourly VIX from CBOE's intraday feed, bar-start stamped — for the tier allocator's completed-bar reading."""
-    from ..allocation.cboe_intraday import fetch_cboe_index_hourly
-    return fetch_cboe_index_hourly("VIX")
+    """Hourly VIX from yfinance (^VIX), bar-start stamped — for the tier allocator's completed-bar
+    reading. See fetch_vxn_hourly_raw's docstring for why CBOE was dropped."""
+    return _fetch_yf_index_hourly("^VIX")
 
 
 def fetch_vvix_hourly_raw() -> pd.DataFrame | None:
-    """Hourly VVIX from CBOE's intraday feed, bar-start stamped — DISPLAY ONLY (the dashboard's
-    hourly reading). The VVIX band itself is confirmed from daily closes (`fetch_vvix_daily`)."""
-    from ..allocation.cboe_intraday import fetch_cboe_index_hourly
-    return fetch_cboe_index_hourly("VVIX")
+    """Hourly VVIX from yfinance (^VVIX), bar-start stamped — DISPLAY ONLY (the dashboard's hourly
+    reading). The VVIX band itself is confirmed from daily closes (`fetch_vvix_daily`). See
+    fetch_vxn_hourly_raw's docstring for why CBOE was dropped."""
+    return _fetch_yf_index_hourly("^VVIX")
 
 
 def fetch_vvix_daily() -> pd.DataFrame | None:
-    """Latest settled daily VVIX close from CBOE's quote feed, indexed by its session date (None while
+    """Latest settled daily VVIX close from yfinance (^VVIX), indexed by its session date (None while
     the session is still trading) — for the tier allocator's VVIX-band confirmation (live_daemon.py's
     `update_vvix_band`). Daily only, deliberately: the confirmation mechanism is a day-counter by
     design (matches the research it was validated against, which stamps each close after the US
-    session and holds it until the next one). Previously read from IBKR (2026-09-30)."""
-    from ..allocation.cboe_intraday import fetch_cboe_daily_close
-    return fetch_cboe_daily_close("VVIX")
+    session and holds it until the next one). Previously read from IBKR (2026-09-30), then from CBOE
+    (2026-10-05); switched to yfinance 2026-11-20 — CBOE's CDN is now Cloudflare-blocked (see
+    HANDOFF.md). Settlement timing reuses cboe_intraday's latest_settled_session (pure date logic,
+    no CBOE API call)."""
+    import yfinance as yf
+
+    from ..allocation.cboe_intraday import latest_settled_session
+    from ..core.net_retry import call_with_timeout_retry
+
+    session = latest_settled_session(pd.Timestamp.now(tz="UTC"))
+    df = call_with_timeout_retry(
+        lambda: yf.download("^VVIX", period="10d", interval="1d", progress=False, auto_adjust=True)
+    )
+    if df is None or df.empty:
+        return None
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    index = df.index.tz_localize(None) if df.index.tz is not None else df.index
+    match = df[index.normalize().date == session]
+    if match.empty:
+        return None
+    return pd.DataFrame({"Close": [float(match["Close"].iloc[-1])]}, index=[pd.Timestamp(session)])
 
 
 # ---------------------------------------------------------------------------
