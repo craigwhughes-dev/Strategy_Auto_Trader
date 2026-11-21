@@ -210,7 +210,8 @@ def _fetch_yf_index_hourly(yf_symbol: str) -> pd.DataFrame | None:
     from ..core.net_retry import call_with_timeout_retry
 
     df = call_with_timeout_retry(
-        lambda: yf.download(yf_symbol, period="730d", interval="1h", progress=False, auto_adjust=True)
+        lambda: yf.download(yf_symbol, period="730d", interval="1h", progress=False, auto_adjust=True),
+        is_empty=lambda df: df.empty,
     )
     if df is None or df.empty:
         return None
@@ -256,7 +257,8 @@ def fetch_vvix_daily() -> pd.DataFrame | None:
 
     session = latest_settled_session(pd.Timestamp.now(tz="UTC"))
     df = call_with_timeout_retry(
-        lambda: yf.download("^VVIX", period="10d", interval="1d", progress=False, auto_adjust=True)
+        lambda: yf.download("^VVIX", period="10d", interval="1d", progress=False, auto_adjust=True),
+        is_empty=lambda df: df.empty,
     )
     if df is None or df.empty:
         return None

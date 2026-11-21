@@ -58,3 +58,44 @@ def test_exhausts_all_retries_before_giving_up():
 
     call_with_timeout_retry(_always_fails, retries=2, backoff=0.01)
     assert calls["n"] == 3
+
+
+def test_is_empty_retries_then_succeeds():
+    calls = {"n": 0}
+
+    def _empty_then_full():
+        calls["n"] += 1
+        return [] if calls["n"] < 2 else [1, 2, 3]
+
+    result = call_with_timeout_retry(
+        _empty_then_full, retries=2, backoff=0.01, is_empty=lambda r: not r
+    )
+    assert result == [1, 2, 3]
+    assert calls["n"] == 2
+
+
+def test_is_empty_returns_last_empty_result_after_exhausting_retries():
+    calls = {"n": 0}
+
+    def _always_empty():
+        calls["n"] += 1
+        return []
+
+    result = call_with_timeout_retry(
+        _always_empty, retries=2, backoff=0.01, is_empty=lambda r: not r
+    )
+    assert result == []
+    assert calls["n"] == 3
+
+
+def test_is_empty_none_does_not_retry_on_falsy_result():
+    """Without is_empty, a falsy-but-valid result is returned as-is, unchanged behavior."""
+    calls = {"n": 0}
+
+    def _once():
+        calls["n"] += 1
+        return []
+
+    result = call_with_timeout_retry(_once, retries=2, backoff=0.01)
+    assert result == []
+    assert calls["n"] == 1
