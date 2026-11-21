@@ -64,6 +64,14 @@ scripts/make_watchlist_variants.py
 .idea/
 .DS_Store
 
+# Prod checkout only: live launcher (holds plaintext T212 key/secret) + its
+# scheduled-task setup scripts/generated XML, hand-maintained per-checkout,
+# never meant to be committed
+run_daemon_live.bat
+CREATE_SCHEDULED_TASK_PROD.ps1
+CREATE_NIGHTLY_RESTART_TASKS_PROD.ps1
+_task_prod.xml
+
 # Local tier-strategy analysis work (2026-09-20): review docs, validation modules, scripts and their tests
 STRATEGY_REVIEW.md
 STRATEGY_REVIEW_PANEL_CRITIQUE.md
