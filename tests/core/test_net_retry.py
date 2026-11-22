@@ -99,3 +99,35 @@ def test_is_empty_none_does_not_retry_on_falsy_result():
     result = call_with_timeout_retry(_once, retries=2, backoff=0.01)
     assert result == []
     assert calls["n"] == 1
+
+
+def test_label_is_prefixed_on_retry_warning(caplog):
+    calls = {"n": 0}
+
+    def _empty_then_full():
+        calls["n"] += 1
+        return [] if calls["n"] < 2 else [1]
+
+    with caplog.at_level("WARNING"):
+        call_with_timeout_retry(
+            _empty_then_full, retries=1, backoff=0.01, is_empty=lambda r: not r, label="^VIX"
+        )
+    assert any(r.message.startswith("^VIX: ") for r in caplog.records)
+
+
+def test_label_is_prefixed_on_final_empty_giveup(caplog):
+    with caplog.at_level("WARNING"):
+        result = call_with_timeout_retry(
+            lambda: [], retries=1, backoff=0.01, is_empty=lambda r: not r, label="^VXN"
+        )
+    assert result == []
+    assert any("^VXN: " in r.message and "giving up" in r.message for r in caplog.records)
+
+
+def test_label_is_prefixed_on_exception_warning(caplog):
+    def _boom():
+        raise ValueError("down")
+
+    with caplog.at_level("WARNING"):
+        call_with_timeout_retry(_boom, retries=0, backoff=0.01, label="^VVIX")
+    assert any(r.message.startswith("^VVIX: ") for r in caplog.records)

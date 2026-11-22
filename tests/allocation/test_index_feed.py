@@ -132,3 +132,23 @@ class TestIndexFeed:
         a, b = IndexFeed("VIX", clock=clock), IndexFeed("VXN", clock=clock)
         assert a.current(Mock(return_value=_bars(("2026-09-16 08:00", 17.0)))) == 17.0
         assert b.current(Mock(return_value=_bars(("2026-09-16 08:00", 21.0)))) == 21.0
+
+    def test_warns_once_consecutive_failures_cross_threshold(self, caplog):
+        clock = _Clock("2026-09-16 10:05")
+        feed = IndexFeed("VIX", refresh_seconds=300, clock=clock)
+        fetcher = Mock(return_value=None)
+        with caplog.at_level("WARNING"):
+            for _ in range(3):
+                feed.current(fetcher)
+                clock.advance(seconds=301)
+        assert any("3 consecutive failed refreshes" in r.message for r in caplog.records)
+
+    def test_consecutive_failure_count_resets_on_success(self, caplog):
+        clock = _Clock("2026-09-16 10:05")
+        feed = IndexFeed("VIX", refresh_seconds=300, clock=clock)
+        fetcher = Mock(side_effect=[None, None, _bars(*DAY), None, None])
+        with caplog.at_level("WARNING"):
+            for _ in range(5):
+                feed.current(fetcher)
+                clock.advance(seconds=301)
+        assert not any("consecutive failed refreshes" in r.message for r in caplog.records)

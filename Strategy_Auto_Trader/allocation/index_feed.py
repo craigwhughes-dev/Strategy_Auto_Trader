@@ -29,6 +29,7 @@ _log = logging.getLogger(__name__)
 
 REFRESH_SECONDS = 300
 MAX_OUTAGE_SECONDS = 4 * 3600
+CONSECUTIVE_FAILURE_WARN_THRESHOLD = 3
 
 
 def _utc_now() -> pd.Timestamp:
@@ -63,6 +64,7 @@ class IndexFeed:
         self._first_attempt: pd.Timestamp | None = None
         self._last_attempt: pd.Timestamp | None = None
         self._last_success: pd.Timestamp | None = None
+        self._consecutive_failures = 0
 
     def current(self, fetcher: Callable[[], pd.DataFrame | None]) -> float | None:
         now = self._clock()
@@ -103,10 +105,21 @@ class IndexFeed:
             df = fetcher()
         except Exception as e:
             _log.error(f"Failed to fetch {self.name}: {e}")
+            self._note_failure()
             return
         if df is None or df.empty:
             _log.warning(f"{self.name}: fetch returned no data — keeping previous reading")
+            self._note_failure()
             return
         self._df = df
         self._last_success = now
+        self._consecutive_failures = 0
         _log.debug(f"{self.name} refreshed: {len(df)} rows")
+
+    def _note_failure(self) -> None:
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= CONSECUTIVE_FAILURE_WARN_THRESHOLD:
+            _log.warning(
+                f"{self.name}: {self._consecutive_failures} consecutive failed refreshes "
+                f"(sustained outage, not a one-off blip)"
+            )

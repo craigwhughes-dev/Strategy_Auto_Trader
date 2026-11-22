@@ -212,6 +212,7 @@ def _fetch_yf_index_hourly(yf_symbol: str) -> pd.DataFrame | None:
     df = call_with_timeout_retry(
         lambda: yf.download(yf_symbol, period="730d", interval="1h", progress=False, auto_adjust=True),
         is_empty=lambda df: df.empty,
+        label=yf_symbol,
     )
     if df is None or df.empty:
         return None

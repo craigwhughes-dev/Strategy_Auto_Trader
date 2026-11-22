@@ -26,6 +26,7 @@ def call_with_timeout_retry(
     retries: int = 1,
     backoff: float = 3.0,
     is_empty: Callable[[T], bool] | None = None,
+    label: str | None = None,
 ) -> T | None:
     """Call fn() with a hard per-attempt timeout, retrying on timeout, exception, or empty result.
 
@@ -41,26 +42,37 @@ def call_with_timeout_retry(
     as-is on the first attempt, same as any other call. Pass `is_empty` to treat
     that case as retryable too, e.g. `is_empty=lambda df: df.empty`.
 
+    `label` is prefixed to every log line this call emits (e.g. the symbol/ticker being
+    fetched) — without it, concurrent callers of a shared fetch helper (e.g. VIX/VXN/VVIX
+    all going through the same yfinance wrapper) log indistinguishable "attempt 1/2" lines,
+    making a multi-symbol outage look like one ambiguous event instead of three identifiable ones.
+
     Returns fn()'s result, or None if every attempt times out or raises.
     """
+    tag = f"{label}: " if label else ""
     for attempt in range(retries + 1):
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         future = pool.submit(fn)
         try:
             result = future.result(timeout=timeout)
             pool.shutdown(wait=False)
-            if is_empty is not None and is_empty(result) and attempt < retries:
+            if is_empty is not None and is_empty(result):
+                if attempt < retries:
+                    logger.warning(
+                        f"{tag}call_with_timeout_retry: attempt {attempt + 1}/{retries + 1} "
+                        f"returned empty result, retrying"
+                    )
+                    time.sleep(backoff * (attempt + 1))
+                    continue
                 logger.warning(
-                    f"call_with_timeout_retry: attempt {attempt + 1}/{retries + 1} "
-                    f"returned empty result, retrying"
+                    f"{tag}call_with_timeout_retry: attempt {attempt + 1}/{retries + 1} "
+                    f"returned empty result, giving up"
                 )
-                time.sleep(backoff * (attempt + 1))
-                continue
             return result
         except Exception as e:
             pool.shutdown(wait=False)
             logger.warning(
-                f"call_with_timeout_retry: attempt {attempt + 1}/{retries + 1} "
+                f"{tag}call_with_timeout_retry: attempt {attempt + 1}/{retries + 1} "
                 f"failed ({type(e).__name__}: {e})"
             )
             if attempt < retries:
