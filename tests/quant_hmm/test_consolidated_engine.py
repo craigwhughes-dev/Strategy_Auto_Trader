@@ -1058,3 +1058,222 @@ class TestConsolidatedEngine:
         reasons = sorted({re.sub(r"\([^)]*\)", "", r) for r in sells["sell_reason"]}) if len(sells) else []
         assert reasons == expected_reasons
 
+
+def _daily_df(close, high=None, low=None, volume=1000.0):
+    """One-bar-per-day df, used for the turtle-breakout engine tests below."""
+    close = np.asarray(close, dtype=float)
+    n = len(close)
+    idx = pd.date_range("2024-01-01", periods=n, freq="D")
+    return pd.DataFrame({
+        "Open": close,
+        "High": high if high is not None else close * 1.01,
+        "Low": low if low is not None else close * 0.99,
+        "Close": close,
+        "Volume": np.full(n, volume),
+    }, index=idx)
+
+
+class TestTurtleBreakoutEngine:
+    """Engine-level wiring for the turtle_breakout strategy: breakout-band
+    precompute (daily resample + broadcast) and the entry_levels()
+    price-level stop hook (consolidated_engine.py)."""
+
+    def test_precompute_breakout_bands_populated_when_requested(self):
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import _precompute_hourly_vote_series
+        idx = pd.date_range("2024-01-01", periods=60, freq="D")
+        close = pd.Series(np.linspace(100, 120, 60), index=idx)
+        high = close * 1.01
+        low = close * 0.99
+        pre = _precompute_hourly_vote_series(
+            close, None, high=high, low=low,
+            entry_lookback_days=5, exit_lookback_days=3, atr_period_days=5,
+        )
+        assert pre["breakout_entry_full"] is not None
+        assert pre["breakout_exit_full"] is not None
+        assert pre["atr_wilder_full"] is not None
+
+    def test_precompute_breakout_bands_none_without_lookback_args(self):
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import _precompute_hourly_vote_series
+        close = pd.Series(np.linspace(100, 120, 60))
+        pre = _precompute_hourly_vote_series(close, None)
+        assert pre["breakout_entry_full"] is None
+        assert pre["breakout_exit_full"] is None
+        assert pre["atr_wilder_full"] is None
+
+    def test_precompute_breakout_features_none_without_datetime_index(self):
+        """All three breakout-feature series are built from a resample to one
+        row per calendar day, which needs a real DatetimeIndex to group bars
+        into days — without one, every one of them must stay None rather than
+        silently fall back to a resolution-dependent approximation."""
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import _precompute_hourly_vote_series
+        close = pd.Series(np.linspace(100, 120, 60))
+        high = close * 1.01
+        low = close * 0.99
+        pre = _precompute_hourly_vote_series(
+            close, None, high=high, low=low,
+            entry_lookback_days=5, exit_lookback_days=3, atr_period_days=5,
+        )
+        assert pre["breakout_entry_full"] is None
+        assert pre["breakout_exit_full"] is None
+        assert pre["atr_wilder_full"] is None
+
+    def test_atr_computed_on_daily_ranges_not_mean_of_hourly_ranges(self):
+        """Regression test for the bug found on the first full UK live_sim run
+        (2026-11-22): computing ATR as an EWM over per-bar hourly true ranges
+        badly underestimates the real daily ATR (a day's full high/low range
+        is typically much larger than any single hour's slice of it), making
+        the turtle stop far tighter than the source rule intends. ATR must
+        instead be computed on a resample to one row per trading day."""
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import _precompute_hourly_vote_series, compute_atr_wilder
+
+        n_days = 60
+        bars_per_day = 8
+        days = pd.date_range("2024-01-01", periods=n_days, freq="D")
+        idx = pd.DatetimeIndex(np.concatenate([
+            pd.date_range(d.strftime("%Y-%m-%d") + " 08:00", periods=bars_per_day, freq="h").values
+            for d in days
+        ]))
+        # Each day: a handful of small hourly wiggles plus one bar carrying a
+        # large chunk of that day's real range, so the daily high/low spans far
+        # more than any single hourly bar's own high-low slice.
+        close = np.repeat(100.0 + np.arange(n_days, dtype=float), bars_per_day)
+        high = close + 0.05
+        low = close - 0.05
+        day_start = np.arange(n_days) * bars_per_day
+        high[day_start] = close[day_start] + 3.0   # one wide bar per day
+        low[day_start] = close[day_start] - 3.0
+
+        close_s = pd.Series(close, index=idx)
+        high_s = pd.Series(high, index=idx)
+        low_s = pd.Series(low, index=idx)
+        pre = _precompute_hourly_vote_series(
+            close_s, None, high=high_s, low=low_s,
+            entry_lookback_days=5, exit_lookback_days=3, atr_period_days=5,
+        )
+        atr_full = pre["atr_wilder_full"]
+        assert atr_full is not None
+        valid = atr_full[~np.isnan(atr_full)]
+        assert len(valid) > 0
+
+        # The old (buggy) approach: EWM over hourly true ranges with a
+        # bar-count window -- included here only to show it badly
+        # underestimates the correct value, not as a thing to match. Most
+        # hours in the window are quiet (~0.1 range); only one bar per day
+        # carries the real ~6-unit move, so its mean stays well below the
+        # true daily ATR even though it spikes briefly right after each wide
+        # bar -- a relative (not absolute) comparison is the robust check.
+        hourly_mean_atr = compute_atr_wilder(close_s, high_s, low_s, window=5 * bars_per_day).dropna()
+
+        # True daily range is ~6 (3 above + 3 below close); the correct
+        # (resample-to-daily) ATR should land close to that.
+        assert valid.max() > 4.0
+        assert hourly_mean_atr.mean() < valid.mean() * 0.5
+
+    def test_breakout_entry_level_excludes_current_day(self):
+        """entry_lookback_days=3 at day 3 should be the max high over days
+        [0, 2] — not including day 3 itself, and must not leak day 3's own
+        (same-day) intraday highs in either (regression for the shift(1)
+        on an hourly series only dropping one HOUR, not the whole day, found
+        on the full UK live_sim run on 2026-11-22)."""
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import _precompute_hourly_vote_series
+        idx = pd.date_range("2024-01-01", periods=5, freq="D")
+        high = pd.Series([10.0, 20.0, 30.0, 999.0, 5.0], index=idx)
+        close = pd.Series([10.0, 20.0, 30.0, 999.0, 5.0], index=idx)
+        low = high
+        pre = _precompute_hourly_vote_series(
+            close, None, high=high, low=low,
+            entry_lookback_days=3, exit_lookback_days=3, atr_period_days=3,
+        )
+        # At t=3 (the 999.0 day), the band must be max(high[0:3]) = 30.0, not 999.0.
+        assert pre["breakout_entry_full"][3] == 30.0
+
+    def test_breakout_entry_level_does_not_leak_same_day_intraday_highs(self):
+        """The core bug this test guards: an hourly rolling-max with a bare
+        shift(1) only excludes the immediately preceding HOUR, so a few hours
+        into any trading day it already includes that same day's own earlier
+        (lower) highs as part of what should be a fixed "yesterday's band"
+        value. The correct, day-resampled band must be identical for every
+        hourly bar within a given day."""
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import _precompute_hourly_vote_series
+        bars_per_day = 4
+        days = pd.date_range("2024-01-01", periods=6, freq="D")
+        idx = pd.DatetimeIndex(np.concatenate([
+            pd.date_range(d.strftime("%Y-%m-%d") + " 08:00", periods=bars_per_day, freq="h").values
+            for d in days
+        ]))
+        # Day 5 (bars 20-23) ramps up intraday (10, 20, 30, 40) -- a buggy
+        # hour-shifted rolling max would see an ever-changing band within
+        # that day as its own earlier hours enter the window.
+        close = np.concatenate([
+            np.full(4 * bars_per_day, 5.0),
+            [10.0, 20.0, 30.0, 40.0],
+            [5.0] * bars_per_day,
+        ])
+        high = close
+        low = close
+        close_s = pd.Series(close, index=idx)
+        pre = _precompute_hourly_vote_series(
+            close_s, None, high=pd.Series(high, index=idx), low=pd.Series(low, index=idx),
+            entry_lookback_days=3, exit_lookback_days=3, atr_period_days=3,
+        )
+        day5_band = pre["breakout_entry_full"][4 * bars_per_day: 5 * bars_per_day]
+        assert len(set(day5_band)) == 1, f"band must be constant within a day, got {day5_band}"
+
+    def test_turtle_breakout_end_to_end_buys_on_breakout_and_sets_atr_stop(self):
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import consolidated_backtest
+        from Strategy_Auto_Trader.strategy.turtle_breakout import TurtleEntry, TurtleExit
+
+        close = np.concatenate([np.full(10, 100.0), np.linspace(100, 140, 40)])
+        df = _daily_df(close)
+        entry = TurtleEntry(entry_lookback_days=5)
+        exit_ = TurtleExit(exit_lookback_days=3, atr_period_days=5, atr_mult=2.0)
+        result = consolidated_backtest(
+            df, entry_strategy=entry, exit_strategy=exit_,
+            min_train_bars=10, hmm_refit_bars=10, regime_smooth=1,
+        )
+        assert result["n_buys"] >= 1
+        detail = result["detail"]
+        buys = detail[detail["trade_event"] == "BUY"]
+        assert not buys.empty
+        first_stop = buys["stop_level"].iloc[0]
+        first_entry = buys["entry_price"].iloc[0]
+        # A flat 5% stop would be entry*0.95 — the ATR stop must differ from that
+        # (confirms entry_levels() is actually driving stop_level, not the
+        # pct-based fallback formula).
+        assert first_stop != pytest.approx(first_entry * 0.95)
+        assert first_stop < first_entry
+
+    def test_turtle_breakout_does_not_run_hmm(self):
+        """TurtleEntry's all-zero _weights must skip HMM refit (same
+        skip_unused_indicators convention as every other strategy)."""
+        from Strategy_Auto_Trader.quant_hmm.consolidated_engine import consolidated_backtest
+        from Strategy_Auto_Trader.strategy.turtle_breakout import TurtleEntry, TurtleExit
+
+        class SpyRegimeModel:
+            def __init__(self):
+                self.step_calls = 0
+
+            def needs_refit(self, t):
+                return False
+
+            def refit(self, returns):
+                pass
+
+            def step(self, returns, t):
+                self.step_calls += 1
+                return None
+
+            def reset(self):
+                pass
+
+        close = np.concatenate([np.full(10, 100.0), np.linspace(100, 140, 40)])
+        df = _daily_df(close)
+        spy = SpyRegimeModel()
+        consolidated_backtest(
+            df, regime_model=spy,
+            entry_strategy=TurtleEntry(entry_lookback_days=5),
+            exit_strategy=TurtleExit(exit_lookback_days=3, atr_period_days=5),
+            min_train_bars=10, hmm_refit_bars=10, regime_smooth=1,
+        )
+        assert spy.step_calls == 0
+

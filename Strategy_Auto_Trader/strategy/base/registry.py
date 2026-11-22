@@ -34,6 +34,7 @@ from ..optimised_new_param_tests import (
     OnRsiVeto75Entry, OnRsiVeto80Entry,
 )
 from ..trend_follow import TrendEntry, TrendExit
+from ..turtle_breakout import TurtleEntry, TurtleExit
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,10 @@ STRATEGY_REGISTRY: dict[str, dict[str, type]] = {
     "trend": {
         "entry": TrendEntry,
         "exit":  TrendExit,
+    },
+    "turtle_breakout": {
+        "entry": TurtleEntry,
+        "exit":  TurtleExit,
     },
     # ── buy_threshold / sell_threshold pair variants ──────────────────────────
     "on_bt50": {"entry": OnBt50Entry, "exit": OptimisedNewExit},

@@ -41,6 +41,7 @@ class BarData:
     rsi_ml: bool            # RSI momentum loss on this bar
     consol: bool            # Consolidation (BB + ATR squeeze) on this bar
     cur_rsi: float | None = None   # current-bar RSI value (for mean-reversion exits)
+    breakout_exit_level: float | None = None  # rolling lowest-low trailing stop (turtle_breakout)
 
 
 @dataclass

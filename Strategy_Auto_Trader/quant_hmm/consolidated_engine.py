@@ -30,7 +30,7 @@ import pandas as pd
 
 from ..core.momentum import (
     compute_rsi, compute_sma, composite_signal,
-    compute_parabolic_sar, compute_macd, compute_bollinger, compute_atr,
+    compute_parabolic_sar, compute_macd, compute_bollinger, compute_atr, compute_atr_wilder,
 )
 from ..core.quality_gate import _apply_quality_gate
 from ..core.exits import _effective_stop_for_bar, _check_exit_conditions
@@ -81,6 +81,11 @@ def _precompute_hourly_vote_series(
     sar_af_max: float = 0.20,
     rsi_enabled: bool = True,
     use_seasonal_volume: bool = False,
+    high: pd.Series | None = None,
+    low: pd.Series | None = None,
+    entry_lookback_days: int | None = None,
+    exit_lookback_days: int | None = None,
+    atr_period_days: int | None = None,
 ) -> dict:
     """Precompute all causal indicator series needed by the consolidated per-bar loop."""
     close_s = pd.Series(close) if not isinstance(close, pd.Series) else close
@@ -138,6 +143,54 @@ def _precompute_hourly_vote_series(
         sar_full = compute_parabolic_sar(close_s, af_start=sar_af_start,
                                          af_step=sar_af_step, af_max=sar_af_max)
 
+    # Turtle-breakout price-level bands (opt-in via entry_lookback_days etc.,
+    # see consolidated_backtest's needs_breakout_levels gate).
+    #
+    # All three series are computed on a resample to one row per completed
+    # trading day, then broadcast back onto that day's hourly bars, shifted
+    # by one day -- today's bars all see yesterday's completed-day values,
+    # same "the lines move only once a day... you already know tomorrow's
+    # entry level" convention as the source indicator. An earlier version
+    # computed the bands directly on the hourly series with entry_lookback
+    # converted to a bar-count and shift(1) to drop "today" -- but shift(1)
+    # on an hourly series only drops the immediately preceding HOUR, not the
+    # whole current day, so a few hours into any trading day the rolling
+    # window was already leaking that same day's own earlier highs/lows into
+    # what was supposed to be "yesterday's" band. ATR has the same problem in
+    # a different form: the mean of many small hourly true-ranges badly
+    # underestimates a real daily ATR (a day's full range is typically much
+    # larger than any single hour's slice of it). The daily resample fixes
+    # both at once.
+    breakout_entry_full = breakout_exit_full = atr_wilder_full = None
+    if (high is not None and low is not None and entry_lookback_days and exit_lookback_days
+            and atr_period_days and isinstance(close_s.index, pd.DatetimeIndex)):
+        high_s = pd.Series(high) if not isinstance(high, pd.Series) else high
+        low_s = pd.Series(low) if not isinstance(low, pd.Series) else low
+
+        daily = pd.DataFrame({"high": high_s.values, "low": low_s.values,
+                              "close": close_s.values}, index=close_s.index)
+        daily_ohlc = daily.resample("1D").agg(
+            {"high": "max", "low": "min", "close": "last"}).dropna()
+        bar_dates = pd.Series(close_s.index.date, index=close_s.index)
+
+        if len(daily_ohlc) > entry_lookback_days:
+            daily_entry = daily_ohlc["high"].rolling(entry_lookback_days).max().shift(1)
+            daily_entry.index = daily_entry.index.date
+            breakout_entry_full = bar_dates.map(daily_entry)
+
+        if len(daily_ohlc) > exit_lookback_days:
+            daily_exit = daily_ohlc["low"].rolling(exit_lookback_days).min().shift(1)
+            daily_exit.index = daily_exit.index.date
+            breakout_exit_full = bar_dates.map(daily_exit)
+
+        if len(daily_ohlc) > atr_period_days:
+            daily_atr = compute_atr_wilder(
+                daily_ohlc["close"], daily_ohlc["high"], daily_ohlc["low"],
+                window=atr_period_days,
+            ).shift(1)
+            daily_atr.index = daily_atr.index.date
+            atr_wilder_full = bar_dates.map(daily_atr)
+
     def _arr(s):
         """Series -> raw numpy array (or None). The per-bar loop indexes
         these tens of thousands of times; pandas .iloc[]/slicing carries per-
@@ -163,6 +216,9 @@ def _precompute_hourly_vote_series(
         "consol_full": _arr(consol_full),
         "bb_pctb_full": _arr(bb_pctb_full),
         "sar_full": _arr(sar_full),
+        "breakout_entry_full": _arr(breakout_entry_full),
+        "breakout_exit_full": _arr(breakout_exit_full),
+        "atr_wilder_full": _arr(atr_wilder_full),
     }
 
 
@@ -182,9 +238,16 @@ def _build_mom_snap(
     cur_sma50 = float(sma50_full[t])
 
     snap: dict = {
+        "cur_close": cur_close,
         "above_sma20": cur_close > cur_sma20,
         "above_sma50": cur_close > cur_sma50,
     }
+
+    breakout_entry_full = pre.get("breakout_entry_full")
+    if breakout_entry_full is not None and t < len(breakout_entry_full):
+        bev = breakout_entry_full[t]
+        if not np.isnan(bev):
+            snap["breakout_entry_level"] = float(bev)
 
     if rsi_full is not None:
         snap["cur_rsi"] = float(rsi_full[t])
@@ -480,6 +543,21 @@ def consolidated_backtest(
     returns = np.diff(np.log(close))
     n = len(close)
 
+    # Turtle-breakout price-level bands (see strategy/turtle_breakout.py) — opt-in,
+    # only computed when the entry or exit strategy declares needs_breakout_levels.
+    _needs_breakout_levels = (
+        getattr(entry_strategy, "needs_breakout_levels", False)
+        or getattr(exit_strategy, "needs_breakout_levels", False)
+    )
+    _entry_lookback_days = _exit_lookback_days = _atr_period_days = None
+    high = low = None
+    if _needs_breakout_levels:
+        high = df["High"].values.astype(float) if "High" in df.columns else None
+        low = df["Low"].values.astype(float) if "Low" in df.columns else None
+        _entry_lookback_days = getattr(entry_strategy, "entry_lookback_days", 20)
+        _exit_lookback_days = getattr(exit_strategy, "exit_lookback_days", 10)
+        _atr_period_days = getattr(exit_strategy, "atr_period_days", 20)
+
     if use_seasonal_volume and volume is not None and isinstance(dates, pd.DatetimeIndex):
         vol_ratio_arr = _compute_seasonal_volume_ratio(
             pd.Series(volume, index=dates), lookback_periods=20
@@ -509,6 +587,11 @@ def consolidated_backtest(
         sar_af_step=sar_af_step, sar_af_max=sar_af_max,
         rsi_enabled=rsi_enabled,
         use_seasonal_volume=use_seasonal_volume,
+        high=pd.Series(high, index=dates) if high is not None else None,
+        low=pd.Series(low, index=dates) if low is not None else None,
+        entry_lookback_days=_entry_lookback_days,
+        exit_lookback_days=_exit_lookback_days,
+        atr_period_days=_atr_period_days,
     )
 
     # ------------------------------------------------------------------
@@ -588,6 +671,11 @@ def consolidated_backtest(
                 rsi_ml=rsi_ml,
                 consol=consol,
                 cur_rsi=mom_snap.get("cur_rsi"),
+                breakout_exit_level=(
+                    float(pre["breakout_exit_full"][t])
+                    if pre.get("breakout_exit_full") is not None and not np.isnan(pre["breakout_exit_full"][t])
+                    else None
+                ),
             )
             exit_result = _exit.check(trade_state, bar_data)
             exit_hit = exit_result.exit_hit
@@ -637,8 +725,18 @@ def consolidated_backtest(
                 if raw_flag == "BUY" and decision.flag == "BUY":
                     position = sizer_plugin.position
                     entry_price = cur_close
-                    stop_level  = cur_close * (1 - _effective_stop)
-                    target_level = cur_close * (1 + _effective_target)
+                    if hasattr(_exit, "entry_levels"):
+                        # Price-level stop/target (e.g. turtle_breakout's ATR stop)
+                        # instead of the pct-off-entry formula below.
+                        atr_at_entry = (
+                            float(pre["atr_wilder_full"][t])
+                            if pre.get("atr_wilder_full") is not None and not np.isnan(pre["atr_wilder_full"][t])
+                            else None
+                        )
+                        stop_level, target_level = _exit.entry_levels(entry_price, atr_at_entry)
+                    else:
+                        stop_level  = cur_close * (1 - _effective_stop)
+                        target_level = cur_close * (1 + _effective_target)
                     entry_bar  = t
                     peak_price_since_entry = cur_close
                     days_in_trade = 0

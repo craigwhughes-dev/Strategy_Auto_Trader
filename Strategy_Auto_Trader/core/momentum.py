@@ -236,6 +236,16 @@ def compute_atr(close: pd.Series, high: pd.Series | None = None,
     return tr.rolling(window).mean()
 
 
+def compute_atr_wilder(close: pd.Series, high: pd.Series, low: pd.Series, window: int = 20) -> pd.Series:
+    """Wilder-smoothed ATR (standard turtle/ATR definition; compute_atr above is a
+    simple moving average instead, kept for the existing consolidation indicator)."""
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.ewm(alpha=1 / window, min_periods=window, adjust=False).mean()
+
+
 def exit_indicators(
     close: pd.Series,
     rsi: pd.Series | None = None,
